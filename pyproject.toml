@@ -1,0 +1,25 @@
+[project]
+name = "stacksift"
+version = "0.1.0"
+description = "A Python CLI tool that scans log files and summarizes recurring issues."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer",
+    "rich"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest"
+]
+
+[project.scripts]
+stacksift = "stacksift.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

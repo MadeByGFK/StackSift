@@ -1,0 +1,10 @@
+2026-07-07 09:15:22 INFO User login successful
+2026-07-07 09:16:01 WARN Slow database response detected
+2026-07-07 09:17:44 ERROR Failed to connect to payment service
+2026-07-07 09:18:03 ERROR Failed to connect to payment service
+2026-07-07 09:20:11 CRITICAL Application shutdown triggered
+2026-07-07 09:22:45 INFO Scheduled job completed
+2026-07-07 09:25:00 WARN Memory usage above threshold
+2026-07-07 09:27:13 ERROR Database timeout exceeded
+2026-07-07 09:29:48 ERROR Failed to connect to payment service
+2026-07-07 09:31:10 INFO User logout successful
