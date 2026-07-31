@@ -2,7 +2,7 @@
 
 StackSift is a Python command-line tool that turns noisy application logs into a quick, readable summary.
 
-It scans a log file, counts severity levels, surfaces recurring issues, prints the results in clean terminal tables, and saves a text report for later review.
+It scans a log file or folder, counts severity levels, surfaces recurring issues, reports malformed lines, prints the results in clean terminal tables, and saves a text report for later review.
 
 ## Why StackSift?
 
@@ -10,14 +10,18 @@ Log files are useful, but manually scanning hundreds or thousands of lines is sl
 
 - How many warnings, errors, and critical events occurred?
 - Which issues appeared most often?
-- Was the file parsed successfully?
+- Which files were included in the scan?
+- How many lines could not be parsed?
 - What should I investigate first?
 
 ## Current Features
 
-- Analyze a single application log file
+- Analyze a single log file or a folder of log files
 - Count `INFO`, `WARN`, `ERROR`, and `CRITICAL` entries
 - Identify repeated issue messages
+- Sort issues by severity and occurrence count
+- Report parsed and malformed lines
+- Display scanned files and elapsed scan time
 - Display results with Rich terminal tables
 - Save a plain-text analysis report
 - Install as a local `stacksift` CLI command
@@ -52,10 +56,16 @@ On Windows PowerShell, activate the environment with:
 
 ## Usage
 
-Analyze a log file:
+Analyze one log file:
 
 ```bash
 stacksift analyze sample_logs/app.log
+```
+
+Analyze every supported log file in a folder:
+
+```bash
+stacksift analyze sample_logs
 ```
 
 StackSift prints the summary to the terminal and saves a text report.
@@ -65,24 +75,27 @@ StackSift prints the summary to the terminal and saves a text report.
 ```text
 StackSift Summary
 
-File: sample_logs/app.log
+File: sample_logs
 Total lines: 10
-Parsed lines: 10
+Parsed lines: 9
+Malformed lines: 1
+Scan time: 0.003s
+Files scanned: 2
 
 Log Levels
 INFO       3
 WARN       2
-ERROR      4
+ERROR      3
 CRITICAL   1
 
-Top Issues
-Database connection failed   3
-Request timed out            2
+Issues
+ERROR      Database connection failed   3
+WARN       Request timed out            2
 
-Report saved to: reports/app_report.txt
+Report saved to: reports/sample_logs_report.txt
 ```
 
-The exact issue text and report path depend on the analyzed file.
+The exact issue text, counts, scanned files, and report path depend on the analyzed input.
 
 ## Expected Log Format
 
@@ -95,7 +108,7 @@ StackSift is currently designed for simple application logs containing recogniza
 2026-07-31 09:15:24 CRITICAL Service unavailable
 ```
 
-Malformed or unsupported lines may not be included in the parsed-line count.
+Malformed or unsupported lines are counted separately rather than included in the parsed-line total.
 
 ## Development
 
@@ -118,7 +131,10 @@ StackSift/
 ├── src/
 │   └── stacksift/
 │       ├── analyzer.py
-│       └── cli.py
+│       ├── cli.py
+│       ├── insights.py
+│       ├── parser.py
+│       └── reports.py
 ├── tests/
 ├── sample_logs/
 ├── pyproject.toml
@@ -129,16 +145,15 @@ StackSift/
 
 Planned improvements include:
 
-- Folder and multi-file scanning
 - CSV and HTML exports
 - Error-spike detection
 - More flexible parsing patterns
-- Trend and health insights
+- Health and trend insights in CLI output
 - Configurable report output
 
 ## Status
 
-StackSift is an early-stage project currently released as **v0.1.0**. The core analysis workflow works, while additional parsing, reporting, and multi-file features are still being developed.
+StackSift is an early-stage project currently released as **v0.1.0**. File and folder analysis are working, while richer reporting and operational insights are still being developed.
 
 ## Author
 
