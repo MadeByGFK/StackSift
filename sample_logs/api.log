@@ -1,0 +1,7 @@
+2026-07-07 10:01:11 INFO API server started
+2026-07-07 10:02:24 INFO GET /health 200
+2026-07-07 10:04:32 WARN Rate limit approaching
+2026-07-07 10:05:09 ERROR Unauthorized API request
+2026-07-07 10:05:44 ERROR Unauthorized API request
+2026-07-07 10:06:01 ERROR Database timeout exceeded
+2026-07-07 10:08:17 CRITICAL API gateway unavailable
