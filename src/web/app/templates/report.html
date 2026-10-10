@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift report — {{ filename }}</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="logo"><a href="/" style="color:var(--text);text-decoration:none">Stack<span>Sift</span></a></div>
+    <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+  </header>
+
+  <section class="report-head">
+    <h2>{{ filename }}</h2>
+    <div class="meta">
+      Analyzed in {{ "%.2f"|format(elapsed) }}s ·
+      {% if detected_format == "jsonlines" %}
+        JSON-lines detected, auto-converted for analysis
+      {% else %}
+        Plain-text log format
+      {% endif %}
+    </div>
+    <div>
+      <span class="badge {{ health.color }}">{{ health.label }}</span>
+    </div>
+  </section>
+
+  <div class="stats">
+    <div class="stat"><div class="num">{{ results.total_lines }}</div><div class="lbl">Total lines</div></div>
+    <div class="stat"><div class="num">{{ results.parsed_lines }}</div><div class="lbl">Parsed</div></div>
+    <div class="stat"><div class="num">{{ results.malformed_lines }}</div><div class="lbl">Malformed</div></div>
+    <div class="stat"><div class="num">{{ sorted_issues|length }}</div><div class="lbl">Unique issues</div></div>
+  </div>
+
+  {% if top_issue %}
+  <div class="callout">
+    <div class="k">Investigate first</div>
+    <div class="v">[{{ top_issue[1].level }}] {{ top_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ top_issue[1].count }}</span></div>
+  </div>
+  {% endif %}
+
+  <h3 class="section-title">Severity breakdown</h3>
+  {% set max_count = [results.level_counts.get("CRITICAL",0), results.level_counts.get("ERROR",0), results.level_counts.get("WARN",0), results.level_counts.get("INFO",0)]|max %}
+  {% for level, cls in [("CRITICAL","critical"),("ERROR","error"),("WARN","warn"),("INFO","info")] %}
+  {% set count = results.level_counts.get(level, 0) %}
+  <div class="sev-row">
+    <div class="name">{{ level }}</div>
+    <div class="bar-wrap"><div class="bar {{ cls }}" style="width: {{ (count / max_count * 100) if max_count else 0 }}%"></div></div>
+    <div class="count">{{ count }}</div>
+  </div>
+  {% endfor %}
+
+  <h3 class="section-title">Issues <span style="color:var(--muted);font-weight:400;font-size:14px">— sorted by severity, then frequency</span></h3>
+  {% if sorted_issues %}
+  <div class="card" style="padding:0 20px">
+    <table class="issues">
+      <thead><tr><th>Severity</th><th>Message</th><th style="text-align:right">Count</th></tr></thead>
+      <tbody>
+      {% for issue, data in sorted_issues %}
+        <tr>
+          <td><span class="pill {{ data.level }}">{{ data.level }}</span></td>
+          <td>{{ issue }}</td>
+          <td style="text-align:right;color:var(--muted)">× {{ data.count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card"><p>No warnings, errors, or critical entries found. Quiet logs — enjoy it.</p></div>
+  {% endif %}
+
+  {% if results.malformed_lines > 0 %}
+  <div class="notice">
+    ⚠️ <strong>{{ results.malformed_lines }}</strong> line{{ "s" if results.malformed_lines != 1 }} couldn't be parsed and {{ "was" if results.malformed_lines == 1 else "were" }} excluded.
+    <br><small>StackSift reads lines shaped like <code>2026-10-10 09:15:22 ERROR something broke</code> or JSON-lines with level/message fields. Multiline stack traces count here too — each continuation line is one malformed line.</small>
+  </div>
+  {% endif %}
+
+  {% if adapted %}
+  <div class="notice">
+    ℹ️ Your file was detected as <strong>JSON-lines</strong> and converted automatically.
+    <br><small>DEBUG/TRACE entries are folded into INFO for now — native multi-format parsing is on the roadmap.</small>
+  </div>
+  {% endif %}
+
+  <div class="actions" style="margin-top:28px">
+    <a href="/"><button type="button" class="btn-primary">Analyze another file</button></a>
+  </div>
+
+  <p class="privacy">This report was generated in memory. Your file was deleted the moment analysis finished — nothing was stored.</p>
+
+  <footer>
+    StackSift · a Goodfolk Digital project · <a href="https://github.com/MadeByGFK/StackSift">CLI on GitHub</a>
+  </footer>
+
+</div>
+</body>
+</html>

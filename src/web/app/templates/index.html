@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift — Drop in a log file. Get an incident summary.</title>
+<meta name="description" content="StackSift turns noisy application logs into a quick, readable incident summary. Free, no signup, your file is deleted after analysis.">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="logo">Stack<span>Sift</span></div>
+    <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+  </header>
+
+  <section class="hero">
+    <h1>Drop in a log file.<br>Get an <span>incident summary</span>.</h1>
+    <p>StackSift scans your logs and tells you what broke, how often, and what to investigate first — in seconds, not hours.</p>
+  </section>
+
+  {% if error %}
+  <div class="error">{{ error }}</div>
+  {% endif %}
+
+  <form id="upload-form" action="/analyze" method="post" enctype="multipart/form-data">
+    <div class="dropzone" id="dropzone">
+      <div class="big">Drag &amp; drop your log file here</div>
+      <div class="small">or click to browse — .log or .txt, up to 10 MB</div>
+      <div class="filename" id="filename"></div>
+      <input type="file" id="file-input" name="file" accept=".log,.txt,.text">
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn-primary" name="output" value="html">Analyze my logs</button>
+      <button type="submit" class="btn-ghost" name="output" value="txt">Download .txt report</button>
+    </div>
+  </form>
+  <p class="rate-note">Free tier: {{ remaining }} of 10 analyses left this hour · No signup · No storage</p>
+
+  <div class="info-grid">
+    <div class="card">
+      <h3>Supported formats</h3>
+      <p>Plain-text logs with a severity label:</p>
+      <pre class="format">2026-10-10 09:15:22 ERROR Database connection failed</pre>
+      <p style="margin-top:10px">…plus <strong>JSON-lines</strong>, auto-detected and converted:</p>
+      <pre class="format">{"timestamp":"2026-10-10T09:15:22Z","level":"error","message":"..."}</pre>
+    </div>
+    <div class="card">
+      <h3>Private by design</h3>
+      <ul>
+        <li>Your file is analyzed <strong>in memory</strong> and deleted immediately after.</li>
+        <li>Nothing is stored, logged, or used to train anything.</li>
+        <li>No account, no cookies, no tracking of file contents.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>What you get</h3>
+      <ul>
+        <li>Severity counts (INFO / WARN / ERROR / CRITICAL)</li>
+        <li>Recurring issues ranked by severity and frequency</li>
+        <li>A health verdict and the #1 thing to investigate</li>
+        <li>Malformed-line report so you know what was skipped</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Built by someone on-call</h3>
+      <p>StackSift is built by a production support analyst who triages 120+ incidents a month. It's the first five minutes of an incident, automated.</p>
+      <p>CLI version available on <a href="https://github.com/MadeByGFK/StackSift" style="color:var(--accent)">GitHub</a>.</p>
+    </div>
+  </div>
+
+  <footer>
+    StackSift · a Goodfolk Digital project · Your file is deleted the moment analysis finishes.
+  </footer>
+
+</div>
+<script>
+const dz = document.getElementById('dropzone');
+const fi = document.getElementById('file-input');
+const fn = document.getElementById('filename');
+dz.addEventListener('click', () => fi.click());
+fi.addEventListener('change', () => {
+  fn.textContent = fi.files.length ? 'Selected: ' + fi.files[0].name : '';
+});
+['dragenter','dragover'].forEach(e => dz.addEventListener(e, ev => { ev.preventDefault(); dz.classList.add('dragover'); }));
+['dragleave','drop'].forEach(e => dz.addEventListener(e, ev => { ev.preventDefault(); dz.classList.remove('dragover'); }));
+dz.addEventListener('drop', ev => {
+  if (ev.dataTransfer.files.length) {
+    fi.files = ev.dataTransfer.files;
+    fn.textContent = 'Selected: ' + ev.dataTransfer.files[0].name;
+  }
+});
+</script>
+</body>
+</html>

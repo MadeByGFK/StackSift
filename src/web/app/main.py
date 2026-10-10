@@ -1,0 +1,111 @@
+"""StackSift web — free log-file analyzer.
+
+Thin slice: upload a log file, get an incident summary. No accounts, no
+storage. Rate-limited free tier; auth + credits come later once usage proves
+demand.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from app.rate_limit import RateLimiter
+from app.service import analyze_upload, render_text_report
+
+BASE_DIR = Path(__file__).resolve().parent
+
+app = FastAPI(title="StackSift", docs_url=None, redoc_url=None)
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+# Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
+limiter = RateLimiter(max_requests=10, window_seconds=3600)
+
+MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_SUFFIXES = {".log", ".txt", ".text"}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse(
+        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request))}
+    )
+
+
+@app.post("/analyze")
+async def analyze(
+    request: Request,
+    file: UploadFile = File(...),
+    output: str = Form("html"),
+):
+    ip = _client_ip(request)
+
+    def error(message: str, status: int = 400):
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {"error": message, "remaining": limiter.remaining(ip)},
+            status_code=status,
+        )
+
+    if not file.filename:
+        return error("Please choose a file first.")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        return error(
+            f"Only {', '.join(sorted(ALLOWED_SUFFIXES))} files are supported "
+            f"(got '{suffix or 'no extension'}')."
+        )
+
+    content = await file.read()
+    if not content.strip():
+        return error("That file is empty — nothing to analyze.")
+    if len(content) > MAX_BYTES:
+        return error("That file is over the 10 MB free-tier limit.")
+
+    if not limiter.allowed(ip):
+        return error(
+            "Free-tier limit reached (10 analyses/hour). Please try again later.",
+            status=429,
+        )
+
+    # The upload is analyzed from a temp file and deleted immediately —
+    # see app/service.py. Nothing is stored.
+    data = analyze_upload(file.filename, content)
+
+    if output == "txt":
+        report = render_text_report(data)
+        stem = Path(file.filename).stem
+        return PlainTextResponse(
+            report,
+            headers={"Content-Disposition": f'attachment; filename="{stem}-stacksift.txt"'},
+        )
+
+    return templates.TemplateResponse(request, "report.html", data)
