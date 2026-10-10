@@ -143,5 +143,4 @@ active development.
 
 ## Author
 
-Built by Kolby Kinsey as a practical developer tool for faster log triage and
-operational troubleshooting.
+Built by [K](https://github.com/GFK) as a practical developer tool for faster log triage and operational troubleshooting.
