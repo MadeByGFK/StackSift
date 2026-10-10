@@ -157,4 +157,4 @@ StackSift is an early-stage project currently released as **v0.1.0**. File and f
 
 ## Author
 
-Built by [Kolby Kinsey](https://github.com/GFKolby) as a practical developer tool for faster log triage and operational troubleshooting.
+Built by [K](https://github.com/GFK) as a practical developer tool for faster log triage and operational troubleshooting.
