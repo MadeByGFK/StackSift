@@ -1,48 +1,51 @@
 # StackSift
 
-StackSift is a Python command-line tool that turns noisy application logs into a quick, readable summary.
+Turn noisy application logs into a quick, readable incident summary.
 
-It scans a log file or folder, counts severity levels, surfaces recurring issues, reports malformed lines, prints the results in clean terminal tables, and saves a text report for later review.
+**🌐 Try it in your browser — free, no signup:**
+**https://stacksift.goodfolkdigital.com**
+
+Drop in a `.log` file and get severity counts, recurring issues ranked by
+severity and frequency, a health verdict, and the #1 thing to investigate
+first. Your file is analyzed in memory and deleted immediately — nothing is
+ever stored.
+
+Prefer the terminal? StackSift is also a Python CLI (see below).
 
 ## Why StackSift?
 
-Log files are useful, but manually scanning hundreds or thousands of lines is slow and repetitive. StackSift provides a fast first pass so you can answer questions like:
+Log files are useful, but manually scanning hundreds or thousands of lines is
+slow and repetitive. StackSift gives you a fast first pass so you can answer
+questions like:
 
 - How many warnings, errors, and critical events occurred?
 - Which issues appeared most often?
-- Which files were included in the scan?
-- How many lines could not be parsed?
 - What should I investigate first?
 
-## Current Features
+It's the first five minutes of an incident, automated — built by a production
+support analyst who triages 120+ incidents a month.
 
-- Analyze a single log file or a folder of log files
-- Count `INFO`, `WARN`, `ERROR`, and `CRITICAL` entries
-- Identify repeated issue messages
-- Sort issues by severity and occurrence count
-- Report parsed and malformed lines
-- Display scanned files and elapsed scan time
-- Display results with Rich terminal tables
-- Save a plain-text analysis report
-- Install as a local `stacksift` CLI command
-- Run automated tests with pytest
+## Web version
 
-## Tech Stack
+The hosted version lives at
+[stacksift.goodfolkdigital.com](https://stacksift.goodfolkdigital.com):
 
-- Python 3.10+
-- Typer
-- Rich
-- pytest
-- setuptools
+- Drag-and-drop upload (`.log` / `.txt`, up to 10 MB)
+- Plain-text logs plus auto-detected **JSON-lines**
+- Beautiful HTML incident report, or download a `.txt` summary
+- Free tier: 10 analyses/hour, no account needed
+- Private by design: files are processed in memory and deleted on the spot
 
-## Installation
+The web app is a thin FastAPI wrapper around the analyzer in this repo. Want
+to host your own? See `web/README.md`.
 
-Clone the repository and create a virtual environment:
+## CLI
 
-```bash
-git clone https://github.com/GFKolby/StackSift.git
+### Installation
+
+```
+git clone https://github.com/MadeByGFK/StackSift.git
 cd StackSift
-
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -50,31 +53,30 @@ pip install -e ".[dev]"
 
 On Windows PowerShell, activate the environment with:
 
-```powershell
+```
 .venv\Scripts\Activate.ps1
 ```
 
-## Usage
+### Usage
 
 Analyze one log file:
 
-```bash
+```
 stacksift analyze sample_logs/app.log
 ```
 
 Analyze every supported log file in a folder:
 
-```bash
+```
 stacksift analyze sample_logs
 ```
 
 StackSift prints the summary to the terminal and saves a text report.
 
-## Example Output
+### Example Output
 
-```text
+```
 StackSift Summary
-
 File: sample_logs
 Total lines: 10
 Parsed lines: 9
@@ -95,66 +97,51 @@ WARN       Request timed out            2
 Report saved to: reports/sample_logs_report.txt
 ```
 
-The exact issue text, counts, scanned files, and report path depend on the analyzed input.
+The exact issue text, counts, scanned files, and report path depend on the
+analyzed input.
 
-## Expected Log Format
+### Expected Log Format
 
-StackSift is currently designed for simple application logs containing recognizable severity labels such as:
+StackSift reads simple application logs containing recognizable severity
+labels such as:
 
-```text
+```
 2026-07-31 09:15:02 INFO Application started
 2026-07-31 09:15:10 WARN Response time exceeded threshold
 2026-07-31 09:15:22 ERROR Database connection failed
 2026-07-31 09:15:24 CRITICAL Service unavailable
 ```
 
-Malformed or unsupported lines are counted separately rather than included in the parsed-line total.
+The web version additionally auto-detects JSON-lines
+(`{"timestamp": "...", "level": "error", "message": "..."}`). Malformed or
+unsupported lines are counted separately rather than silently dropped.
 
-## Development
+## Privacy
 
-Run the test suite:
+- The web version analyzes uploads in memory and deletes them immediately.
+  Nothing is stored, logged, or used to train anything.
+- The CLI runs entirely on your machine — your logs never leave it.
 
-```bash
-pytest
-```
+## Tech Stack
 
-Run the CLI without installing the command globally:
-
-```bash
-python -m stacksift.cli analyze sample_logs/app.log
-```
-
-## Project Structure
-
-```text
-StackSift/
-├── src/
-│   └── stacksift/
-│       ├── analyzer.py
-│       ├── cli.py
-│       ├── insights.py
-│       ├── parser.py
-│       └── reports.py
-├── tests/
-├── sample_logs/
-├── pyproject.toml
-└── README.md
-```
+- Python 3.10+
+- Typer, Rich, pytest, setuptools
+- Web: FastAPI + Jinja2 (see `web/`)
 
 ## Roadmap
 
-Planned improvements include:
-
-- CSV and HTML exports
+- Native multi-format parsing (JSON-lines, multiline stack traces) in the core library
+- CSV and HTML exports from the CLI
 - Error-spike detection
-- More flexible parsing patterns
-- Health and trend insights in CLI output
-- Configurable report output
+- AI "likely root cause" summaries (web, premium tier)
 
 ## Status
 
-StackSift is an early-stage project currently released as **v0.1.0**. File and folder analysis are working, while richer reporting and operational insights are still being developed.
+StackSift is an early-stage project, released as **v0.1.0**. File and folder
+analysis are working; richer reporting and operational insights are under
+active development.
 
 ## Author
 
-Built by [Kolby Kinsey](https://github.com/GFKolby) as a practical developer tool for faster log triage and operational troubleshooting.
+Built by Kolby Kinsey as a practical developer tool for faster log triage and
+operational troubleshooting.
