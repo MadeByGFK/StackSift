@@ -18,7 +18,7 @@ from stacksift.scanner import find_log_files
 _ID_FIELDS = {
     "request_id", "trace_id", "span_id", "correlation_id", "session_id",
     "connection_id", "order_id", "user_id", "client_id", "device_id",
-    "idempotency_key",
+    "idempotency_key", "operation_id",
 }
 
 # Fields that identify WHERE something happened (hosts, nodes, instances).
