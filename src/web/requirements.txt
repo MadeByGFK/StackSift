@@ -3,4 +3,4 @@ uvicorn[standard]>=0.30
 jinja2>=3.1
 python-multipart>=0.0.9
 # StackSift analyzer library (public repo)
-stacksift @ git+https://github.com/MadeByGFK/StackSift.git@e3fc0f5e2b1afc4fbdfb76a2170ae6e9ab3fb61e
+stacksift @ git+https://github.com/MadeByGFK/StackSift.git@43384b0c7b5bbd662aa676d6eb05e1d9450e1954
