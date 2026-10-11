@@ -214,3 +214,39 @@ def test_family_ordering_by_role_not_score():
     # transaction_hold (possible_contributor, order=1) before checkout (order=4)
     assert groups[0]["family"] == "transaction_hold"
     assert groups[1]["family"] == "checkout_failure"
+
+
+def test_explain_ranking_returns_list():
+    """Regression test for mobile rendering bug.
+
+    The template uses {{ diagnostic_explanation|join(' · ') }}.
+    If explain_ranking returns a string, Jinja iterates characters,
+    producing S·c·o·r·e·:··3·.·3 — unreadable on mobile.
+    Must return a list.
+    """
+    from stacksift.diagnostics import explain_ranking
+    evidence = {
+        "temporal_alignment": {"score": 1, "tier": "correlated", "detail": "test detail"},
+        "severity": {"score": 0.6, "tier": "observed", "detail": "WARN severity"},
+        "_has_timing": True,
+    }
+    result = explain_ranking("template", 3.3, evidence)
+    assert isinstance(result, list), f"must return list, got {type(result).__name__}"
+    assert len(result) == 2
+    # Simulate Jinja join — must not produce character separation
+    joined = " · ".join(result)
+    assert "S·c·o·r·e" not in joined
+    assert "test detail" in joined
+
+
+def test_explain_ranking_skips_internal_keys():
+    """Internal metadata (_has_timing) must not appear in output."""
+    from stacksift.diagnostics import explain_ranking
+    evidence = {
+        "severity": {"score": 0.6, "tier": "observed", "detail": "WARN"},
+        "_has_timing": True,
+        "_internal": "should not appear",
+    }
+    result = explain_ranking("t", 1.0, evidence)
+    assert len(result) == 1
+    assert result[0] == "WARN"

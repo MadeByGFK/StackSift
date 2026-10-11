@@ -355,15 +355,25 @@ def rank_candidates(issues, timeline_buckets):
 def explain_ranking(template, score, evidence):
     """Human-readable explanation of why a candidate ranked where it did.
 
-    Distinguishes observed facts from correlations from hypotheses.
+    Returns a list of strings (one per evidence point) for template joining.
+    Uses plain language, not raw scoring internals.
     """
-    lines = [f"Score: {score:.1f}"]
+    points = []
     for signal, data in evidence.items():
-        if data["score"] > 0:
-            lines.append(
-                f"  [{data['tier']}] {signal}: {data['score']} — {data['detail']}"
-            )
-    return "\n".join(lines)
+        if signal.startswith("_"):
+            continue  # skip internal metadata
+        if data["score"] <= 0:
+            continue
+        tier = data["tier"]
+        detail = data["detail"]
+        # Human-readable, tier-aware phrasing
+        if tier == "observed":
+            points.append(detail)
+        elif tier == "correlated":
+            points.append(f"Correlated: {detail}")
+        elif tier == "hypothesized":
+            points.append(f"Possible link: {detail}")
+    return points
 
 
 # --- Phase D: Presentation layer ----------------------------------------
