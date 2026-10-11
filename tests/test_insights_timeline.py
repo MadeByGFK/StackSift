@@ -142,6 +142,46 @@ def test_declining_not_recovering():
     assert "recovering" not in phases
 
 
+def test_field_aware_signal_cert_beats_notification():
+    # Benchmark #2: certificate failure must outrank unrelated
+    # notification failure even though both are rare ERRORs.
+    from stacksift.insights import most_diagnostic_issue
+    from stacksift.analyzer import normalize_issue
+    issues = {
+        normalize_issue("[notification-service] delivery_failed reason=recipient_rejected retryable=false"): {"level": "ERROR", "count": 1},
+        normalize_issue("[auth-service] certificate_check_failed verification=X509_V_ERR_CERT_HAS_EXPIRED"): {"level": "ERROR", "count": 1},
+    }
+    diag = most_diagnostic_issue(issues)
+    assert "certificate_check_failed" in diag[0]
+
+
+def test_retryable_false_is_not_diagnostic():
+    # retryable=false is metadata ("don't retry"), not a diagnosis.
+    from stacksift.insights import diagnostic_score
+    s = diagnostic_score("ERROR", "delivery_failed retryable=false", 1)
+    assert s < diagnostic_score(
+        "ERROR", "certificate_check_failed verification=X509_V_ERR_CERT_HAS_EXPIRED", 1)
+
+
+def test_field_name_id_normalization():
+    # Benchmark #2: rq-02-0000 format must group like req-12345 did.
+    from stacksift.analyzer import normalize_issue
+    m1 = "token_validation_failed request_id=rq-02-0021 node=auth-a reason=x"
+    m2 = "token_validation_failed request_id=rq-02-0022 node=auth-a reason=x"
+    n1, n2 = normalize_issue(m1), normalize_issue(m2)
+    assert n1 == n2
+    assert "rq-02" not in n1
+    # meaningful values preserved
+    assert "reason=x" in n1
+
+
+def test_timestamp_values_normalized():
+    from stacksift.analyzer import normalize_issue
+    m1 = "token_validation_failed token_exp=2026-07-10T15:00:00.000Z reason=x"
+    m2 = "token_validation_failed token_exp=2026-07-11T15:00:00.000Z reason=x"
+    assert normalize_issue(m1) == normalize_issue(m2)
+
+
 def test_first_last_seen():
     from stacksift.analyzer import analyze_log_file
     import tempfile, os

@@ -29,15 +29,49 @@ DIAGNOSTIC_KEYWORDS = [
     "starvation",
 ]
 
-# Generic failure values: key=value pairs where the value signals failure.
-# Domain-agnostic — catches release_observed=false as well as
-# cert_expired=true or auth_result=denied.
+# Field-aware failure signals.
+# A bare `=false` is not diagnostic by itself — `retryable=false` just means
+# "don't retry", while `verification=X509_V_ERR_CERT_HAS_EXPIRED` names the
+# actual problem. So we weigh the FIELD, not just the value:
+# - high-value fields (verification, reason, error, ...) carry diagnosis
+# - low-value fields (retryable, dropped, counters) are metadata
+# - specific values (X509_V_ERR_CERT_HAS_EXPIRED) beat generic ones (false)
 import re as _re
-_FAILURE_VALUE = _re.compile(
-    r"\b\w+=(false|failed|failure|expired|invalid|denied|refused|timeout|"
-    r"timed_out|unreachable|corrupt|exhausted)\b",
-    _re.IGNORECASE,
-)
+
+_FAILURE_WORDS = {
+    "false", "failed", "failure", "expired", "invalid", "denied",
+    "refused", "timeout", "timed_out", "unreachable", "corrupt",
+    "exhausted", "rejected",
+}
+_HIGH_VALUE_FIELDS = {
+    "verification", "reason", "error", "exception", "cause",
+    "failure", "result", "status_detail", "release_observed",
+    "cert_status", "auth_result",
+}
+_LOW_VALUE_FIELDS = {
+    "retryable", "dropped", "queue_items", "delay_ms", "duration_ms",
+    "attempt", "max_attempts",
+}
+# e.g. X509_V_ERR_CERT_HAS_EXPIRED — long, structured, specific.
+_SPECIFIC_VALUE = _re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){2,}\b")
+_KV_PAIR = _re.compile(r"\b(\w+)=([A-Za-z0-9_\-\.]+)")
+
+
+def _failure_signal_strength(message: str) -> int:
+    """0 = none, 1 = generic, 2 = strong. Field-aware, not just value-aware."""
+    best = 0
+    for match in _KV_PAIR.finditer(message):
+        key, value = match.group(1).lower(), match.group(2)
+        if key in _LOW_VALUE_FIELDS:
+            continue
+        lowered_value = value.lower()
+        has_failure_word = any(fw in lowered_value for fw in _FAILURE_WORDS)
+        is_specific = bool(_SPECIFIC_VALUE.search(value))
+        if key in _HIGH_VALUE_FIELDS and (has_failure_word or is_specific):
+            return 2
+        if has_failure_word or is_specific:
+            best = max(best, 1)
+    return best
 
 
 def diagnostic_score(level: str, message: str, count: int) -> float:
@@ -52,11 +86,15 @@ def diagnostic_score(level: str, message: str, count: int) -> float:
     weight = SEVERITY_WEIGHT.get(level, 1)
     lowered = message.lower()
     keyword_hits = sum(1 for kw in DIAGNOSTIC_KEYWORDS if kw in lowered)
-    # Generic signal: failure-indicating key=value pairs (e.g.
-    # release_observed=false, cert_status=expired). Counts as one
-    # keyword hit so it can't dominate on its own.
-    failure_values = len(_FAILURE_VALUE.findall(message))
-    keyword_hits += min(failure_values, 1)
+    # Field-aware failure signal (0-2): strong signals like
+    # verification=X509_V_ERR_CERT_HAS_EXPIRED count double; generic
+    # metadata like retryable=false counts for nothing.
+    keyword_hits += _failure_signal_strength(message)
+    # Specificity: structured error codes (X509_V_ERR_..., SQLSTATE_...)
+    # are more diagnostic than prose values. Capped so it breaks ties
+    # between strong signals without dominating.
+    if _SPECIFIC_VALUE.search(message):
+        keyword_hits += 1
     rarity_nudge = min(0.5, 2.0 / max(count, 1))
     return weight * (1 + keyword_hits) + rarity_nudge
 
@@ -83,10 +121,23 @@ def diagnostic_reasons(level: str, message: str, count: int) -> list[str]:
     hits = [kw for kw in DIAGNOSTIC_KEYWORDS if kw in lowered]
     if hits:
         reasons.append(f"Diagnostic keywords: {', '.join(hits)}")
-    failures = _FAILURE_VALUE.findall(message)
-    if failures:
-        unique = sorted({f.lower() for f in failures})
-        reasons.append(f"Failure signals: {', '.join(unique)}")
+    strength = _failure_signal_strength(message)
+    if strength >= 2:
+        # Surface the actual high-value finding, not just "failure".
+        specifics = []
+        for match in _KV_PAIR.finditer(message):
+            key, value = match.group(1), match.group(2)
+            if key.lower() in _HIGH_VALUE_FIELDS and (
+                any(fw in value.lower() for fw in _FAILURE_WORDS)
+                or _SPECIFIC_VALUE.search(value)
+            ):
+                specifics.append(f"{key}={value}")
+        if specifics:
+            reasons.append(f"Failure signals: {', '.join(specifics)}")
+        else:
+            reasons.append("Strong failure signal")
+    elif strength == 1:
+        reasons.append("Failure-indicating values present")
     if count <= 3:
         reasons.append(
             f"Rare event ({count} occurrence{'s' if count != 1 else ''})"

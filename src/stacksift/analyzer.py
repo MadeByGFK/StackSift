@@ -9,7 +9,17 @@ from stacksift.scanner import find_log_files
 # --- Issue normalization for grouping -------------------------------------
 # Repeated event templates vary by IDs, durations, and counters. Normalize
 # those so they cluster; keep semantically meaningful values (notably HTTP
-# status) intact so 500s and 503s stay distinguishable.
+# status, error reasons, paths) intact so 500s and 503s stay distinguishable.
+#
+# ID normalization is field-name-based, not value-pattern-based: any
+# request_id=, trace_id=, etc. gets normalized regardless of the ID format
+# (req-abc, rq-02-0000, uuid, ...). Value patterns are only a fallback.
+
+_ID_FIELDS = {
+    "request_id", "trace_id", "span_id", "correlation_id", "session_id",
+    "connection_id", "order_id", "user_id", "client_id", "device_id",
+    "idempotency_key",
+}
 
 _ID_SUBS = [
     (re.compile(r"\breq-[a-f0-9]+\b"), "req-<id>"),
@@ -17,6 +27,9 @@ _ID_SUBS = [
     (re.compile(r"\bconn-\d+\b"), "conn-<id>"),
     (re.compile(r"\b[a-f0-9]{16,}\b"), "<hex>"),
 ]
+
+# Timestamps embedded in values (e.g. token_exp=2026-10-11T15:00:00.000Z).
+_TS_VALUE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^,\s)]*")
 
 _NUMERIC_VALUE = re.compile(r"\b([a-z_]+)=(\d+)\b")
 
@@ -31,8 +44,15 @@ def _keep_or_normalize(match: re.Match) -> str:
 def normalize_issue(message: str) -> str:
     """Return the grouping template for a log message."""
     msg = message
+    # 1. Field-name-based: normalize the VALUE of known identifier fields.
+    for field in _ID_FIELDS:
+        msg = re.sub(rf"\b{field}=[^\s,)]+", f"{field}=<id>", msg)
+    # 2. Timestamps embedded in values.
+    msg = _TS_VALUE.sub("<ts>", msg)
+    # 3. Fallback: value-pattern-based ID shapes.
     for pattern, replacement in _ID_SUBS:
         msg = pattern.sub(replacement, msg)
+    # 4. Numeric values (except HTTP status).
     msg = _NUMERIC_VALUE.sub(_keep_or_normalize, msg)
     return msg
 
