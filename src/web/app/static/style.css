@@ -157,14 +157,19 @@ table.issues tr:last-child td { border-bottom: none; }
 .privacy { color: var(--muted); font-size: 13px; text-align: center; margin: 26px 0 8px; }
 
 /* incident timeline */
-.timeline { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding: 8px 4px 0; }
+.timeline { display: flex; align-items: flex-end; gap: 3px; height: 150px; padding: 8px 4px 0; }
 .tbar { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; min-width: 0; }
-.tbar-fill { width: 100%; border-radius: 3px 3px 0 0; min-height: 2px; }
+.tcount { font-size: 10px; color: var(--muted); height: 14px; }
+.tstack { width: 100%; display: flex; flex-direction: column; justify-content: flex-end; border-radius: 3px 3px 0 0; overflow: hidden; min-height: 2px; background: #1a2740; }
+.tseg { width: 100%; }
+.seg-critical { background: var(--red); }
+.seg-error { background: #e8944a; }
+.seg-warn { background: var(--yellow); }
 .tbar-label { font-size: 10px; color: var(--muted); margin-top: 4px; white-space: nowrap; }
-.phase-baseline { background: #2a3a55; }
-.phase-escalating { background: var(--yellow); }
-.phase-peak { background: var(--red); }
-.phase-recovering { background: #e8944a; }
-.tlegend { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.phase-baseline { opacity: 0.45; }
+.phase-escalating { opacity: 0.75; }
+.phase-peak { opacity: 1; }
+.phase-declining { opacity: 0.6; }
+.tlegend { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .tlegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: baseline; }
-.callout .why { color: var(--muted); font-size: 13px; margin-top: 6px; }
+.tlegend .tphases { margin-left: auto; }
