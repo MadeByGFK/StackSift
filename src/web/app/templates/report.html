@@ -41,10 +41,47 @@
     <div class="stat"><div class="num">{{ sorted_issues|length }}</div><div class="lbl">Unique issues</div></div>
   </div>
 
-  {% if top_issue %}
+  {% if diagnostic_issue %}
+  <div class="callout">
+    <div class="k">Investigate first — most diagnostic</div>
+    <div class="v">[{{ diagnostic_issue[1].level }}] {{ diagnostic_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ diagnostic_issue[1].count }}</span></div>
+    {% if diagnostic_explanation %}
+    <div class="why">{{ diagnostic_explanation|join(' · ') }}</div>
+    {% endif %}
+    {% if top_issue and top_issue[0] != diagnostic_issue[0] %}
+    <div class="k" style="margin-top:10px">Most frequent</div>
+    <div class="v">[{{ top_issue[1].level }}] {{ top_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ top_issue[1].count }}</span></div>
+    {% endif %}
+  </div>
+  {% elif top_issue %}
   <div class="callout">
     <div class="k">Investigate first</div>
     <div class="v">[{{ top_issue[1].level }}] {{ top_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ top_issue[1].count }}</span></div>
+  </div>
+  {% endif %}
+
+  {% if timeline and timeline|length > 1 %}
+  <h3 class="section-title">Incident timeline <span style="color:var(--muted);font-weight:400;font-size:14px">— warnings + errors per 5 min</span></h3>
+  {% if first_seen and last_seen %}
+  <div class="meta" style="margin-bottom:8px">First event: {{ first_seen }} · Last event: {{ last_seen }}</div>
+  {% endif %}
+  <div class="card">
+    {% set tmax = timeline|map(attribute='total')|max %}
+    <div class="timeline">
+      {% for b in timeline %}
+      {% set issues = b.warn + b.error + b.critical %}
+      <div class="tbar" title="{{ b.label }} — {{ issues }} issues ({{ b.phase }})">
+        <div class="tbar-fill phase-{{ b.phase }}" style="height: {{ (issues / tmax * 100) if tmax else 0 }}%"></div>
+        <div class="tbar-label">{{ b.label if loop.index0 % 2 == 0 else '' }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="tlegend">
+      <span><i class="sw phase-baseline"></i>Baseline</span>
+      <span><i class="sw phase-escalating"></i>Escalating</span>
+      <span><i class="sw phase-peak"></i>Peak</span>
+      <span><i class="sw phase-recovering"></i>Recovering</span>
+    </div>
   </div>
   {% endif %}
 

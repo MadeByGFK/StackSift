@@ -15,7 +15,10 @@ import time
 from stacksift.analyzer import analyze_log_file
 from app.redact import redact_secrets
 from stacksift.insights import (
+    build_timeline,
     determine_health,
+    diagnostic_reasons,
+    most_diagnostic_issue,
     most_frequent_issue,
     sort_issues_by_severity,
 )
@@ -127,6 +130,13 @@ def analyze_upload(filename: str, content: bytes) -> dict:
 
     health_label, health_color = determine_health(results["level_counts"])
 
+    diagnostic = most_diagnostic_issue(results["issues"])
+    diagnostic_explanation = None
+    if diagnostic:
+        diagnostic_explanation = diagnostic_reasons(
+            diagnostic[1]["level"], diagnostic[0], diagnostic[1]["count"]
+        )
+
     return {
         "filename": filename,
         "detected_format": detected_format,
@@ -135,6 +145,11 @@ def analyze_upload(filename: str, content: bytes) -> dict:
         "health": {"label": health_label, "color": health_color},
         "sorted_issues": sort_issues_by_severity(results["issues"]),
         "top_issue": most_frequent_issue(results["issues"]),
+        "diagnostic_issue": diagnostic,
+        "diagnostic_explanation": diagnostic_explanation,
+        "timeline": build_timeline(results.get("events", [])),
+        "first_seen": results.get("first_seen"),
+        "last_seen": results.get("last_seen"),
         "elapsed": elapsed,
     }
 
