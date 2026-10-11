@@ -84,3 +84,28 @@ def test_sort_issues_by_severity_then_count():
         "Database timeout",
         "Minor warning",
     ]
+
+def test_operation_id_normalization_groups_related_events():
+    """Phase B regression: operation_id is a correlation identifier, not an
+    event discriminator. Different operation_id values for the same event
+    type must group together; different event types must stay separate."""
+    from stacksift.analyzer import normalize_issue
+
+    # Same event, different operation_ids -> same template
+    t1 = normalize_issue(
+        "event=network_retry operation_id=noise-000000 reason=timeout"
+    )
+    t2 = normalize_issue(
+        "event=network_retry operation_id=noise-000001 reason=timeout"
+    )
+    assert t1 == t2, f"operation_id not normalized: {t1} != {t2}"
+    assert "operation_id=<id>" in t1
+
+    # Different events, same operation_id -> different templates
+    t3 = normalize_issue(
+        "event=network_retry operation_id=noise-000000 reason=timeout"
+    )
+    t4 = normalize_issue(
+        "event=network_retry_resolved operation_id=noise-000000 result=success"
+    )
+    assert t3 != t4, "distinct event types were merged!"
