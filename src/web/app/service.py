@@ -128,7 +128,11 @@ def analyze_upload(filename: str, content: bytes) -> dict:
             os.unlink(tmp_path)
     elapsed = time.perf_counter() - start
 
-    health_label, health_color = determine_health(results["level_counts"])
+    health_label, health_color = determine_health(
+        results["level_counts"],
+        [b["warn"] + b["error"] + b["critical"]
+         for b in build_timeline(results.get("events", []))],
+    )
 
     diagnostic = most_diagnostic_issue(results["issues"])
     diagnostic_explanation = None

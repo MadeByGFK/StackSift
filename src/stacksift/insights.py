@@ -244,21 +244,66 @@ def _label_phases(buckets):
             b["phase"] = "declining"
 
 
-def determine_health(level_counts: dict) -> tuple[str, str]:
-    critical = level_counts.get("CRITICAL", 0)
-    errors = level_counts.get("ERROR", 0)
-    warnings = level_counts.get("WARN", 0)
+def determine_health(
+    level_counts: dict, bucket_totals: list[int] | None = None
+) -> tuple[str, str]:
+    """Classify the log's activity pattern from timeline escalation.
 
+    Labels are observational, not diagnostic: they describe what the
+    activity pattern shows, not whether the application is healthy.
+    A flat timeline with warnings is "No Escalation Detected", not
+    "Healthy" — stability is not proof of health.
+
+    Escalation is measured as sustained elevation relative to baseline
+    (25th percentile of bucket counts, robust to spikes). A single
+    isolated spike does not qualify; elevation must persist across
+    consecutive buckets. Minimum event counts guard against noisy
+    ratios in sparse data (1 -> 7 is 7x but meaningless).
+    """
+    critical = level_counts.get("CRITICAL", 0)
     if critical > 0:
         return ("Critical", "red")
 
-    if errors >= 10:
-        return ("High Error Activity", "yellow")
+    if not bucket_totals:
+        return ("Health Undetermined", "gray")
 
-    if warnings >= 20:
-        return ("Elevated Activity", "yellow")
+    peak = max(bucket_totals)
+    if peak == 0:
+        return ("No Significant Issues Detected", "green")
 
-    return ("Healthy", "green")
+    non_empty = [b for b in bucket_totals if b > 0]
+    if len(non_empty) < 3:
+        return ("Health Undetermined", "gray")
+
+    # Baseline: 25th percentile — the lower-normal activity level.
+    # Robust to incident spikes pulling the median up.
+    ordered = sorted(bucket_totals)
+    baseline = ordered[len(ordered) // 4]
+    if baseline < 1:
+        baseline = 1  # avoid division by zero; conservative
+
+    # Too sparse for meaningful ratios.
+    if peak < 10:
+        return ("Health Undetermined", "gray")
+
+    def sustained(ratio: float, consecutive: int = 2) -> bool:
+        """True if >= ratio x baseline persists across consecutive buckets,
+        each with enough events to be meaningful."""
+        run = 0
+        for count in bucket_totals:
+            if count >= baseline * ratio and count >= 10:
+                run += 1
+                if run >= consecutive:
+                    return True
+            else:
+                run = 0
+        return False
+
+    if sustained(3.0):
+        return ("Elevated Incident Activity", "red")
+    if sustained(2.0):
+        return ("Increased Error Activity", "yellow")
+    return ("No Escalation Detected", "green")
 
 
 def most_frequent_issue(issues: dict):

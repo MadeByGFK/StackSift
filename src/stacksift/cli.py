@@ -26,7 +26,12 @@ LEVEL_STYLES = {
 }
 
 def display_incident_summary(results: dict) -> None:
-    health, health_style = determine_health(results["level_counts"])
+    from stacksift.insights import build_timeline
+    bucket_totals = [
+        b["warn"] + b["error"] + b["critical"]
+        for b in build_timeline(results.get("events", []))
+    ]
+    health, health_style = determine_health(results["level_counts"], bucket_totals)
     frequent_issue = most_frequent_issue(results["issues"])
 
     files_scanned = len(results.get("scanned_files", [results["file"]]))

@@ -17,14 +17,25 @@ def test_determine_health_is_critical():
 
 
 def test_determine_health_is_healthy():
+    # No warnings/errors at all -> nothing significant detected.
     level_counts = {
         "INFO": 10,
-        "WARN": 2,
-        "ERROR": 1,
+        "WARN": 0,
+        "ERROR": 0,
         "CRITICAL": 0,
     }
 
-    assert determine_health(level_counts) == ("Healthy", "green")
+    assert determine_health(level_counts, [0, 0, 0, 0]) == (
+        "No Significant Issues Detected",
+        "green",
+    )
+
+
+def test_determine_health_undetermined_without_timeline():
+    # Old callers without bucket data get an honest "undetermined".
+    level_counts = {"INFO": 10, "WARN": 2, "ERROR": 1, "CRITICAL": 0}
+
+    assert determine_health(level_counts) == ("Health Undetermined", "gray")
 
 
 def test_most_frequent_issue():

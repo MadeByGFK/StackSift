@@ -214,3 +214,64 @@ def test_first_last_seen():
         assert r["last_seen"] == "2026-10-10 14:09:00"
     finally:
         os.unlink(path)
+
+
+def test_health_stable_activity_no_escalation():
+    # Benchmark #5: flat 72-81 warnings/errors per bucket, no incident.
+    from stacksift.insights import determine_health
+    buckets = [79, 81, 79, 78, 77, 75, 75, 79, 80, 77, 78, 77, 77, 78, 79, 80, 79, 72]
+    label, color = determine_health({"WARN": 1200, "ERROR": 200}, buckets)
+    assert label == "No Escalation Detected", label
+    assert color == "green"
+
+
+def test_health_sustained_strong_escalation():
+    # Clear incident: baseline ~65, sustained 3x+ spike.
+    from stacksift.insights import determine_health
+    buckets = [65, 65, 166, 266, 366, 465, 416, 240, 115, 65, 65]
+    label, color = determine_health({"WARN": 1034, "ERROR": 1037}, buckets)
+    assert label == "Elevated Incident Activity", label
+    assert color == "red"
+
+
+def test_health_sustained_moderate_escalation():
+    from stacksift.insights import determine_health
+    buckets = [50, 52, 48, 110, 120, 105, 55, 50]
+    label, _ = determine_health({"WARN": 200, "ERROR": 50}, buckets)
+    assert label == "Increased Error Activity", label
+
+
+def test_health_isolated_spike_not_incident():
+    # Single spike must not qualify as sustained escalation.
+    from stacksift.insights import determine_health
+    buckets = [60, 62, 58, 300, 61, 59, 63]
+    label, _ = determine_health({"WARN": 300, "ERROR": 50}, buckets)
+    assert label == "No Escalation Detected", label
+
+
+def test_health_sparse_data_undetermined():
+    # 1 -> 7 is 7x but meaningless without volume.
+    from stacksift.insights import determine_health
+    label, color = determine_health({"WARN": 8}, [1, 7, 2])
+    assert label == "Health Undetermined", label
+    assert color == "gray"
+
+
+def test_health_too_few_buckets():
+    from stacksift.insights import determine_health
+    label, _ = determine_health({"WARN": 50}, [30, 40])
+    assert label == "Health Undetermined"
+
+
+def test_health_no_issues():
+    from stacksift.insights import determine_health
+    label, color = determine_health({}, [0, 0, 0, 0])
+    assert label == "No Significant Issues Detected"
+    assert color == "green"
+
+
+def test_health_critical_overrides():
+    from stacksift.insights import determine_health
+    label, color = determine_health({"CRITICAL": 1}, [10, 10, 10])
+    assert label == "Critical"
+    assert color == "red"
