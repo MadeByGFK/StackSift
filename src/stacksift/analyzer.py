@@ -35,7 +35,7 @@ _ID_SUBS = [
 # Timestamps embedded in values (e.g. token_exp=2026-10-11T15:00:00.000Z).
 _TS_VALUE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^,\s)]*")
 
-_NUMERIC_VALUE = re.compile(r"\b([a-z_]+)=(\d+)\b")
+_NUMERIC_VALUE = re.compile(r"\b([a-z_][a-z0-9_]*)=(\d+)\b")
 
 
 def _keep_or_normalize(match: re.Match) -> str:

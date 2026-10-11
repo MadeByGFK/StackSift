@@ -182,6 +182,19 @@ def test_timestamp_values_normalized():
     assert normalize_issue(m1) == normalize_issue(m2)
 
 
+def test_numeric_fields_with_digits_normalize():
+    # Benchmark #4: p95/p99-style telemetry fields contain digits and
+    # must normalize like any other numeric field.
+    from stacksift.analyzer import normalize_issue
+    m1 = "event=path_probe connect_p95_ms=983 rtt_ms=12"
+    m2 = "event=path_probe connect_p95_ms=1189 rtt_ms=45"
+    n1, n2 = normalize_issue(m1), normalize_issue(m2)
+    assert n1 == n2
+    assert "connect_p95_ms=<n>" in n1
+    # HTTP status still preserved
+    assert "status=500" in normalize_issue("request_failed status=500")
+
+
 def test_first_last_seen():
     from stacksift.analyzer import analyze_log_file
     import tempfile, os
