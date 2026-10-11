@@ -22,8 +22,11 @@ from stacksift.insights import (
     sort_issues_by_severity,
 )
 from stacksift.diagnostics import (
-    rank_candidates, explain_ranking, build_incident_section,
-    build_notable_events, _detect_degradation_window,
+    rank_candidates, explain_ranking, _detect_degradation_window,
+)
+# Phase D vendored (Railway pip cache workaround)
+from app.diagnostics_vendor import (
+    build_incident_section, build_notable_events,
 )
 
 # JSON-lines field names we recognize (common variants).
