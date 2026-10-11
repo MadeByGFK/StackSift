@@ -21,7 +21,10 @@ from stacksift.insights import (
     most_frequent_issue,
     sort_issues_by_severity,
 )
-from stacksift.diagnostics import rank_candidates, explain_ranking
+from stacksift.diagnostics import (
+    rank_candidates, explain_ranking, build_incident_section,
+    build_notable_events, _detect_degradation_window,
+)
 
 # JSON-lines field names we recognize (common variants).
 _TS_FIELDS = ("timestamp", "time", "@timestamp", "datetime", "ts")
@@ -147,6 +150,24 @@ def analyze_upload(filename: str, content: bytes) -> dict:
             top_template, top_score, top_evidence
         )
 
+    # Phase D: incident section and notable events
+    # (diagnostic_issue contract preserved for backward compatibility)
+    degradation_window = _detect_degradation_window(timeline)
+    incident_section = build_incident_section(
+        ranked, results["issues"], degradation_window, timeline
+    )
+    # Collect templates shown in incident section to exclude from notable
+    incident_templates = set()
+    if incident_section["type"] != "none" and ranked:
+        incident_templates.add(ranked[0][0])
+        se = incident_section.get("supporting_evidence", {})
+        for key in ("observed", "correlated", "hypothesized"):
+            for item in se.get(key, []):
+                incident_templates.add(item[0])
+    notable_events = build_notable_events(
+        ranked, results["issues"], incident_templates
+    )
+
     return {
         "filename": filename,
         "detected_format": detected_format,
@@ -157,7 +178,9 @@ def analyze_upload(filename: str, content: bytes) -> dict:
         "top_issue": most_frequent_issue(results["issues"]),
         "diagnostic_issue": diagnostic,
         "diagnostic_explanation": diagnostic_explanation,
-        "timeline": build_timeline(results.get("events", [])),
+        "incident_section": incident_section,
+        "notable_events": notable_events,
+        "timeline": timeline,
         "first_seen": results.get("first_seen"),
         "last_seen": results.get("last_seen"),
         "elapsed": elapsed,
