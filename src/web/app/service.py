@@ -13,7 +13,7 @@ import tempfile
 import time
 
 from stacksift.analyzer import analyze_log_file
-from stacksift.redact import redact_secrets
+from app.redact import redact_secrets
 from stacksift.insights import (
     determine_health,
     most_frequent_issue,
