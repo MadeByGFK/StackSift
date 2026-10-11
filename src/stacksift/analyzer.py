@@ -47,6 +47,8 @@ def analyze_log_file(file_path: str) -> dict:
     service_counts = Counter()
     issue_counts = {}
     events = []
+    first_seen = None
+    last_seen = None
     total_lines = 0
     parsed_lines = 0
     malformed_lines = 0
@@ -63,6 +65,12 @@ def analyze_log_file(file_path: str) -> dict:
             parsed_lines += 1
             level_counts[entry.level] += 1
             events.append((entry.timestamp, entry.level))
+            # Timestamps sort chronologically as strings in both
+            # supported formats (ISO-8601 and "YYYY-MM-DD HH:MM:SS").
+            if first_seen is None or entry.timestamp < first_seen:
+                first_seen = entry.timestamp
+            if last_seen is None or entry.timestamp > last_seen:
+                last_seen = entry.timestamp
             if entry.service:
                 service_counts[entry.service] += 1
 
@@ -85,6 +93,8 @@ def analyze_log_file(file_path: str) -> dict:
         "service_counts": dict(service_counts),
         "issues": issue_counts,
         "events": events,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
     }
 
 
@@ -98,6 +108,9 @@ def analyze_path(input_path: str) -> dict:
     combined_level_counts = Counter()
     combined_service_counts = Counter()
     combined_issue_counts = {}
+    combined_events = []
+    first_seen = None
+    last_seen = None
     total_lines = 0
     parsed_lines = 0
     malformed_lines = 0
@@ -112,6 +125,12 @@ def analyze_path(input_path: str) -> dict:
         malformed_lines += results["malformed_lines"]
         combined_level_counts.update(results["level_counts"])
         combined_service_counts.update(results.get("service_counts", {}))
+        combined_events.extend(results.get("events", []))
+        fs, ls = results.get("first_seen"), results.get("last_seen")
+        if fs and (first_seen is None or fs < first_seen):
+            first_seen = fs
+        if ls and (last_seen is None or ls > last_seen):
+            last_seen = ls
         
         for message, issue_data in results["issues"].items():
             if message not in combined_issue_counts:
@@ -131,4 +150,7 @@ def analyze_path(input_path: str) -> dict:
         "level_counts": dict(combined_level_counts),
         "service_counts": dict(combined_service_counts),
         "issues": combined_issue_counts,
+        "events": combined_events,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
     }

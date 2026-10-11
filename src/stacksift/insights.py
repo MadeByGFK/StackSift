@@ -35,16 +35,15 @@ def diagnostic_score(level: str, message: str, count: int) -> float:
 
     Frequency alone is a poor proxy for importance: a single
     `idle_in_transaction` watchdog event can explain hundreds of
-    repetitive pool-wait warnings. This weighs severity, diagnostic
-    keyword signals, and rarity.
+    repetitive pool-wait warnings. Severity and diagnostic keywords
+    drive the score; rarity is only a small tiebreaker nudge so it
+    can never flip a severity tier on its own.
     """
     weight = SEVERITY_WEIGHT.get(level, 1)
     lowered = message.lower()
     keyword_hits = sum(1 for kw in DIAGNOSTIC_KEYWORDS if kw in lowered)
-    # Rarity boost: count=1 -> ~2x, count=500 -> ~1.02x. Rewards
-    # specificity without letting one-off noise dominate.
-    rarity = 1 + (10 / (count + 9))
-    return weight * (1 + keyword_hits) * rarity
+    rarity_nudge = min(0.5, 2.0 / max(count, 1))
+    return weight * (1 + keyword_hits) + rarity_nudge
 
 
 def most_diagnostic_issue(issues: dict):
@@ -57,6 +56,25 @@ def most_diagnostic_issue(issues: dict):
             item[1]["level"], item[0], item[1]["count"]
         ),
     )
+
+
+def diagnostic_reasons(level: str, message: str, count: int) -> list[str]:
+    """Human-readable reasons why an issue ranked highly. Keeps the
+    scoring explainable: each reason maps to a scoring input."""
+    reasons = []
+    if level in ("CRITICAL", "ERROR"):
+        reasons.append(f"{level.title()} severity")
+    lowered = message.lower()
+    hits = [kw for kw in DIAGNOSTIC_KEYWORDS if kw in lowered]
+    if hits:
+        reasons.append(f"Diagnostic keywords: {', '.join(hits)}")
+    if count <= 3:
+        reasons.append(
+            f"Rare event ({count} occurrence{'s' if count != 1 else ''})"
+        )
+    elif count >= 100:
+        reasons.append(f"High frequency ({count} occurrences)")
+    return reasons
 
 
 # --- Incident timeline ----------------------------------------------------
