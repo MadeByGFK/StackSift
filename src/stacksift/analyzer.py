@@ -92,15 +92,19 @@ def analyze_log_file(file_path: str) -> dict:
             parsed_lines += 1
             level_counts[entry.level] += 1
             events.append((entry.timestamp, entry.level))
-            # Timestamps sort chronologically as strings in both
-            # supported formats (ISO-8601 and "YYYY-MM-DD HH:MM:SS").
-            if first_seen is None or entry.timestamp < first_seen:
-                first_seen = entry.timestamp
-            if last_seen is None or entry.timestamp > last_seen:
-                last_seen = entry.timestamp
+            # Timestamps are UTC ISO-8601 strings and sort chronologically.
+            # Empty timestamps (unstructured notes) are excluded from
+            # first/last seen — they go in an unknown-time bucket downstream.
+            if entry.timestamp:
+                if first_seen is None or entry.timestamp < first_seen:
+                    first_seen = entry.timestamp
+                if last_seen is None or entry.timestamp > last_seen:
+                    last_seen = entry.timestamp
             if entry.service:
                 service_counts[entry.service] += 1
 
+            # UNKNOWN severity is counted but not grouped as an issue —
+            # we don't fabricate diagnostics from severity-less notes.
             if entry.level in {"WARN", "ERROR", "CRITICAL"}:
                 template = normalize_issue(entry.message)
                 if template not in issue_counts:

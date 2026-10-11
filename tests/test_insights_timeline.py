@@ -210,8 +210,8 @@ def test_first_last_seen():
         path = tmp.name
     try:
         r = analyze_log_file(path)
-        assert r["first_seen"] == "2026-10-10 14:01:00"
-        assert r["last_seen"] == "2026-10-10 14:09:00"
+        assert r["first_seen"] == "2026-10-10T14:01:00.000Z"
+        assert r["last_seen"] == "2026-10-10T14:09:00.000Z"
     finally:
         os.unlink(path)
 
