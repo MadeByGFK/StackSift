@@ -18,10 +18,10 @@ from stacksift.insights import (
     build_timeline,
     determine_health,
     diagnostic_reasons,
-    most_diagnostic_issue,
     most_frequent_issue,
     sort_issues_by_severity,
 )
+from stacksift.diagnostics import rank_candidates, explain_ranking
 
 # JSON-lines field names we recognize (common variants).
 _TS_FIELDS = ("timestamp", "time", "@timestamp", "datetime", "ts")
@@ -134,11 +134,17 @@ def analyze_upload(filename: str, content: bytes) -> dict:
          for b in build_timeline(results.get("events", []))],
     )
 
-    diagnostic = most_diagnostic_issue(results["issues"])
+    # Phase C: evidence-based diagnostic ranking
+    timeline = build_timeline(results.get("events", []))
+    ranked, _ = rank_candidates(results["issues"], timeline)
+    diagnostic = None
     diagnostic_explanation = None
-    if diagnostic:
-        diagnostic_explanation = diagnostic_reasons(
-            diagnostic[1]["level"], diagnostic[0], diagnostic[1]["count"]
+    if ranked:
+        top_template, top_score, top_evidence = ranked[0]
+        top_issue = results["issues"][top_template]
+        diagnostic = (top_template, top_issue)
+        diagnostic_explanation = explain_ranking(
+            top_template, top_score, top_evidence
         )
 
     return {
