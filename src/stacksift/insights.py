@@ -5,6 +5,154 @@ SEVERITY_ORDER = {
     "INFO": 3,
 }
 
+SEVERITY_WEIGHT = {
+    "CRITICAL": 4,
+    "ERROR": 3,
+    "WARN": 2,
+    "INFO": 1,
+}
+
+# Substrings that suggest a message explains *why* something broke,
+# not just *that* it broke. Used to boost diagnostic ranking.
+DIAGNOSTIC_KEYWORDS = [
+    "idle_in_transaction",
+    "leak",
+    "watchdog",
+    "saturated",
+    "deadlock",
+    "unreleased",
+    "exhausted",
+    "corrupt",
+    "out_of_memory",
+    "outofmemory",
+    "circuit_breaker",
+    "starvation",
+]
+
+
+def diagnostic_score(level: str, message: str, count: int) -> float:
+    """Score how diagnostically valuable an issue is.
+
+    Frequency alone is a poor proxy for importance: a single
+    `idle_in_transaction` watchdog event can explain hundreds of
+    repetitive pool-wait warnings. This weighs severity, diagnostic
+    keyword signals, and rarity.
+    """
+    weight = SEVERITY_WEIGHT.get(level, 1)
+    lowered = message.lower()
+    keyword_hits = sum(1 for kw in DIAGNOSTIC_KEYWORDS if kw in lowered)
+    # Rarity boost: count=1 -> ~2x, count=500 -> ~1.02x. Rewards
+    # specificity without letting one-off noise dominate.
+    rarity = 1 + (10 / (count + 9))
+    return weight * (1 + keyword_hits) * rarity
+
+
+def most_diagnostic_issue(issues: dict):
+    """The issue most likely to explain the incident (not just the loudest)."""
+    if not issues:
+        return None
+    return max(
+        issues.items(),
+        key=lambda item: diagnostic_score(
+            item[1]["level"], item[0], item[1]["count"]
+        ),
+    )
+
+
+# --- Incident timeline ----------------------------------------------------
+
+from datetime import datetime, timedelta
+
+
+def _parse_timestamp(ts: str):
+    """Parse the timestamp formats our parser emits."""
+    ts = ts.strip().replace("Z", "+00:00")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(ts, fmt)
+        except ValueError:
+            continue
+    # fromisoformat as a last resort (handles offsets like +00:00)
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+
+
+def build_timeline(events, bucket_minutes=5):
+    """Bucket (timestamp, level) events into fixed windows.
+
+    Returns a list of dicts: {start, label, warn, error, critical, total}.
+    Empty input returns [].
+    """
+    parsed = []
+    for ts_str, level in events:
+        dt = _parse_timestamp(ts_str) if isinstance(ts_str, str) else ts_str
+        if dt is None:
+            continue
+        # drop tzinfo for bucketing (all events share a zone in practice)
+        parsed.append((dt.replace(tzinfo=None), level))
+    if not parsed:
+        return []
+
+    parsed.sort()
+    start = parsed[0][0].replace(
+        minute=(parsed[0][0].minute // bucket_minutes) * bucket_minutes,
+        second=0, microsecond=0,
+    )
+    end = parsed[-1][0]
+    buckets = []
+    cursor = start
+    while cursor <= end:
+        buckets.append({
+            "start": cursor,
+            "label": cursor.strftime("%H:%M"),
+            "warn": 0, "error": 0, "critical": 0, "total": 0,
+        })
+        cursor += timedelta(minutes=bucket_minutes)
+
+    for dt, level in parsed:
+        idx = int((dt - start).total_seconds() // (bucket_minutes * 60))
+        if 0 <= idx < len(buckets):
+            b = buckets[idx]
+            if level == "WARN":
+                b["warn"] += 1
+            elif level == "ERROR":
+                b["error"] += 1
+            elif level == "CRITICAL":
+                b["critical"] += 1
+            b["total"] += 1
+
+    _label_phases(buckets)
+    return buckets
+
+
+def _label_phases(buckets):
+    """Tag each bucket with a phase: baseline, escalating, peak, recovering."""
+    counts = [b["warn"] + b["error"] + b["critical"] for b in buckets]
+    peak = max(counts) if counts else 0
+    if peak == 0:
+        for b in buckets:
+            b["phase"] = "baseline"
+        return
+
+    threshold = max(1, peak * 0.15)
+    # incident window: first to last bucket above threshold
+    active = [i for i, c in enumerate(counts) if c >= threshold]
+    first, last = active[0], active[-1]
+    peak_idx = counts.index(peak)
+
+    for i, b in enumerate(buckets):
+        if i < first or i > last:
+            b["phase"] = "baseline"
+        elif i < peak_idx:
+            b["phase"] = "escalating"
+        elif i == peak_idx:
+            b["phase"] = "peak"
+        else:
+            b["phase"] = "recovering"
+
 
 def determine_health(level_counts: dict) -> tuple[str, str]:
     critical = level_counts.get("CRITICAL", 0)

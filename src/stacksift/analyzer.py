@@ -46,6 +46,7 @@ def analyze_log_file(file_path: str) -> dict:
     level_counts = Counter()
     service_counts = Counter()
     issue_counts = {}
+    events = []
     total_lines = 0
     parsed_lines = 0
     malformed_lines = 0
@@ -61,6 +62,7 @@ def analyze_log_file(file_path: str) -> dict:
 
             parsed_lines += 1
             level_counts[entry.level] += 1
+            events.append((entry.timestamp, entry.level))
             if entry.service:
                 service_counts[entry.service] += 1
 
@@ -82,6 +84,7 @@ def analyze_log_file(file_path: str) -> dict:
         "level_counts": dict(level_counts),
         "service_counts": dict(service_counts),
         "issues": issue_counts,
+        "events": events,
     }
 
 
