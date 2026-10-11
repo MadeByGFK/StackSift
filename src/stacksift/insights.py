@@ -29,6 +29,16 @@ DIAGNOSTIC_KEYWORDS = [
     "starvation",
 ]
 
+# Generic failure values: key=value pairs where the value signals failure.
+# Domain-agnostic — catches release_observed=false as well as
+# cert_expired=true or auth_result=denied.
+import re as _re
+_FAILURE_VALUE = _re.compile(
+    r"\b\w+=(false|failed|failure|expired|invalid|denied|refused|timeout|"
+    r"timed_out|unreachable|corrupt|exhausted)\b",
+    _re.IGNORECASE,
+)
+
 
 def diagnostic_score(level: str, message: str, count: int) -> float:
     """Score how diagnostically valuable an issue is.
@@ -42,6 +52,11 @@ def diagnostic_score(level: str, message: str, count: int) -> float:
     weight = SEVERITY_WEIGHT.get(level, 1)
     lowered = message.lower()
     keyword_hits = sum(1 for kw in DIAGNOSTIC_KEYWORDS if kw in lowered)
+    # Generic signal: failure-indicating key=value pairs (e.g.
+    # release_observed=false, cert_status=expired). Counts as one
+    # keyword hit so it can't dominate on its own.
+    failure_values = len(_FAILURE_VALUE.findall(message))
+    keyword_hits += min(failure_values, 1)
     rarity_nudge = min(0.5, 2.0 / max(count, 1))
     return weight * (1 + keyword_hits) + rarity_nudge
 
@@ -68,6 +83,10 @@ def diagnostic_reasons(level: str, message: str, count: int) -> list[str]:
     hits = [kw for kw in DIAGNOSTIC_KEYWORDS if kw in lowered]
     if hits:
         reasons.append(f"Diagnostic keywords: {', '.join(hits)}")
+    failures = _FAILURE_VALUE.findall(message)
+    if failures:
+        unique = sorted({f.lower() for f in failures})
+        reasons.append(f"Failure signals: {', '.join(unique)}")
     if count <= 3:
         reasons.append(
             f"Rare event ({count} occurrence{'s' if count != 1 else ''})"
@@ -169,7 +188,9 @@ def _label_phases(buckets):
         elif i == peak_idx:
             b["phase"] = "peak"
         else:
-            b["phase"] = "recovering"
+            # Declining error counts don't prove recovery — the service
+            # could be down, not healed. Label honestly.
+            b["phase"] = "declining"
 
 
 def determine_health(level_counts: dict) -> tuple[str, str]:

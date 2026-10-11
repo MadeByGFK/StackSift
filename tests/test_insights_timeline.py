@@ -113,6 +113,35 @@ def test_rarity_alone_does_not_dominate():
     assert frequent_error > noisy
 
 
+def test_failure_value_signal_is_domain_general():
+    # No database keywords — an auth/cert failure should still rank up.
+    from stacksift.insights import diagnostic_score
+    generic = diagnostic_score("ERROR", "cert_validator status=expired", 2)
+    plain = diagnostic_score("ERROR", "request failed", 2)
+    assert generic > plain
+
+
+def test_failure_value_in_reasons():
+    from stacksift.insights import diagnostic_reasons
+    reasons = " ".join(
+        diagnostic_reasons("WARN", "conn_holder release_observed=false", 1)
+    ).lower()
+    assert "false" in reasons
+
+
+def test_declining_not_recovering():
+    tl = build_timeline([
+        ("2026-10-10 14:01:00", "ERROR"),
+    ] * 5 + [
+        ("2026-10-10 14:10:00", "ERROR"),
+    ] * 50 + [
+        ("2026-10-10 14:20:00", "ERROR"),
+    ] * 10)
+    phases = {b["phase"] for b in tl}
+    assert "declining" in phases
+    assert "recovering" not in phases
+
+
 def test_first_last_seen():
     from stacksift.analyzer import analyze_log_file
     import tempfile, os
