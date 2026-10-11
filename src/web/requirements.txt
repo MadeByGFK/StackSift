@@ -2,5 +2,5 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 jinja2>=3.1
 python-multipart>=0.0.9
-# StackSift analyzer library (public repo) - Phase D rebuild 2026-10-11T16:56:22.740665
-stacksift @ git+https://github.com/MadeByGFK/StackSift.git@9193b2eb7ce15faf8cf8b05ceb84f32befa9721a
+# StackSift analyzer library (public repo)
+stacksift @ git+https://github.com/MadeByGFK/StackSift.git@1959f2ac1ca9b92865e5f03917e369c8d623a62c
