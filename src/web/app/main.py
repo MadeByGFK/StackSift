@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.rate_limit import RateLimiter
+from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
 from app.service import analyze_upload, render_text_report
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,6 +57,18 @@ async def index(request: Request):
     return templates.TemplateResponse(
         request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request))}
     )
+
+
+@app.get("/demo", response_class=HTMLResponse)
+async def demo(request: Request):
+    """One-click demo: analyze a canned incident log, no upload needed.
+
+    Not rate-limited — the input is fixed and cheap to analyze, and this
+    is the conversion path for new visitors.
+    """
+    data = analyze_upload(SAMPLE_FILENAME, SAMPLE_LOG.encode("utf-8"))
+    data["is_demo"] = True
+    return templates.TemplateResponse(request, "report.html", data)
 
 
 @app.post("/analyze")

@@ -15,6 +15,10 @@
     <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
   </header>
 
+  {% if is_demo %}
+  <div class="demo-banner">Sample report — this is what StackSift does with your logs. <a href="/">Analyze your own →</a></div>
+  {% endif %}
+
   <section class="report-head">
     <h2>{{ filename }}</h2>
     <div class="meta">

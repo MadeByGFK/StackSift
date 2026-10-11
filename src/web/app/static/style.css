@@ -64,6 +64,13 @@ button {
 .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
 
 .rate-note { text-align: center; color: var(--muted); font-size: 13px; }
+.demo-cta { text-align: center; color: var(--muted); font-size: 14px; margin: 12px 0 0; }
+.demo-cta a { color: var(--accent); font-weight: 600; text-decoration: none; }
+.demo-cta a:hover { text-decoration: underline; }
+.demo-banner { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0; padding: 12px 18px; margin: 20px 0; font-size: 14px; }
+.demo-banner a { color: var(--accent); font-weight: 600; }
+
 
 .error {
   background: #3a1a1e; border: 1px solid var(--red); color: #ffb4ab;

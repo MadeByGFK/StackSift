@@ -13,6 +13,7 @@ import tempfile
 import time
 
 from stacksift.analyzer import analyze_log_file
+from stacksift.redact import redact_secrets
 from stacksift.insights import (
     determine_health,
     most_frequent_issue,
@@ -97,6 +98,8 @@ def _jsonline_to_text(line: str) -> str:
 def analyze_upload(filename: str, content: bytes) -> dict:
     """Analyze an uploaded log file. Returns report data; never retains the file."""
     text = content.decode("utf-8", errors="replace")
+    # Redact secrets first: they never reach the analyzer, the report, or disk.
+    text = redact_secrets(text)
     lines = text.splitlines()
 
     detected_format = "text"
