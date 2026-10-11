@@ -6,6 +6,67 @@ from stacksift.parser import parse_log_line
 from stacksift.scanner import find_log_files
 
 
+# --- Structured field extraction (Phase A) --------------------------------
+# Extract key=value pairs from messages, preserving original numeric values.
+# These survive normalization for diagnostic analysis (Phase C).
+# Format: field -> value (numbers as int/float, others as str).
+
+_KV_EXTRACT = re.compile(r'\b([a-z_][a-z0-9_]*)=("[^"]*"|[^\s,)]+)')
+
+# Fields whose distinct values support cross-service correlation.
+_CORRELATION_FIELDS = {
+    "pool", "db_node", "trace_id", "request_id", "service",
+    "node", "host", "instance",
+}
+
+# Numeric telemetry fields for resource pressure analysis.
+# Others are preserved but not specially tracked.
+_TELEMETRY_FIELDS = {
+    "active", "idle", "pending", "max_connections",
+    "held_ms", "connect_p95_ms", "heap_used_mb", "heap_max_mb",
+    "cpu_pct", "queue_depth", "duration_ms",
+}
+
+
+# Maximum correlation samples per issue template (bounded).
+# If truncated, the issue gets "correlation_truncated": True.
+_MAX_CORRELATION_SAMPLES = 20
+
+
+def _bucket_key(timestamp: str) -> str | None:
+    """5-minute bucket key matching timeline buckets. None if no timestamp."""
+    if not timestamp:
+        return None
+    try:
+        # Timestamps are UTC ISO: "2026-10-11T12:03:45.000Z"
+        # Bucket to 5-minute: "2026-10-11T12:00"
+        date_part, time_part = timestamp.split("T")
+        hour, minute = time_part.split(":")[:2]
+        bucket_min = (int(minute) // 5) * 5
+        return f"{date_part}T{hour}:{bucket_min:02d}"
+    except (ValueError, IndexError):
+        return None
+
+
+def extract_structured_fields(message: str) -> dict:
+    """Extract key=value fields, preserving numeric types.
+
+    Returns dict of field -> value (int/float for numbers, str otherwise).
+    """
+    fields = {}
+    for key, raw_value in _KV_EXTRACT.findall(message):
+        value = raw_value.strip('"')
+        # Preserve numeric types
+        try:
+            if '.' in value:
+                fields[key] = float(value)
+            else:
+                fields[key] = int(value)
+        except ValueError:
+            fields[key] = value
+    return fields
+
+
 # --- Issue normalization for grouping -------------------------------------
 # Repeated event templates vary by IDs, durations, and counters. Normalize
 # those so they cluster; keep semantically meaningful values (notably HTTP
@@ -111,9 +172,93 @@ def analyze_log_file(file_path: str) -> dict:
                     issue_counts[template] = {
                         "level": entry.level,
                         "count": 0,
+                        # Phase A: structured evidence preserved alongside
+                        # the normalized template. Does not affect grouping,
+                        # scoring, or ranking — for Phase C diagnostic use.
+                        "services": set(),
+                        "correlation": {},  # field -> set of distinct values
+                        "telemetry": {},    # field -> {"min": x, "max": x}
+                        "first_seen": None,
+                        "last_seen": None,
+                        # Phase A validation: bounded temporal + relationship
+                        "telemetry_buckets": {},  # bucket -> field -> {min,max,count}
+                        "correlation_samples": [],  # bounded list of relationships
+                        "correlation_truncated": False,
                     }
 
-                issue_counts[template]["count"] += 1
+                issue = issue_counts[template]
+                issue["count"] += 1
+
+                # Preserve structured evidence (Phase A — no behavior change)
+                fields = extract_structured_fields(entry.message)
+                if entry.service:
+                    issue["services"].add(entry.service)
+                for field in _CORRELATION_FIELDS:
+                    if field in fields:
+                        issue["correlation"].setdefault(field, set()).add(
+                            str(fields[field])
+                        )
+                # Also check entry.service for correlation
+                if entry.service:
+                    issue["correlation"].setdefault("service", set()).add(
+                        entry.service
+                    )
+                for field in _TELEMETRY_FIELDS:
+                    if field in fields and isinstance(fields[field], (int, float)):
+                        val = fields[field]
+                        rng = issue["telemetry"].setdefault(
+                            field, {"min": val, "max": val}
+                        )
+                        rng["min"] = min(rng["min"], val)
+                        rng["max"] = max(rng["max"], val)
+                        # Time-bucketed: preserves trend direction
+                        bucket = _bucket_key(entry.timestamp)
+                        if bucket:
+                            bucket_data = issue["telemetry_buckets"].setdefault(
+                                bucket, {}
+                            )
+                            b_rng = bucket_data.setdefault(
+                                field, {"min": val, "max": val, "count": 0}
+                            )
+                            b_rng["min"] = min(b_rng["min"], val)
+                            b_rng["max"] = max(b_rng["max"], val)
+                            b_rng["count"] += 1
+                # Bounded correlation samples: preserve actual relationships
+                # between trace_id, service, db_node, and timestamp.
+                # Unlike the correlation SETS (which lose relationships),
+                # samples show which trace used which node when.
+                if len(issue["correlation_samples"]) < _MAX_CORRELATION_SAMPLES:
+                    sample = {}
+                    for f in ("trace_id", "request_id", "service", "db_node",
+                              "pool", "node"):
+                        if f in fields:
+                            sample[f] = str(fields[f])
+                        elif f == "service" and entry.service:
+                            sample[f] = entry.service
+                    if sample and entry.timestamp:
+                        sample["timestamp"] = entry.timestamp
+                        # Avoid duplicate samples
+                        if sample not in issue["correlation_samples"]:
+                            issue["correlation_samples"].append(sample)
+                elif not issue["correlation_truncated"]:
+                    # Check if there are more distinct relationships
+                    issue["correlation_truncated"] = True
+                if entry.timestamp:
+                    if (issue["first_seen"] is None or
+                            entry.timestamp < issue["first_seen"]):
+                        issue["first_seen"] = entry.timestamp
+                    if (issue["last_seen"] is None or
+                            entry.timestamp > issue["last_seen"]):
+                        issue["last_seen"] = entry.timestamp
+
+    # Convert sets to sorted lists for JSON serializability.
+    # Phase A data is additive — existing consumers see the same
+    # level/count fields they always have.
+    for issue in issue_counts.values():
+        issue["services"] = sorted(issue["services"])
+        issue["correlation"] = {
+            k: sorted(v) for k, v in issue["correlation"].items()
+        }
 
     return {
         "file": str(path),
@@ -168,9 +313,57 @@ def analyze_path(input_path: str) -> dict:
                 combined_issue_counts[message] = {
                     "level": issue_data["level"],
                     "count": 0,
+                    "services": set(),
+                    "correlation": {},
+                    "telemetry": {},
+                    "first_seen": None,
+                    "last_seen": None,
+                    "telemetry_buckets": {},
+                    "correlation_samples": [],
+                    "correlation_truncated": False,
                 }
 
-            combined_issue_counts[message]["count"] += issue_data["count"]
+            combined = combined_issue_counts[message]
+            combined["count"] += issue_data["count"]
+            # Merge Phase A structured evidence
+            combined["services"].update(issue_data.get("services", []))
+            for field, values in issue_data.get("correlation", {}).items():
+                combined["correlation"].setdefault(field, set()).update(values)
+            for field, rng in issue_data.get("telemetry", {}).items():
+                existing = combined["telemetry"].setdefault(
+                    field, {"min": rng["min"], "max": rng["max"]}
+                )
+                existing["min"] = min(existing["min"], rng["min"])
+                existing["max"] = max(existing["max"], rng["max"])
+            # Merge time-bucketed telemetry
+            for bucket, fields in issue_data.get("telemetry_buckets", {}).items():
+                bucket_data = combined["telemetry_buckets"].setdefault(bucket, {})
+                for field, rng in fields.items():
+                    existing = bucket_data.setdefault(
+                        field, {"min": rng["min"], "max": rng["max"], "count": 0}
+                    )
+                    existing["min"] = min(existing["min"], rng["min"])
+                    existing["max"] = max(existing["max"], rng["max"])
+                    existing["count"] += rng.get("count", 0)
+            # Merge correlation samples (bounded)
+            for sample in issue_data.get("correlation_samples", []):
+                if (len(combined["correlation_samples"]) < _MAX_CORRELATION_SAMPLES
+                        and sample not in combined["correlation_samples"]):
+                    combined["correlation_samples"].append(sample)
+            if issue_data.get("correlation_truncated"):
+                combined["correlation_truncated"] = True
+            fs, ls = issue_data.get("first_seen"), issue_data.get("last_seen")
+            if fs and (combined["first_seen"] is None or fs < combined["first_seen"]):
+                combined["first_seen"] = fs
+            if ls and (combined["last_seen"] is None or ls > combined["last_seen"]):
+                combined["last_seen"] = ls
+
+    # Convert sets to sorted lists for JSON serializability
+    for issue in combined_issue_counts.values():
+        issue["services"] = sorted(issue["services"])
+        issue["correlation"] = {
+            k: sorted(v) for k, v in issue["correlation"].items()
+        }
 
     return {
         "file": str(path),
