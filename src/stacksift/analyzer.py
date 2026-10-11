@@ -1,8 +1,40 @@
+import re
 from collections import Counter
 from pathlib import Path
 
 from stacksift.parser import parse_log_line
 from stacksift.scanner import find_log_files
+
+
+# --- Issue normalization for grouping -------------------------------------
+# Repeated event templates vary by IDs, durations, and counters. Normalize
+# those so they cluster; keep semantically meaningful values (notably HTTP
+# status) intact so 500s and 503s stay distinguishable.
+
+_ID_SUBS = [
+    (re.compile(r"\breq-[a-f0-9]+\b"), "req-<id>"),
+    (re.compile(r"\bord-\d+\b"), "ord-<id>"),
+    (re.compile(r"\bconn-\d+\b"), "conn-<id>"),
+    (re.compile(r"\b[a-f0-9]{16,}\b"), "<hex>"),
+]
+
+_NUMERIC_VALUE = re.compile(r"\b([a-z_]+)=(\d+)\b")
+
+
+def _keep_or_normalize(match: re.Match) -> str:
+    # HTTP status codes are diagnostically meaningful — keep them.
+    if match.group(1) == "status":
+        return match.group(0)
+    return f"{match.group(1)}=<n>"
+
+
+def normalize_issue(message: str) -> str:
+    """Return the grouping template for a log message."""
+    msg = message
+    for pattern, replacement in _ID_SUBS:
+        msg = pattern.sub(replacement, msg)
+    msg = _NUMERIC_VALUE.sub(_keep_or_normalize, msg)
+    return msg
 
 
 def analyze_log_file(file_path: str) -> dict:
@@ -12,6 +44,7 @@ def analyze_log_file(file_path: str) -> dict:
         raise FileNotFoundError(f"Log file not found: {file_path}")
 
     level_counts = Counter()
+    service_counts = Counter()
     issue_counts = {}
     total_lines = 0
     parsed_lines = 0
@@ -28,15 +61,18 @@ def analyze_log_file(file_path: str) -> dict:
 
             parsed_lines += 1
             level_counts[entry.level] += 1
+            if entry.service:
+                service_counts[entry.service] += 1
 
             if entry.level in {"WARN", "ERROR", "CRITICAL"}:
-                if entry.message not in issue_counts:
-                    issue_counts[entry.message] = {
+                template = normalize_issue(entry.message)
+                if template not in issue_counts:
+                    issue_counts[template] = {
                         "level": entry.level,
                         "count": 0,
                     }
 
-                issue_counts[entry.message]["count"] += 1
+                issue_counts[template]["count"] += 1
 
     return {
         "file": str(path),
@@ -44,6 +80,7 @@ def analyze_log_file(file_path: str) -> dict:
         "parsed_lines": parsed_lines,
         "malformed_lines": malformed_lines,
         "level_counts": dict(level_counts),
+        "service_counts": dict(service_counts),
         "issues": issue_counts,
     }
 
@@ -56,6 +93,7 @@ def analyze_path(input_path: str) -> dict:
         raise FileNotFoundError(f"No .log files found at: {input_path}")
 
     combined_level_counts = Counter()
+    combined_service_counts = Counter()
     combined_issue_counts = {}
     total_lines = 0
     parsed_lines = 0
@@ -70,6 +108,7 @@ def analyze_path(input_path: str) -> dict:
         parsed_lines += results["parsed_lines"]
         malformed_lines += results["malformed_lines"]
         combined_level_counts.update(results["level_counts"])
+        combined_service_counts.update(results.get("service_counts", {}))
         
         for message, issue_data in results["issues"].items():
             if message not in combined_issue_counts:
@@ -87,5 +126,6 @@ def analyze_path(input_path: str) -> dict:
         "parsed_lines": parsed_lines,
         "malformed_lines": malformed_lines,
         "level_counts": dict(combined_level_counts),
+        "service_counts": dict(combined_service_counts),
         "issues": combined_issue_counts,
     }

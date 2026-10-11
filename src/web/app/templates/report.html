@@ -59,6 +59,19 @@
   </div>
   {% endfor %}
 
+  {% if results.service_counts %}
+  <h3 class="section-title">By service</h3>
+  <div class="card">
+    {% for svc, count in results.service_counts|dictsort(by='value')|reverse %}
+    <div class="sev-row">
+      <div class="name">{{ svc }}</div>
+      <div class="bar-wrap"><div class="bar info" style="width: {{ (count / results.total_lines * 100) }}%"></div></div>
+      <div class="count">{{ count }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
   <h3 class="section-title">Issues <span style="color:var(--muted);font-weight:400;font-size:14px">— sorted by severity, then frequency</span></h3>
   {% if sorted_issues %}
   <div class="card" style="padding:0 20px">
