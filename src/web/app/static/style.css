@@ -131,8 +131,8 @@ footer a { color: var(--muted); }
 
 .sev-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
 .sev-row .name { width: 90px; font-weight: 700; font-size: 14px; }
-.sev-row .bar-wrap { flex: 1; background: #081426; border-radius: 6px; height: 22px; overflow: hidden; }
-.sev-row .bar { height: 100%; border-radius: 6px; }
+.sev-row .bar-wrap { flex: 1; background: #081426; border-radius: 6px; height: 22px; overflow: hidden; display: flex; align-items: stretch; }
+.sev-row .bar { border-radius: 6px; }
 .sev-row .count { width: 70px; text-align: right; color: var(--muted); font-size: 14px; }
 .bar.critical { background: var(--red); } .bar.error { background: #e8944a; }
 .bar.warn { background: var(--yellow); } .bar.info { background: var(--accent); }
