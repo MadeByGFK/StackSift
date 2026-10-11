@@ -21,10 +21,14 @@ _ID_FIELDS = {
     "idempotency_key",
 }
 
+# Fields that identify WHERE something happened (hosts, nodes, instances).
+# Never normalized — collapsing ord-01/ord-02 would hide which node failed.
+_PRESERVE_FIELDS = {
+    "node", "host", "hostname", "instance", "pod", "container",
+}
+
 _ID_SUBS = [
     (re.compile(r"\breq-[a-f0-9]+\b"), "req-<id>"),
-    (re.compile(r"\bord-\d+\b"), "ord-<id>"),
-    (re.compile(r"\bconn-\d+\b"), "conn-<id>"),
     (re.compile(r"\b[a-f0-9]{16,}\b"), "<hex>"),
 ]
 
@@ -44,8 +48,11 @@ def _keep_or_normalize(match: re.Match) -> str:
 def normalize_issue(message: str) -> str:
     """Return the grouping template for a log message."""
     msg = message
-    # 1. Field-name-based: normalize the VALUE of known identifier fields.
+    # 1. Field-name-based: normalize the VALUE of known identifier fields,
+    #    except fields that identify where it happened (node, host, ...).
     for field in _ID_FIELDS:
+        if field in _PRESERVE_FIELDS:
+            continue
         msg = re.sub(rf"\b{field}=[^\s,)]+", f"{field}=<id>", msg)
     # 2. Timestamps embedded in values.
     msg = _TS_VALUE.sub("<ts>", msg)

@@ -49,7 +49,7 @@
     <div class="why">{{ diagnostic_explanation|join(' · ') }}</div>
     {% endif %}
     {% if top_issue and top_issue[0] != diagnostic_issue[0] %}
-    <div class="k" style="margin-top:10px">Most frequent</div>
+    <div class="k" style="margin-top:10px">Most frequent warning/error</div>
     <div class="v">[{{ top_issue[1].level }}] {{ top_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ top_issue[1].count }}</span></div>
     {% endif %}
   </div>
