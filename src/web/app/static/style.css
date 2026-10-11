@@ -136,6 +136,8 @@ footer a { color: var(--muted); }
 .sev-row .count { width: 70px; text-align: right; color: var(--muted); font-size: 14px; }
 .bar.critical { background: var(--red); } .bar.error { background: #e8944a; }
 .bar.warn { background: var(--yellow); } .bar.info { background: var(--accent); }
+/* neutralize generic .error message-box styles on severity bars */
+.sev-row .bar.error { margin: 0; padding: 0; border: 0; }
 
 table.issues { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
 table.issues th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
