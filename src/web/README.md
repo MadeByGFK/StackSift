@@ -6,7 +6,7 @@ The hosted front end for [StackSift](https://github.com/MadeByGFK/StackSift).
 
 Drop in a log file, get an incident summary — severity counts, recurring
 issues ranked by severity, a health verdict, and the #1 thing to investigate
-first. Free, no signup, nothing stored.
+first. Free, no signup, no upload archive.
 
 ## Features
 
@@ -14,14 +14,14 @@ first. Free, no signup, nothing stored.
 - Plain-text logs plus auto-detected **JSON-lines** (converted on the fly)
 - HTML incident report in the browser, or download a `.txt` summary
 - Free tier: 10 analyses/hour per IP (in-memory limiter, no accounts yet)
-- Private by design: uploads are analyzed in memory and deleted immediately
+- Private by design: temporary uploads with best-effort secret redaction
 
 ## Run locally
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --no-proxy-headers
 ```
 
 Open http://localhost:8000 and try the sample logs in the
@@ -51,15 +51,61 @@ app/
   static/        # stylesheet
 ```
 
-`requirements.txt` installs the StackSift analyzer straight from GitHub, so
-the web app always tracks the library.
+The diagnostic library is vendored in `app/vendor/`.
 
 ## Privacy model
 
-Uploads are written to a temp file, analyzed, and deleted in a `finally`
-block. Contents are never logged, stored, or persisted. Reports are rendered
-per-request — there are no share links because there is nothing stored to
-link to.
+Starlette's multipart parser uses a spooled temporary file. Larger uploads
+can reach disk unredacted before the endpoint runs. The analysis service
+redacts recognized patterns, writes a separate temporary analysis file, and
+unlinks it in a finally block. The framework closes the upload spool during
+request cleanup. Abrupt termination can interrupt cleanup; this is not a
+secure-erasure guarantee. Redaction is best effort and can miss secrets.
+Operational request logs remain enabled. No upload archive is maintained.
+
+Disabling spooling alone would put larger uploads in RAM without solving
+admission control. A memory-only guarantee requires bounded streaming input,
+early size enforcement, concurrency limits, and an analyzer that accepts
+in-memory input. This patch deliberately retains spooling and discloses it.
+
+## Trusted ingress policy (required before promotion)
+
+The Procfile disables Uvicorn proxy-header rewriting so the socket peer is
+available for trust checks. Set `STACKSIFT_TRUSTED_PROXY_CIDRS` to a
+comma-separated list of verified ingress CIDRs. The default trusts none.
+Never configure a broad private range merely because a proxy used one address
+in it. Confirm Railway's ingress ranges and isolation for this deployment.
+
+Only a configured peer may supply one valid, globally routable `X-Real-IP`.
+IPv4 and IPv6 are canonicalized, including IPv4-mapped IPv6. Duplicate,
+malformed, private or scoped header values fall back to the socket peer.
+X-Forwarded-For is ignored. Invalid CIDR configuration fails startup.
+Fallback can group clients behind a proxy, so an unset policy is safe against
+header spoofing but is not a usable production per-client policy.
+
+Before deployment, verify the configured ranges and that ingress overwrites
+client-supplied X-Real-IP, including through the production custom domain.
+Test normal IPv4/IPv6 traffic and forged/duplicate headers on staging.
+The configuration has not been changed remotely by this patch.
+
+## Reproducible validation
+
+From the repository root:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+PYTHONPATH=src/web python -m app.smoke_test
+```
+
+The original full suite collected 80 tests: 79 passed and one failed.
+`tests/test_insights 2.py` was a stale duplicate with four cases already
+covered by `test_insights.py`; its old Healthy expectation contradicted the
+current no-timeline contract. Removing that duplicate preserves the 76
+current cases without ignoring failures or changing diagnostic behavior.
+Additional web tests cover proxy trust, address parsing, HTTP quota accounting
+and Retry-After. The previously reported six frozen benchmarks are not in
+this repository; no benchmark pass claim is made here.
 
 ## Roadmap
 

@@ -1,7 +1,6 @@
 """StackSift web — free log-file analyzer.
 
-Thin slice: upload a log file, get an incident summary. No accounts, no
-storage. Rate-limited free tier; auth + credits come later once usage proves
+Thin slice: upload a log file, get an incident summary. No accounts or retained upload archive. Rate-limited free tier; auth + credits come later once usage proves
 demand.
 """
 
@@ -15,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.rate_limit import RateLimiter
+from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
 from app.service import analyze_upload, render_text_report
 
@@ -46,20 +46,6 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-def _client_ip(request: Request) -> str:
-    """Proxy-aware client IP resolution for Railway."""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        for part in forwarded.split(","):
-            ip = part.strip()
-            if ip and not ip.startswith(("10.", "192.168.", "127.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2")):
-                try:
-                    octets = ip.split(".")
-                    if len(octets) == 4 and all(0 <= int(o) <= 255 for o in octets):
-                        return ip
-                except:
-                    continue
-    return request.client.host if request.client else "unknown"
 
 
 @app.get("/health")
@@ -140,7 +126,7 @@ async def analyze(
     limiter.record(ip)
 
     # The upload is analyzed from a temp file and deleted immediately —
-    # see app/service.py. Nothing is stored.
+    # see app/service.py. The framework may also spool the raw upload to disk.
     data = analyze_upload(file.filename, content)
 
     # Handle error dicts from analyze_upload (binary, too many lines, timeout, etc.)
