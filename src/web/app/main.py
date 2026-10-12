@@ -113,6 +113,10 @@ async def analyze(
     # see app/service.py. Nothing is stored.
     data = analyze_upload(file.filename, content)
 
+    # Handle error dicts from analyze_upload (binary, too many lines, timeout, etc.)
+    if isinstance(data, dict) and "error" in data:
+        return error(data.get("message", "Analysis failed."), status=400)
+
     if output == "txt":
         report = render_text_report(data)
         stem = Path(file.filename).stem

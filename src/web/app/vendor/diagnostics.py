@@ -319,13 +319,51 @@ def extract_evidence(template, issue, all_issues, degradation_window, timeline_b
     return evidence
 
 
-def rank_candidates(issues, timeline_buckets):
+# Complexity bound: maximum issues to rank.
+# Prevents O(N^2) blowup in _explanatory_coverage_score when high-cardinality
+# IDs defeat template normalization. Issues are pre-sorted by frequency so
+# the most common patterns are always ranked.
+MAX_RANK_CANDIDATES = 1000
+
+
+def rank_candidates(issues, timeline_buckets, max_candidates=MAX_RANK_CANDIDATES):
     """C2: Rank issues by evidence-based diagnostic value.
 
-    Returns list of (template, total_score, evidence_dict) sorted
-    by score descending. Deterministic, explainable, no LLM.
+    Returns (ranked, degradation_window, truncated) where ranked is a list
+    of (template, total_score, evidence_dict) sorted by score descending.
+    Deterministic, explainable, no LLM.
+
+    If len(issues) exceeds max_candidates, only the most frequent issues
+    are ranked and truncated=True. Callers must surface truncation; never
+    silently present partial results as comprehensive.
     """
     degradation_window = _detect_degradation_window(timeline_buckets)
+
+    # Bound complexity before O(N^2) evidence extraction
+    truncated = False
+    truncated_count = 0
+    if len(issues) > max_candidates:
+        truncated = True
+        truncated_count = len(issues) - max_candidates
+        # Preselect candidates by diagnostic importance, not just frequency.
+        # A rare CRITICAL issue with specific error codes must not be dropped
+        # in favor of thousands of routine errors.
+        # Order: severity (CRITICAL first), specificity (named problems first),
+        # then frequency, then template for determinism.
+        # This is candidate SELECTION, not scoring — the evidence-based ranking
+        # below is unchanged.
+        _SEV_ORDER = {"CRITICAL": 0, "ERROR": 1, "WARN": 2, "INFO": 3}
+        def _preselect_key(kv):
+            template, issue = kv
+            sev = _SEV_ORDER.get(issue.get("level", "INFO"), 4)
+            # Specificity: does the template NAME the problem?
+            # (Uses the same signal as the ranking's specificity score,
+            # but computed here for preselection only.)
+            spec = _diagnostic_specificity_score(template)
+            count = issue.get("count", 0)
+            return (sev, -spec, -count, template)
+        sorted_by_importance = sorted(issues.items(), key=_preselect_key)
+        issues = dict(sorted_by_importance[:max_candidates])
 
     ranked = []
     for template, issue in issues.items():
@@ -349,7 +387,7 @@ def rank_candidates(issues, timeline_buckets):
 
     # Deterministic tiebreak: template string
     ranked.sort(key=lambda x: (-x[1], x[0]))
-    return ranked, degradation_window
+    return ranked, degradation_window, truncated, truncated_count
 
 
 def explain_ranking(template, score, evidence):

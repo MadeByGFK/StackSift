@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import tempfile
 import time
 
@@ -28,6 +29,32 @@ from app.vendor.diagnostics import (
     build_notable_events,
     _detect_degradation_window,
 )
+
+# --- Robustness: limits, timeout, binary detection ------------------------
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_UPLOAD_LINES = 50_000
+ANALYSIS_TIMEOUT_SECONDS = 25
+
+
+class AnalysisTimeout(Exception):
+    """Raised when analysis exceeds the timeout."""
+    pass
+
+
+def _timeout_handler(signum, frame):
+    raise AnalysisTimeout(f"Analysis exceeded {ANALYSIS_TIMEOUT_SECONDS}s")
+
+
+def _is_binary_content(content: bytes, sample_size: int = 8192) -> bool:
+    """Detect binary files via NUL bytes and control character ratio."""
+    if b"\x00" in content[:sample_size]:
+        return True
+    sample = content[:sample_size]
+    if not sample:
+        return False
+    text_chars = sum(1 for b in sample if 32 <= b <= 126 or b in (9, 10, 13))
+    return (len(sample) - text_chars) / len(sample) > 0.3
 
 # JSON-lines field names we recognize (common variants).
 _TS_FIELDS = ("timestamp", "time", "@timestamp", "datetime", "ts")
@@ -106,10 +133,40 @@ def _jsonline_to_text(line: str) -> str:
 
 def analyze_upload(filename: str, content: bytes) -> dict:
     """Analyze an uploaded log file. Returns report data; never retains the file."""
+    # --- Input validation (robustness) ---
+    if len(content) == 0:
+        return {
+            "error": "empty_file",
+            "message": "The uploaded file is empty. Please upload a log file with content.",
+            "filename": filename,
+        }
+    if len(content) > MAX_UPLOAD_BYTES:
+        size_mb = len(content) / (1024 * 1024)
+        return {
+            "error": "file_too_large",
+            "message": f"File too large ({size_mb:.1f}MB). Maximum is 10MB. "
+                       "For larger files, consider splitting by time range.",
+            "filename": filename,
+        }
+    if _is_binary_content(content):
+        return {
+            "error": "binary_file",
+            "message": "This appears to be a binary file, not a text log. "
+                       "StackSift analyzes text logs. If this is a log file, "
+                       "ensure it's saved as plain text (UTF-8).",
+            "filename": filename,
+        }
     text = content.decode("utf-8", errors="replace")
     # Redact secrets first: they never reach the analyzer, the report, or disk.
     text = redact_secrets(text)
     lines = text.splitlines()
+    if len(lines) > MAX_UPLOAD_LINES:
+        return {
+            "error": "too_many_lines",
+            "message": f"Too many lines ({len(lines):,}). Maximum is 50,000 lines. "
+                       "For larger files, consider splitting by time range.",
+            "filename": filename,
+        }
 
     detected_format = "text"
     adapted = False
@@ -121,55 +178,70 @@ def analyze_upload(filename: str, content: bytes) -> dict:
 
     tmp_path = None
     start = time.perf_counter()
+    # SIGALRM covers the ENTIRE pipeline: parsing, ranking, Phase D.
+    # (Previous version only covered analyze_log_file, leaving rank_candidates
+    # and presentation unprotected against pathological inputs.)
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(ANALYSIS_TIMEOUT_SECONDS)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".log", delete=False, encoding="utf-8"
-        ) as tmp:
-            tmp.write(text)
-            tmp_path = tmp.name
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".log", delete=False, encoding="utf-8"
+            ) as tmp:
+                tmp.write(text)
+                tmp_path = tmp.name
 
-        results = analyze_log_file(tmp_path)
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-    elapsed = time.perf_counter() - start
+            results = analyze_log_file(tmp_path)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        elapsed = time.perf_counter() - start
 
-    health_label, health_color = determine_health(
-        results["level_counts"],
-        [b["warn"] + b["error"] + b["critical"]
-         for b in build_timeline(results.get("events", []))],
-    )
-
-    # Phase C: evidence-based diagnostic ranking
-    timeline = build_timeline(results.get("events", []))
-    ranked, _ = rank_candidates(results["issues"], timeline)
-    diagnostic = None
-    diagnostic_explanation = None
-    if ranked:
-        top_template, top_score, top_evidence = ranked[0]
-        top_issue = results["issues"][top_template]
-        diagnostic = (top_template, top_issue)
-        diagnostic_explanation = explain_ranking(
-            top_template, top_score, top_evidence
+        health_label, health_color = determine_health(
+            results["level_counts"],
+            [b["warn"] + b["error"] + b["critical"]
+             for b in build_timeline(results.get("events", []))],
         )
 
-    # Phase D: incident section and notable events
-    # (diagnostic_issue contract preserved for backward compatibility)
-    degradation_window = _detect_degradation_window(timeline)
-    incident_section = build_incident_section(
-        ranked, results["issues"], degradation_window, timeline
-    )
-    # Collect templates shown in incident section to exclude from notable
-    incident_templates = set()
-    if incident_section["type"] != "none" and ranked:
-        incident_templates.add(ranked[0][0])
-        se = incident_section.get("supporting_evidence", {})
-        for key in ("observed", "correlated", "hypothesized"):
-            for item in se.get(key, []):
-                incident_templates.add(item[0])
-    notable_events = build_notable_events(
-        ranked, results["issues"], incident_templates
-    )
+        # Phase C: evidence-based diagnostic ranking
+        timeline = build_timeline(results.get("events", []))
+        ranked, _, truncated, truncated_count = rank_candidates(results["issues"], timeline)
+        diagnostic = None
+        diagnostic_explanation = None
+        if ranked:
+            top_template, top_score, top_evidence = ranked[0]
+            top_issue = results["issues"][top_template]
+            diagnostic = (top_template, top_issue)
+            diagnostic_explanation = explain_ranking(
+                top_template, top_score, top_evidence
+            )
+
+        # Phase D: incident section and notable events
+        # (diagnostic_issue contract preserved for backward compatibility)
+        degradation_window = _detect_degradation_window(timeline)
+        incident_section = build_incident_section(
+            ranked, results["issues"], degradation_window, timeline
+        )
+        # Collect templates shown in incident section to exclude from notable
+        incident_templates = set()
+        if incident_section["type"] != "none" and ranked:
+            incident_templates.add(ranked[0][0])
+            se = incident_section.get("supporting_evidence", {})
+            for key in ("observed", "correlated", "hypothesized"):
+                for item in se.get(key, []):
+                    incident_templates.add(item[0])
+        notable_events = build_notable_events(
+            ranked, results["issues"], incident_templates
+        )
+    except AnalysisTimeout:
+        return {
+            "error": "analysis_timeout",
+            "message": f"Analysis exceeded {ANALYSIS_TIMEOUT_SECONDS}s timeout. "
+                       "The log may contain pathological patterns.",
+            "filename": filename,
+        }
+    finally:
+        signal.alarm(0)  # Cancel alarm
 
     return {
         "filename": filename,
@@ -183,6 +255,14 @@ def analyze_upload(filename: str, content: bytes) -> dict:
         "diagnostic_explanation": diagnostic_explanation,
         "incident_section": incident_section,
         "notable_events": notable_events,
+        # Complexity bound disclosure (never silently present partial results)
+        "complexity_truncated": truncated,
+        "complexity_notice": (
+            f"Analysis covered the {len(ranked)} most frequent of "
+            f"{len(ranked) + truncated_count} issue patterns. "
+            f"Results may be incomplete due to high diagnostic complexity."
+            if truncated else None
+        ),
         "timeline": timeline,
         "first_seen": results.get("first_seen"),
         "last_seen": results.get("last_seen"),
