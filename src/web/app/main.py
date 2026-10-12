@@ -110,18 +110,25 @@ async def analyze(
     if len(content) > MAX_BYTES:
         return error("That file is over the 10 MB free-tier limit.")
 
-    if not limiter.allowed(ip):
-        return error(
-            "Free-tier limit reached (10 analyses/hour). Please try again later.",
-            status=429,
-            headers={"Retry-After": "3600"},
-        )
-    if not burst_limiter.allowed(ip):
+    # Atomic check: verify both limits before recording either.
+    # Prevents rejected requests from consuming quota in the other limiter.
+    burst_ok = burst_limiter.check(ip)
+    hourly_ok = limiter.check(ip)
+    if not burst_ok:
         return error(
             "Too many requests. Please wait a minute and try again.",
             status=429,
             headers={"Retry-After": "60"},
         )
+    if not hourly_ok:
+        return error(
+            "Free-tier limit reached (10 analyses/hour). Please try again later.",
+            status=429,
+            headers={"Retry-After": "3600"},
+        )
+    # Both pass: record in both limiters
+    burst_limiter.record(ip)
+    limiter.record(ip)
 
     # The upload is analyzed from a temp file and deleted immediately —
     # see app/service.py. Nothing is stored.
