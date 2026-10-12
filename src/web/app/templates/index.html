@@ -74,7 +74,8 @@ document.getElementById('upload-form').addEventListener('submit', function() {
 
   <div class="privacy-notice">
     <h3>Privacy</h3>
-    <p>Your log is processed in memory and deleted immediately after analysis.
+    <p>Your log is analyzed and deleted immediately after processing.
+    A temporary file is created during analysis and removed afterward.
     Known secret patterns (API keys, tokens) are redacted before processing.
     Redaction uses pattern matching and may not catch every secret format —
     review your log for sensitive data before uploading.</p>

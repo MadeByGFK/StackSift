@@ -26,6 +26,12 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 # Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
+burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
+
+# NOTE: Global admission control REMOVED - does not work with
+# blocking sync analysis in async endpoints. The event loop
+# serializes requests, so the counter never reaches the limit.
+# See Beta Readiness report for details and recommended fix.
 
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_SUFFIXES = {".log", ".txt", ".text"}
@@ -79,12 +85,13 @@ async def analyze(
 ):
     ip = _client_ip(request)
 
-    def error(message: str, status: int = 400):
+    def error(message: str, status: int = 400, headers: dict = None):
         return templates.TemplateResponse(
             request,
             "index.html",
             {"error": message, "remaining": limiter.remaining(ip)},
             status_code=status,
+            headers=headers or {},
         )
 
     if not file.filename:
@@ -107,6 +114,13 @@ async def analyze(
         return error(
             "Free-tier limit reached (10 analyses/hour). Please try again later.",
             status=429,
+            headers={"Retry-After": "3600"},
+        )
+    if not burst_limiter.allowed(ip):
+        return error(
+            "Too many requests. Please wait a minute and try again.",
+            status=429,
+            headers={"Retry-After": "60"},
         )
 
     # The upload is analyzed from a temp file and deleted immediately —
