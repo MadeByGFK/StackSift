@@ -7,6 +7,9 @@ demand.
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -23,6 +26,8 @@ BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="StackSift", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+logger = logging.getLogger("stacksift.diagnostic")
 
 # Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
@@ -84,6 +89,14 @@ async def analyze(
     output: str = Form("html"),
 ):
     ip = _client_ip(request)
+    # TEMPORARY DIAGNOSTIC - REMOVE AFTER INVESTIGATION
+    ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:16]
+    logger.warning(
+        f"DIAG pid={os.getpid()} ip_hash={ip_hash} "
+        f"burst_id={id(burst_limiter)} hourly_id={id(limiter)} "
+        f"burst_n={len(burst_limiter._hits.get(ip, []))} "
+        f"hourly_n={len(limiter._hits.get(ip, []))}"
+    )
 
     def error(message: str, status: int = 400, headers: dict = None):
         return templates.TemplateResponse(
