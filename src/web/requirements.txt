@@ -2,5 +2,7 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 jinja2>=3.1
 python-multipart>=0.0.9
-# StackSift analyzer library (public repo)
-stacksift @ git+https://github.com/MadeByGFK/StackSift.git@89ce2eef10ce6e4a913e17a1e736227362ada154
+# NOTE: StackSift diagnostic library is fully vendored in app/vendor/
+# (see app/vendor/VENDORING.md). The pip-installed 'stacksift' package
+# is NOT required and MUST NOT be used for diagnostic functions.
+# This eliminates Railway pip-cache staleness as a deployment risk.
