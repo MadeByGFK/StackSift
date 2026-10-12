@@ -6,6 +6,35 @@
 <title>StackSift — Drop in a log file. Get an incident summary.</title>
 <meta name="description" content="StackSift turns noisy application logs into a quick, readable incident summary. Free, no signup, your file is deleted after analysis.">
 <link rel="stylesheet" href="/static/style.css?v=3">
+<style>
+.spinner {
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #1a365d;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 1rem;
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.privacy-notice {
+  background: #f7fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 1rem 1.5rem;
+  margin: 2rem 0;
+}
+.privacy-notice h3 { margin: 0 0 0.5rem 0; }
+.privacy-notice p { margin: 0; font-size: 0.9rem; color: #4a5568; }
+</style>
+<script>
+document.getElementById('upload-form').addEventListener('submit', function() {
+  document.getElementById('loading').style.display = 'block';
+});
+</script>
 </head>
 <body>
 <div class="wrap">
@@ -36,9 +65,20 @@
       <button type="submit" class="btn-ghost" name="output" value="txt">Download .txt report</button>
     </div>
   </form>
+  <div id="loading" style="display:none; text-align:center; padding:2rem;">
+    <div class="spinner"></div>
+    <p>Analyzing your log... This may take up to 30 seconds for large files.</p>
+  </div>
   <p class="demo-cta">No log handy? <a href="/demo">Try with sample logs →</a></p>
   <p class="rate-note">Free tier: {{ remaining }} of 10 analyses left this hour · No signup · No storage</p>
 
+  <div class="privacy-notice">
+    <h3>Privacy</h3>
+    <p>Your log is processed in memory and deleted immediately after analysis.
+    Known secret patterns (API keys, tokens) are redacted before processing.
+    Redaction uses pattern matching and may not catch every secret format —
+    review your log for sensitive data before uploading.</p>
+  </div>
   <div class="info-grid">
     <div class="card">
       <h3>Supported formats</h3>
