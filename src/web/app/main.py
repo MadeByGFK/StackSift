@@ -52,9 +52,18 @@ async def security_headers(request: Request, call_next):
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
+    """Proxy-aware client IP resolution for Railway."""
+    forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        for part in forwarded.split(","):
+            ip = part.strip()
+            if ip and not ip.startswith(("10.", "192.168.", "127.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2")):
+                try:
+                    octets = ip.split(".")
+                    if len(octets) == 4 and all(0 <= int(o) <= 255 for o in octets):
+                        return ip
+                except:
+                    continue
     return request.client.host if request.client else "unknown"
 
 
