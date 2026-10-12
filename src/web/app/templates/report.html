@@ -34,6 +34,12 @@
     </div>
   </section>
 
+  {% if complexity_truncated %}
+  <div class="complexity-notice">
+    <strong>⚠️ Analysis limited:</strong> {{ complexity_notice }}
+  </div>
+  {% endif %}
+
   <div class="stats">
     <div class="stat"><div class="num">{{ results.total_lines }}</div><div class="lbl">Total lines</div></div>
     <div class="stat"><div class="num">{{ results.parsed_lines }}</div><div class="lbl">Parsed</div></div>
