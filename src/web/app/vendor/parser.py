@@ -105,6 +105,14 @@ _LOG4J_COMMA = re.compile(
     r"(?P<level>[A-Z]+)\s+(?:\[(?P<svc>[^\]]+)\] )?(?:- )?(?P<msg>.*)$"
 )
 
+# OpenStack/Nova: optional collected-log filename, timestamp, PID, level, logger.
+_OPENSTACK = re.compile(
+    r"^(?:\S+\.log(?:\.\S+)?[ \t]+)?"
+    r"(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)[ \t]+"
+    r"\d+[ \t]+(?P<level>[A-Z]+)[ \t]+"
+    r"(?P<logger>[\w.]+)[ \t]+(?P<msg>.*)$"
+)
+
 # logfmt: "time=2026-10-11T12:00:00.648Z level=INFO service=x ..."
 _LOGFMT_KV = re.compile(r"(\w+)=(\"[^\"]*\"|\S+)")
 
@@ -230,6 +238,24 @@ def _parse_log4j_comma(line: str) -> Optional[LogEntry]:
                     message=message, service=service)
 
 
+def _parse_openstack(line: str) -> Optional[LogEntry]:
+    """Parse OpenStack entries without treating the filename date as event time."""
+    m = _OPENSTACK.match(line)
+    if not m:
+        return None
+    level = _normalize_level(m.group("level"))
+    if not level:
+        return None
+    # Keep request context and message intact; PID and logger are metadata.
+    message = m.group("msg")
+    return LogEntry(
+        timestamp=_normalize_timestamp(m.group("ts")) or "",
+        level=level,
+        message=message,
+        service=_extract_service_kv(message) or m.group("logger"),
+    )
+
+
 def _parse_plain_millis(line: str) -> Optional[LogEntry]:
     m = _PLAIN_MILLIS.match(line)
     if not m:
@@ -320,7 +346,7 @@ def parse_log_line(line: str) -> Optional[LogEntry]:
 
     # Structured text formats, most specific first.
     for parser in (_parse_logfmt, _parse_python, _parse_java, _parse_log4j_comma,
-                   _parse_plain_millis, _parse_iso, _parse_plain,
+                   _parse_openstack, _parse_plain_millis, _parse_iso, _parse_plain,
                    _parse_iso_no_level):
         result = parser(line)
         if result:
