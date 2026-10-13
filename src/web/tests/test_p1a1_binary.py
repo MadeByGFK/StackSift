@@ -67,10 +67,31 @@ def test_nul_byte_still_detected():
 
 
 def test_high_control_char_ratio_still_detected():
-    """Original 30% threshold still works for non-magic binaries."""
-    data = bytes(range(256)) * 10
+    """Original 30% threshold still works for non-magic binaries.
+    
+    ChatGPT review: bytes(range(256)) contains NUL, so it triggers NUL
+    detection without exercising the ratio check. Use NUL-free fixture.
+    """
+    # 40% control chars (\\x01), 60% text — no NUL bytes
+    data = b"\x01" * 40 + b"A" * 60
     assert _is_binary_content(data), "High control-char ratio not detected"
     print("✓ Control-char ratio detection preserved")
+
+
+def test_mz_text_not_rejected():
+    """Text starting with 'MZ' must not be rejected (ChatGPT review)."""
+    text = b"MZ service started successfully\n" * 10
+    assert not _is_binary_content(text), "MZ text false positive!"
+    r = analyze_upload("test.log", text)
+    assert r.get('error') != 'binary_file', "MZ text rejected!"
+    print("✓ MZ text not rejected")
+
+
+def test_real_mz_executable_detected():
+    """Real MZ executables (with NUL bytes) are still detected."""
+    mz = b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 50
+    assert _is_binary_content(mz), "Real MZ not detected"
+    print("✓ Real MZ executable detected")
 
 
 if __name__ == "__main__":
@@ -83,4 +104,6 @@ if __name__ == "__main__":
     test_empty_not_binary()
     test_nul_byte_still_detected()
     test_high_control_char_ratio_still_detected()
+    test_mz_text_not_rejected()
+    test_real_mz_executable_detected()
     print("\n✅ All P1-A1 regression tests passed!")
