@@ -169,10 +169,6 @@ table.issues tr:last-child td { border-bottom: none; }
 .seg-error { background: #e8944a; }
 .seg-warn { background: var(--yellow); }
 .tbar-label { font-size: 10px; color: var(--muted); margin-top: 4px; white-space: nowrap; }
-.phase-baseline { opacity: 0.45; }
-.phase-escalating { opacity: 0.75; }
-.phase-peak { opacity: 1; }
-.phase-declining { opacity: 0.6; }
 .tlegend { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .tlegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: baseline; }
 .tlegend .tphases { margin-left: auto; }

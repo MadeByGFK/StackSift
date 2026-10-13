@@ -1,7 +1,6 @@
 """StackSift web — free log-file analyzer.
 
-Thin slice: upload a log file, get an incident summary. No accounts, no
-storage. Rate-limited free tier; auth + credits come later once usage proves
+Thin slice: upload a log file, get an incident summary. No accounts or retained upload archive. Rate-limited free tier; auth + credits come later once usage proves
 demand.
 """
 
@@ -15,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.rate_limit import RateLimiter
+from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
 from app.service import analyze_upload, render_text_report
 
@@ -26,6 +26,12 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 # Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
+burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
+
+# NOTE: Global admission control REMOVED - does not work with
+# blocking sync analysis in async endpoints. The event loop
+# serializes requests, so the counter never reaches the limit.
+# See Beta Readiness report for details and recommended fix.
 
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 ALLOWED_SUFFIXES = {".log", ".txt", ".text"}
@@ -40,11 +46,6 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 @app.get("/health")
@@ -79,12 +80,13 @@ async def analyze(
 ):
     ip = _client_ip(request)
 
-    def error(message: str, status: int = 400):
+    def error(message: str, status: int = 400, headers: dict = None):
         return templates.TemplateResponse(
             request,
             "index.html",
             {"error": message, "remaining": limiter.remaining(ip)},
             status_code=status,
+            headers=headers or {},
         )
 
     if not file.filename:
@@ -103,14 +105,28 @@ async def analyze(
     if len(content) > MAX_BYTES:
         return error("That file is over the 10 MB free-tier limit.")
 
-    if not limiter.allowed(ip):
+    # Atomic check: verify both limits before recording either.
+    # Prevents rejected requests from consuming quota in the other limiter.
+    burst_ok = burst_limiter.check(ip)
+    hourly_ok = limiter.check(ip)
+    if not burst_ok:
+        return error(
+            "Too many requests. Please wait a minute and try again.",
+            status=429,
+            headers={"Retry-After": "60"},
+        )
+    if not hourly_ok:
         return error(
             "Free-tier limit reached (10 analyses/hour). Please try again later.",
             status=429,
+            headers={"Retry-After": "3600"},
         )
+    # Both pass: record in both limiters
+    burst_limiter.record(ip)
+    limiter.record(ip)
 
     # The upload is analyzed from a temp file and deleted immediately —
-    # see app/service.py. Nothing is stored.
+    # see app/service.py. The framework may also spool the raw upload to disk.
     data = analyze_upload(file.filename, content)
 
     # Handle error dicts from analyze_upload (binary, too many lines, timeout, etc.)

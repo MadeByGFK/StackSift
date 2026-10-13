@@ -26,6 +26,18 @@ class RateLimiter:
         hits.append(now)
         return True
 
+    def check(self, key: str) -> bool:
+        """Check without recording. For atomic multi-limiter checks."""
+        now = time.monotonic()
+        hits = self._hits[key]
+        while hits and now - hits[0] > self.window_seconds:
+            hits.popleft()
+        return len(hits) < self.max_requests
+
+    def record(self, key: str) -> None:
+        """Record a hit. Call only after check() passes."""
+        self._hits[key].append(time.monotonic())
+
     def remaining(self, key: str) -> int:
         now = time.monotonic()
         hits = self._hits[key]

@@ -76,9 +76,9 @@
     <div class="timeline">
       {% for b in timeline %}
       {% set issues = b.warn + b.error + b.critical %}
-      <div class="tbar" title="{{ b.label }} — {{ b.critical }} critical, {{ b.error }} errors, {{ b.warn }} warnings ({{ b.phase }})">
+      <div class="tbar" title="{{ b.label }} — {{ b.critical }} critical, {{ b.error }} errors, {{ b.warn }} warnings">
         <div class="tcount">{{ issues if issues > 0 else '' }}</div>
-        <div class="tstack phase-{{ b.phase }}" style="height: {{ (issues / tmax * 100) if tmax else 0 }}%">
+        <div class="tstack" style="height: {{ (issues / tmax * 100) if tmax else 0 }}%">
           {% if b.critical > 0 %}<div class="tseg seg-critical" style="height: {{ (b.critical / issues * 100) }}%"></div>{% endif %}
           {% if b.error > 0 %}<div class="tseg seg-error" style="height: {{ (b.error / issues * 100) }}%"></div>{% endif %}
           {% if b.warn > 0 %}<div class="tseg seg-warn" style="height: {{ (b.warn / issues * 100) }}%"></div>{% endif %}
@@ -91,7 +91,6 @@
       <span><i class="sw seg-critical"></i>Critical</span>
       <span><i class="sw seg-error"></i>Error</span>
       <span><i class="sw seg-warn"></i>Warning</span>
-      <span class="tphases"><i class="sw phase-baseline"></i>Baseline <i class="sw phase-escalating"></i>Escalating <i class="sw phase-peak"></i>Peak <i class="sw phase-declining"></i>Declining</span>
     </div>
   </div>
   {% endif %}
@@ -158,7 +157,7 @@
     <a href="/"><button type="button" class="btn-primary">Analyze another file</button></a>
   </div>
 
-  <p class="privacy">This report was generated in memory. Your file was deleted the moment analysis finished — nothing was stored.</p>
+  <p class="privacy">Uploads may be spooled to disk before redaction. Temporary files are cleaned up during normal processing. Redaction may miss sensitive data; review this report before sharing.</p>
 
   <footer>
     StackSift · a Goodfolk Digital project · <a href="https://github.com/MadeByGFK/StackSift">CLI on GitHub</a>

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StackSift — Drop in a log file. Get an incident summary.</title>
-<meta name="description" content="StackSift turns noisy application logs into a quick, readable incident summary. Free, no signup, your file is deleted after analysis.">
+<meta name="description" content="StackSift turns noisy application logs into a quick, readable incident summary. Free, no signup, uploads use temporary storage.">
 <link rel="stylesheet" href="/static/style.css?v=3">
 <style>
 .spinner {
@@ -70,14 +70,15 @@ document.getElementById('upload-form').addEventListener('submit', function() {
     <p>Analyzing your log... This may take up to 30 seconds for large files.</p>
   </div>
   <p class="demo-cta">No log handy? <a href="/demo">Try with sample logs →</a></p>
-  <p class="rate-note">Free tier: {{ remaining }} of 10 analyses left this hour · No signup · No storage</p>
+  <p class="rate-note">Free tier: {{ remaining }} of 10 analyses left this hour · No signup · Temporary processing</p>
 
   <div class="privacy-notice">
     <h3>Privacy</h3>
-    <p>Your log is processed in memory and deleted immediately after analysis.
-    Known secret patterns (API keys, tokens) are redacted before processing.
-    Redaction uses pattern matching and may not catch every secret format —
-    review your log for sensitive data before uploading.</p>
+    <p>Uploads may be temporarily written to disk before redaction while they
+    are received. We redact recognized secret patterns before creating a separate
+    temporary file for analysis. Temporary files are cleaned up during normal
+    request processing; abrupt process termination can interrupt cleanup.
+    Redaction may miss sensitive data. Review your log before uploading.</p>
   </div>
   <div class="info-grid">
     <div class="card">
@@ -90,9 +91,9 @@ document.getElementById('upload-form').addEventListener('submit', function() {
     <div class="card">
       <h3>Private by design</h3>
       <ul>
-        <li>Your file is analyzed <strong>in memory</strong> and deleted immediately after.</li>
-        <li>API keys, tokens, and passwords are <strong>redacted</strong> before analysis — they never appear in reports.</li>
-        <li>Nothing is stored, logged, or used to train anything.</li>
+        <li>Uploads use <strong>temporary storage</strong> during processing.</li>
+        <li>Recognized secret patterns are <strong>redacted</strong> before analysis; other sensitive data may appear in reports.</li>
+        <li>We do not maintain an upload archive or use uploads for training. Operational request logs are recorded.</li>
         <li>No account, no cookies, no tracking of file contents.</li>
       </ul>
     </div>
@@ -113,7 +114,7 @@ document.getElementById('upload-form').addEventListener('submit', function() {
   </div>
 
   <footer>
-    StackSift · a <a href="https://goodfolkdigital.com" style="color:var(--accent)">Goodfolk Digital</a> project · Your file is deleted the moment analysis finishes.
+    StackSift · a <a href="https://goodfolkdigital.com" style="color:var(--accent)">Goodfolk Digital</a> project · Uploads are processed using temporary storage.
   </footer>
 
 </div>
