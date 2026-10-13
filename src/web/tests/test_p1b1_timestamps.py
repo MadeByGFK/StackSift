@@ -113,16 +113,17 @@ def test_invalid_date_matching_regex():
 
 
 def test_mixed_formats_chronological_order():
-    """Mixed formats maintain chronological order in timeline.
+    """Mixed formats maintain chronological order across timeline buckets.
     
-    Strengthened test: verifies events from different formats are correctly
-    ordered chronologically, not just grouped.
+    ChatGPT re-review: the original test used events within a single 5-minute
+    bucket, so it couldn't detect ordering mistakes. This version spreads
+    events across multiple buckets and verifies actual bucket ordering.
     """
     lines = [
-        # Intentionally out of order to test sorting
-        "2015-07-29T17:43:00.000Z INFO [main] - iso format (latest)",
-        "2015-07-29 17:41:41,536 - INFO  [main] - comma millis (earliest)",
-        "2015-07-29 17:42:01.123 INFO [main] - dot millis (middle)",
+        # Intentionally out of order, spanning 3 buckets (5-min each)
+        "2015-07-29T17:52:00.000Z INFO [main] - iso format (latest, bucket 17:50)",
+        "2015-07-29 17:41:41,536 - INFO  [main] - comma millis (earliest, bucket 17:40)",
+        "2015-07-29 17:47:01.123 INFO [main] - dot millis (middle, bucket 17:45)",
     ]
     events = []
     for line in lines:
@@ -131,17 +132,35 @@ def test_mixed_formats_chronological_order():
         assert entry.timestamp, f"Empty timestamp for: {line}"
         events.append((entry.timestamp, entry.level))
     
-    timeline = build_timeline(events)
-    assert len(timeline) > 0, "Timeline empty"
+    timeline = build_timeline(events, bucket_minutes=5)
+    assert len(timeline) >= 3, f"Expected >=3 buckets, got {len(timeline)}"
     
     # All timestamps should be normalized to ISO format
     for ts, level in events:
         assert "T" in ts and ts.endswith("Z"), f"Not normalized: {ts}"
     
-    # Verify chronological order is preserved (earliest first in sorted timeline)
-    total = sum(b['total'] for b in timeline)
-    assert total == 3, f"Expected 3 events, got {total}"
-    print("✓ Mixed formats maintain chronological order")
+    # Verify buckets are in chronological order
+    # Bucket labels are HH:MM format, should be ascending
+    labels = [b['label'] for b in timeline]
+    # Find the buckets containing our events (non-empty buckets)
+    non_empty = [b for b in timeline if b['total'] > 0]
+    assert len(non_empty) == 3, f"Expected 3 non-empty buckets, got {len(non_empty)}"
+    
+    # Verify chronological order: 17:40 < 17:45 < 17:50
+    bucket_labels = [b['label'] for b in non_empty]
+    assert bucket_labels == sorted(bucket_labels), \
+        f"Buckets not in chronological order: {bucket_labels}"
+    
+    # Verify each bucket has exactly 1 event
+    for b in non_empty:
+        assert b['total'] == 1, f"Bucket {b['label']} has {b['total']} events, expected 1"
+    
+    # Verify the specific ordering: earliest event in earliest bucket
+    assert non_empty[0]['label'] == '17:40', f"First bucket should be 17:40, got {non_empty[0]['label']}"
+    assert non_empty[1]['label'] == '17:45', f"Second bucket should be 17:45, got {non_empty[1]['label']}"
+    assert non_empty[2]['label'] == '17:50', f"Third bucket should be 17:50, got {non_empty[2]['label']}"
+    
+    print("✓ Mixed formats maintain chronological order across buckets")
 
 
 def test_timezone_normalization():
