@@ -98,6 +98,13 @@ _JAVA = re.compile(
     r"(?P<level>[A-Z]+) (?P<logger>[\w.]+) - (?P<msg>.*)$"
 )
 
+# Log4j with comma millis: "2015-07-29 17:41:41,536 - INFO  [main:QuorumPeerConfig@101] - msg"
+# Also matches Hadoop: "2015-10-17 15:37:56,547 INFO [main] org.apache.hadoop...: msg"
+_LOG4J_COMMA = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+)(?: -)? "
+    r"(?P<level>[A-Z]+)\s+(?:\[(?P<svc>[^\]]+)\] )?(?:- )?(?P<msg>.*)$"
+)
+
 # logfmt: "time=2026-10-11T12:00:00.648Z level=INFO service=x ..."
 _LOGFMT_KV = re.compile(r"(\w+)=(\"[^\"]*\"|\S+)")
 
@@ -208,6 +215,21 @@ def _parse_java(line: str) -> Optional[LogEntry]:
                     message=message, service=service)
 
 
+def _parse_log4j_comma(line: str) -> Optional[LogEntry]:
+    """Parse Java/Log4j lines with comma-separated milliseconds."""
+    m = _LOG4J_COMMA.match(line)
+    if not m:
+        return None
+    timestamp = _normalize_timestamp(m.group("ts"))
+    level = _normalize_level(m.group("level"))
+    if not level:
+        return None
+    message = _canonical_kv_message(m.group("msg"))
+    service = m.group("svc") or _extract_service_kv(m.group("msg"))
+    return LogEntry(timestamp=timestamp or "", level=level,
+                    message=message, service=service)
+
+
 def _parse_plain_millis(line: str) -> Optional[LogEntry]:
     m = _PLAIN_MILLIS.match(line)
     if not m:
@@ -297,7 +319,7 @@ def parse_log_line(line: str) -> Optional[LogEntry]:
         return _parse_json(line)
 
     # Structured text formats, most specific first.
-    for parser in (_parse_logfmt, _parse_python, _parse_java,
+    for parser in (_parse_logfmt, _parse_python, _parse_java, _parse_log4j_comma,
                    _parse_plain_millis, _parse_iso, _parse_plain,
                    _parse_iso_no_level):
         result = parser(line)
