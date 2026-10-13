@@ -68,25 +68,33 @@ admission control. A memory-only guarantee requires bounded streaming input,
 early size enforcement, concurrency limits, and an analyzer that accepts
 in-memory input. This patch deliberately retains spooling and discloses it.
 
-## Trusted ingress policy (required before promotion)
+## Railway client identity
 
-The Procfile disables Uvicorn proxy-header rewriting so the socket peer is
-available for trust checks. Set `STACKSIFT_TRUSTED_PROXY_CIDRS` to a
-comma-separated list of verified ingress CIDRs. The default trusts none.
-Never configure a broad private range merely because a proxy used one address
-in it. Confirm Railway's ingress ranges and isolation for this deployment.
+The Procfile explicitly selects `STACKSIFT_PROXY_MODE=railway` and disables
+Uvicorn proxy-header rewriting. No CIDR variable is required on Railway:
+`STACKSIFT_TRUSTED_PROXY_CIDRS` may be empty or unset.
 
-Only a configured peer may supply one valid, globally routable `X-Real-IP`.
-IPv4 and IPv6 are canonicalized, including IPv4-mapped IPv6. Duplicate,
-malformed, private or scoped header values fall back to the socket peer.
-X-Forwarded-For is ignored. Invalid CIDR configuration fails startup.
-Fallback can group clients behind a proxy, so an unset policy is safe against
-header spoofing but is not a usable production per-client policy.
+Railway mode validates and canonicalizes the first X-Forwarded-For entry,
+including IPv6 and IPv4-mapped IPv6. It does not scan for a later public IP.
+Missing, duplicate or invalid headers return 503 on identity-dependent routes,
+rather than falling back to shared proxy quota buckets. /health remains usable.
+It ignores X-Real-IP because CDN routing can make that value a CDN address.
 
-Before deployment, verify the configured ranges and that ingress overwrites
-client-supplied X-Real-IP, including through the production custom domain.
-Test normal IPv4/IPv6 traffic and forged/duplicate headers on staging.
-The configuration has not been changed remotely by this patch.
+This is an explicit platform trust policy, not a generic proxy algorithm.
+All public requests must enter through Railway HTTP ingress. Do not expose
+this app via a TCP proxy or a direct public listener. Private-network workloads
+must be trusted: their direct requests bypass edge header sanitization.
+For another hosting setup, do not use this Procfile unchanged. The default
+`cidr` mode retains the configured-peer X-Real-IP policy.
+
+Sources checked during this correction:
+- [Railway employee recommends first XFF and explains the CDN X-Real-IP bug](https://station.railway.com/questions/which-header-should-i-rely-on-for-real-c-d78a6f96)
+- [Railway employee confirms edge overwrite and no direct public HTTP origin access](https://station.railway.com/questions/need-authoritative-railway-client-ip-p-b7a7b4bd)
+
+Before production promotion, deploy to staging and verify ordinary requests,
+forged XFF/X-Real-IP values, duplicate headers, the burst rejection sequence,
+and separate client networks. Check the production custom-domain route as a
+separate ingress path. Unit tests cannot prove edge sanitization.
 
 ## Reproducible validation
 

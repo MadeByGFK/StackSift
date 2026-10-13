@@ -1,11 +1,17 @@
-"""Client identity from an explicit trusted ingress policy.
+"""Client identity using the deployment's explicit proxy policy.
 
-Run Uvicorn with --no-proxy-headers so request.client is the socket peer.
-Only configured ingress networks may supply a single X-Real-IP. XFF is
-ignored, including on trusted connections; arbitrary chains are not trusted.
+Railway public HTTP mode trusts the platform-controlled leftmost XFF value.
+It requires Railway HTTP ingress as the public boundary (no direct TCP
+exposure); private-network callers must also be trusted. Other deployments
+retain the CIDR-based X-Real-IP policy. Uvicorn must not rewrite socket peers.
 """
 import os
 from ipaddress import ip_address, ip_network, IPv6Address
+from fastapi import HTTPException
+
+PROXY_MODE = os.getenv("STACKSIFT_PROXY_MODE", "cidr").strip()
+if PROXY_MODE not in {"cidr", "railway"}:
+    raise ValueError("STACKSIFT_PROXY_MODE must be cidr or railway")
 
 
 def parse_trusted_proxies(value: str) -> tuple:
@@ -36,6 +42,21 @@ def _address(value: str):
 
 
 def client_ip(request) -> str:
+    if PROXY_MODE == 'railway':
+        values = request.headers.getlist('x-forwarded-for')
+        # Railway staff recommend exactly the first entry. Never scan past an
+        # invalid/private first entry to select an infrastructure hop instead.
+        if len(values) == 1:
+            first = _address(values[0].split(',', 1)[0])
+            if first is not None and first.is_global and not first.is_multicast:
+                return str(first)
+        # Do not silently group clients by proxy IP or switch to X-Real-IP,
+        # which can describe a CDN hop. /health does not call this function.
+        raise HTTPException(
+            status_code=503,
+            detail='Client address unavailable. Please try again later.',
+            headers={'Retry-After': '60'},
+        )
     peer = _address(request.client.host) if request.client else None
     if peer is None:
         return 'unknown'
