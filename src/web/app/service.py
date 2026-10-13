@@ -57,7 +57,7 @@ def _is_binary_content(content: bytes, sample_size: int = 8192) -> bool:
     # false positives on text like "MZ service started".
     _BINARY_MAGIC = (
         b"\x89PNG\r\n\x1a\n",  # PNG
-        b"%PDF-",               # PDF (version suffix required)
+
         b"PK\x03\x04",          # ZIP (also JAR, DOCX, XLSX)
         b"PK\x05\x06",          # ZIP (empty archive)
         b"PK\x07\x08",          # ZIP (spanned)
@@ -70,6 +70,10 @@ def _is_binary_content(content: bytes, sample_size: int = 8192) -> bool:
     for magic in _BINARY_MAGIC:
         if content.startswith(magic):
             return True
+    # PDF: require %PDF- followed by a digit (e.g., %PDF-1.4).
+    # Plain text like "%PDF-export completed" must not be rejected.
+    if content.startswith(b"%PDF-") and len(content) > 5 and content[5:6].isdigit():
+        return True
     # MZ executables: require NUL bytes or high non-text ratio in header
     # to avoid false positives on text starting with "MZ".
     if content.startswith(b"MZ"):

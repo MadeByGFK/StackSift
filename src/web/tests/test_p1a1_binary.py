@@ -26,6 +26,26 @@ def test_pdf_magic_bytes():
     print("✓ PDF magic bytes detected")
 
 
+def test_pdf_export_text_not_rejected():
+    """Text starting with '%PDF-' but no version must not be rejected.
+    
+    ChatGPT re-review: '%PDF-export completed successfully' was rejected.
+    Real PDFs have %PDF- followed by a digit (e.g., %PDF-1.4).
+    """
+    text = b"%PDF-export completed successfully\n" * 10
+    assert not _is_binary_content(text), "%PDF-export text false positive!"
+    r = analyze_upload("test.log", text)
+    assert r.get('error') != 'binary_file', "%PDF-export text rejected!"
+    print("✓ %PDF-export text not rejected")
+
+
+def test_pdf_without_version_not_rejected():
+    """Bare '%PDF' without version suffix is not a PDF."""
+    text = b"%PDF content\n" * 10
+    assert not _is_binary_content(text), "Bare %PDF false positive!"
+    print("✓ Bare %PDF not rejected")
+
+
 def test_zip_magic_bytes():
     """ZIP header also covers JAR, DOCX, XLSX."""
     zip_data = b"PK\x03\x04" + b"fake" * 50
@@ -97,6 +117,8 @@ def test_real_mz_executable_detected():
 if __name__ == "__main__":
     test_png_magic_bytes()
     test_pdf_magic_bytes()
+    test_pdf_export_text_not_rejected()
+    test_pdf_without_version_not_rejected()
     test_zip_magic_bytes()
     test_jpeg_magic_bytes()
     test_gzip_magic_bytes()
