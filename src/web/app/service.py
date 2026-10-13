@@ -234,10 +234,15 @@ def analyze_upload(filename: str, content: bytes) -> dict:
                 os.unlink(tmp_path)
         elapsed = time.perf_counter() - start
 
+        # P1-D2: Count events and timestamped events for health messaging.
+        _events = results.get("events", [])
+        _timestamped = sum(1 for e in _events if e[0])
         health_label, health_color = determine_health(
             results["level_counts"],
             [b["warn"] + b["error"] + b["critical"]
-             for b in build_timeline(results.get("events", []))],
+             for b in build_timeline(_events)],
+            events_total=len(_events),
+            timestamped_total=_timestamped,
         )
 
         # Phase C: evidence-based diagnostic ranking
