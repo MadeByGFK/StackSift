@@ -245,7 +245,8 @@ def _label_phases(buckets):
 
 
 def determine_health(
-    level_counts: dict, bucket_totals: list[int] | None = None
+    level_counts: dict, bucket_totals: list[int] | None = None,
+    events_total: int = 0, timestamped_total: int = 0
 ) -> tuple[str, str]:
     """Classify the log's activity pattern from timeline escalation.
 
@@ -265,6 +266,12 @@ def determine_health(
         return ("Critical", "red")
 
     if not bucket_totals:
+        # P1-D2: Distinguish "timestamps not recognized" from "insufficient data".
+        # If events exist but none have timestamps, the log format's timestamps
+        # weren't parsed — the user should know this is a parsing limitation,
+        # not a lack of data.
+        if events_total > 0 and timestamped_total == 0:
+            return ("Timestamps Not Recognized", "gray")
         return ("Health Undetermined", "gray")
 
     peak = max(bucket_totals)
