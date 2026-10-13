@@ -89,6 +89,61 @@ def test_malformed_timestamps_fail_gracefully():
     print("✓ Malformed timestamps fail gracefully")
 
 
+def test_invalid_date_matching_regex():
+    """Invalid dates matching the regex produce empty timestamp, not crash.
+    
+    ChatGPT review finding: an invalid date like '2015-13-45 99:99:99,999'
+    matches the _LOG4J_COMMA regex but fails timestamp normalization.
+    Expected behavior: event created with timestamp='' and correct level.
+    This is consistent with all other parsers (never crashes on bad dates).
+    """
+    # Invalid month (13), day (45), hour (99) — regex matches, normalization fails
+    line = "2015-13-45 99:99:99,999 - INFO [main] - invalid date test"
+    entry = parse_log_line(line)
+    assert entry is not None, "Should not return None (regex matched)"
+    assert entry.timestamp == "", f"Expected empty timestamp, got '{entry.timestamp}'"
+    assert entry.level == "INFO", f"Level should still parse, got {entry.level}"
+    print("✓ Invalid dates matching regex → empty timestamp, no crash")
+    
+    # Verify timeline builder skips empty timestamps gracefully
+    events = [(entry.timestamp, entry.level)]
+    timeline = build_timeline(events)
+    assert timeline == [], "Timeline should be empty for invalid timestamps"
+    print("✓ Timeline builder skips empty timestamps")
+
+
+def test_mixed_formats_chronological_order():
+    """Mixed formats maintain chronological order in timeline.
+    
+    Strengthened test: verifies events from different formats are correctly
+    ordered chronologically, not just grouped.
+    """
+    lines = [
+        # Intentionally out of order to test sorting
+        "2015-07-29T17:43:00.000Z INFO [main] - iso format (latest)",
+        "2015-07-29 17:41:41,536 - INFO  [main] - comma millis (earliest)",
+        "2015-07-29 17:42:01.123 INFO [main] - dot millis (middle)",
+    ]
+    events = []
+    for line in lines:
+        entry = parse_log_line(line)
+        assert entry is not None, f"Failed to parse: {line}"
+        assert entry.timestamp, f"Empty timestamp for: {line}"
+        events.append((entry.timestamp, entry.level))
+    
+    timeline = build_timeline(events)
+    assert len(timeline) > 0, "Timeline empty"
+    
+    # All timestamps should be normalized to ISO format
+    for ts, level in events:
+        assert "T" in ts and ts.endswith("Z"), f"Not normalized: {ts}"
+    
+    # Verify chronological order is preserved (earliest first in sorted timeline)
+    total = sum(b['total'] for b in timeline)
+    assert total == 3, f"Expected 3 events, got {total}"
+    print("✓ Mixed formats maintain chronological order")
+
+
 def test_timezone_normalization():
     """Timestamps normalize to UTC correctly."""
     # Comma millis without timezone should be treated as UTC
@@ -115,8 +170,10 @@ if __name__ == "__main__":
     test_comma_millis_hadoop_format()
     test_millisecond_precision_preserved()
     test_mixed_formats_consistent_timeline()
+    test_mixed_formats_chronological_order()
     test_iso_timestamps_still_work()
     test_malformed_timestamps_fail_gracefully()
+    test_invalid_date_matching_regex()
     test_timezone_normalization()
     test_insights_parse_timestamp()
     print("\n✅ All P1-B1 regression tests passed!")
