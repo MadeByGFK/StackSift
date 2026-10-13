@@ -48,7 +48,42 @@ def _timeout_handler(signum, frame):
 
 
 def _is_binary_content(content: bytes, sample_size: int = 8192) -> bool:
-    """Detect binary files via NUL bytes and control character ratio."""
+    """Detect binary files via magic bytes, NUL bytes, and control char ratio."""
+    if not content:
+        return False
+    # Magic-byte signatures for common binary formats (P1-A1).
+    # Catches files with mostly-ASCII headers (PNG is ~17% non-text).
+    # Short signatures (MZ) require additional binary evidence to avoid
+    # false positives on text like "MZ service started".
+    _BINARY_MAGIC = (
+        b"\x89PNG\r\n\x1a\n",  # PNG
+
+        b"PK\x03\x04",          # ZIP (also JAR, DOCX, XLSX)
+        b"PK\x05\x06",          # ZIP (empty archive)
+        b"PK\x07\x08",          # ZIP (spanned)
+        b"GIF87a", b"GIF89a",   # GIF
+        b"\xff\xd8\xff",        # JPEG
+        b"\x1f\x8b",            # GZIP
+        b"\x7fELF",             # ELF executable
+        b"\xca\xfe\xba\xbe",    # Java class / Mach-O
+    )
+    for magic in _BINARY_MAGIC:
+        if content.startswith(magic):
+            return True
+    # PDF: require %PDF- followed by a digit (e.g., %PDF-1.4).
+    # Plain text like "%PDF-export completed" must not be rejected.
+    if content.startswith(b"%PDF-") and len(content) > 5 and content[5:6].isdigit():
+        return True
+    # MZ executables: require NUL bytes or high non-text ratio in header
+    # to avoid false positives on text starting with "MZ".
+    if content.startswith(b"MZ"):
+        header = content[:64]
+        if b"\x00" in header:
+            return True
+        non_text = sum(1 for b in header if not (32 <= b <= 126 or b in (9, 10, 13)))
+        if len(header) > 0 and non_text / len(header) > 0.3:
+            return True
+        # Text starting with "MZ" falls through to normal checks below
     if b"\x00" in content[:sample_size]:
         return True
     sample = content[:sample_size]
