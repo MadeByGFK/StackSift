@@ -156,7 +156,7 @@ def _parse_timestamp(ts: str):
     """Parse the timestamp formats our parser emits."""
     ts = ts.strip().replace("Z", "+00:00")
     for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
-                "%Y-%m-%d %H:%M:%S"):
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S,%f"):
         try:
             return datetime.strptime(ts, fmt)
         except ValueError:
