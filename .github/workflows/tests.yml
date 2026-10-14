@@ -21,4 +21,4 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
       - name: Run tests
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ src/web/tests/ -v
