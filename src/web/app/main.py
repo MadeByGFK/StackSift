@@ -2,6 +2,8 @@
 
 Thin slice: upload a log file, get an incident summary. No accounts or retained upload archive. Rate-limited free tier; auth + credits come later once usage proves
 demand.
+
+Phase 1: Accounts added — email/password auth, Google/GitHub OAuth, sessions.
 """
 
 from __future__ import annotations
@@ -18,11 +20,17 @@ from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
 from app.service import analyze_upload, render_text_report
 
+# Phase 1: Auth
+from app.auth_routes import router as auth_router
+
 BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title="StackSift", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+# Phase 1: Auth routes (signup, login, OAuth, sessions, settings)
+app.include_router(auth_router)
 
 # Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
