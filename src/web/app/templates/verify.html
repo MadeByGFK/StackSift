@@ -24,18 +24,19 @@
   </header>
   <div class="auth-wrap">
     <div class="auth-card">
-      {% if success %}
-      <h1>Email verified!</h1>
-      <div class="success">Your email has been verified. You can now log in.</div>
-      <div class="auth-links"><a href="/login">Log in →</a></div>
-      {% else %}
-      <h1>Verification failed</h1>
-      {% if error %}<div class="error">{{ error }}</div>{% endif %}
-      <p>The verification link may have expired or already been used.</p>
-      <div class="auth-links"><a href="/login">Back to login</a></div>
-      {% endif %}
+      <h1>Verify your email</h1>
+      <p>Confirm that you requested this StackSift account.</p>
+      <form method="post" action="/auth/verify" data-auth-form>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="token" value="{{ token }}">
+        <p role="status" aria-live="polite"></p>
+        <button type="submit" class="btn-primary">Verify email</button>
+      </form>
+      <div class="auth-links"><a href="/login">Log in</a></div>
+
     </div>
   </div>
 </div>
+{% include "auth_form_script.html" %}
 </body>
 </html>

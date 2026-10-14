@@ -30,7 +30,9 @@
       <h1>Reset password</h1>
       <p class="sub">Choose a new password.</p>
       {% if error %}<div class="error">{{ error }}</div>{% endif %}
-      <form method="post" action="/auth/reset">
+      <form method="post" action="/auth/reset" data-auth-form>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" aria-live="polite"></p>
         <input type="hidden" name="token" value="{{ token }}">
         <label for="new_password">New password</label>
         <input type="password" id="new_password" name="new_password" required autocomplete="new-password">
@@ -41,5 +43,6 @@
     </div>
   </div>
 </div>
+{% include "auth_form_script.html" %}
 </body>
 </html>

@@ -3,6 +3,9 @@ email_verifications, password_resets."""
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import UUID
+
+UUID_TYPE = sa.String(36).with_variant(UUID(as_uuid=True), "postgresql")
 
 revision = "0001_phase1_accounts"
 down_revision = None
@@ -13,7 +16,7 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "users",
-        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("id", UUID_TYPE, primary_key=True),
         sa.Column("email", sa.String(255), nullable=False),
         sa.Column("email_verified", sa.Boolean(), nullable=False, default=False),
         sa.Column("password_hash", sa.String(255), nullable=True),
@@ -26,8 +29,8 @@ def upgrade() -> None:
 
     op.create_table(
         "oauth_accounts",
-        sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("user_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("id", UUID_TYPE, primary_key=True),
+        sa.Column("user_id", UUID_TYPE, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
         sa.Column("provider", sa.String(20), nullable=False),
         sa.Column("email", sa.String(255), nullable=True),
         sa.Column("provider_user_id", sa.String(255), nullable=False),
@@ -37,9 +40,9 @@ def upgrade() -> None:
 
     op.create_table(
         "sessions",
-        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("id", UUID_TYPE, primary_key=True),
         sa.Column("token_hash", sa.String(64), nullable=False),
-        sa.Column("user_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("user_id", UUID_TYPE, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("ip_address", sa.String(45), nullable=True),
@@ -51,8 +54,8 @@ def upgrade() -> None:
 
     op.create_table(
         "email_verifications",
-        sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("user_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("id", UUID_TYPE, primary_key=True),
+        sa.Column("user_id", UUID_TYPE, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
         sa.Column("token_hash", sa.String(64), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
@@ -62,8 +65,8 @@ def upgrade() -> None:
 
     op.create_table(
         "password_resets",
-        sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("user_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("id", UUID_TYPE, primary_key=True),
+        sa.Column("user_id", UUID_TYPE, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
         sa.Column("token_hash", sa.String(64), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),

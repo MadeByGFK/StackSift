@@ -22,17 +22,14 @@ from app.models import Session as SessionModel
 # --- Password validation ---
 
 PASSWORD_MIN_LENGTH = 12
-PASSWORD_RE = re.compile(
-    r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>\/?]).{12,128}$"
-)
 
 
 def validate_password_strength(password: str) -> str | None:
     """Return error message if password is too weak, else None."""
     if len(password) < PASSWORD_MIN_LENGTH:
         return f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
-    if len(password) > 128:
-        return "Password must be at most 128 characters."
+    if len(password.encode("utf-8")) > 72:
+        return "Password must be at most 72 bytes in UTF-8."
     if not re.search(r"[a-z]", password):
         return "Password must contain at least one lowercase letter."
     if not re.search(r"[A-Z]", password):
@@ -99,7 +96,10 @@ def normalize_email(email: str) -> str:
 
 # --- Sessions ---
 
-SESSION_COOKIE = "stacksift_session"
+SESSION_COOKIE = "__Host-stacksift_session"
+CSRF_COOKIE = "__Host-stacksift_csrf"
+# A valid cost-12 hash keeps missing/OAuth-only login attempts on the bcrypt path.
+DUMMY_PASSWORD_HASH = bcrypt.hashpw(secrets.token_bytes(32), bcrypt.gensalt(rounds=12)).decode()
 SESSION_TTL = timedelta(days=30)
 
 
@@ -132,14 +132,11 @@ def get_session_from_cookie(db: DBSession, request: Request) -> SessionModel | N
     if not raw_token:
         return None
     token_hash = hash_token(raw_token)
-    session = db.query(SessionModel).filter(SessionModel.token_hash == token_hash).first()
-    if not session:
-        return None
-    if session.revoked_at is not None:
-        return None
-    if session.expires_at < datetime.now(timezone.utc):
-        return None
-    return session
+    return db.query(SessionModel).filter(
+        SessionModel.token_hash == token_hash,
+        SessionModel.revoked_at.is_(None),
+        SessionModel.expires_at > datetime.now(timezone.utc),
+    ).populate_existing().first()
 
 
 def revoke_session(db: DBSession, session: SessionModel) -> None:
@@ -202,6 +199,7 @@ auth_limiter = AuthRateLimiter()
 
 # Rate limit configs: (max_attempts, window_seconds)
 RATE_LIMITS = {
+    "oauth": (10, 60),     # OAuth starts/min per IP
     "login": (5, 60),       # 5/min per IP
     "signup": (3, 3600),    # 3/hour per IP
     "forgot": (3, 3600),    # 3/hour per IP

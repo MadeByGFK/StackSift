@@ -11,3 +11,5 @@ psycopg2-binary>=2.9
 # (see app/vendor/VENDORING.md). The pip-installed 'stacksift' package
 # is NOT required and MUST NOT be used for diagnostic functions.
 # This eliminates Railway pip-cache staleness as a deployment risk.
+
+PyJWT[crypto]>=2.10,<3

@@ -32,15 +32,26 @@
       <p>Email {% if user.email_verified %}✓ verified{% else %}— not verified{% endif %}</p>
     </div>
     <div class="settings-card">
+      <form method="post" action="/auth/logout" data-auth-form data-success-url="/login">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" aria-live="polite"></p>
+        <button type="submit" class="btn-small">Log out</button>
+      </form>
       <h2>Connected accounts</h2>
       <p>Link Google or GitHub to sign in with one click.</p>
       <div class="oauth-row">
         <span>Google</span>
-        <a href="/auth/link/google" class="btn-small">Link Google</a>
+        <form method="post" action="/auth/link/google">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="btn-small">Link Google</button>
+        </form>
       </div>
       <div class="oauth-row">
         <span>GitHub</span>
-        <a href="/auth/link/github" class="btn-small">Link GitHub</a>
+        <form method="post" action="/auth/link/github">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="btn-small">Link GitHub</button>
+        </form>
       </div>
     </div>
     <div class="settings-card">
@@ -64,24 +75,27 @@
   </div>
 </div>
 <script>
-const csrfToken = "{{ csrf_token }}";
+const csrfToken = {{ csrf_token|tojson }};
 async function revokeSession(id) {
-  const resp = await fetch(`/auth/sessions/${id}/revoke`, {
+  let resp;
+  try { resp = await fetch(`/auth/sessions/${id}/revoke`, {
     method: "POST",
     headers: { "X-CSRF-Token": csrfToken },
-  });
+  }); } catch (_) { alert("Unable to connect. Please try again."); return; }
   if (resp.ok) location.reload();
   else alert("Failed to revoke session.");
 }
 async function revokeAll() {
   if (!confirm("Log out all other devices?")) return;
-  const resp = await fetch("/auth/sessions/revoke-all", {
+  let resp;
+  try { resp = await fetch("/auth/sessions/revoke-all", {
     method: "POST",
     headers: { "X-CSRF-Token": csrfToken },
-  });
+  }); } catch (_) { alert("Unable to connect. Please try again."); return; }
   if (resp.ok) location.reload();
   else alert("Failed to revoke sessions.");
 }
 </script>
+{% include "auth_form_script.html" %}
 </body>
 </html>

@@ -26,12 +26,13 @@ class GUID(TypeDecorator):
 
     def load_dialect_impl(self, dialect):
         if dialect.name == "postgresql":
-            return dialect.type_compiler.process(PG_UUID(as_uuid=True))
-        return dialect.type_compiler.process(String(36))
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        return dialect.type_descriptor(String(36))
 
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
+        value = value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
         if dialect.name == "postgresql":
             return value
         return str(value)
@@ -116,3 +117,17 @@ class PasswordReset(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class OAuthState(Base):
+    """Single-use authorization attempt; the browser carries only opaque secrets."""
+    __tablename__ = "oauth_states"
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    state_hash = Column(String(64), unique=True, nullable=False, index=True)
+    binding_hash = Column(String(64), nullable=False)
+    provider = Column(String(20), nullable=False)
+    action = Column(String(20), nullable=False)
+    session_id = Column(GUID(), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=True)
+    nonce = Column(String(64), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)

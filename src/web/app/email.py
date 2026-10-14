@@ -1,7 +1,6 @@
 """Email sending for StackSift Phase 1.
 
-Uses Resend API (https://resend.com). In tests/dev, emails are logged
-instead of sent if RESEND_API_KEY is not set.
+Uses Resend API (https://resend.com). Without RESEND_API_KEY, delivery fails without logging tokens or recipients.
 """
 
 from __future__ import annotations
@@ -21,13 +20,11 @@ APP_URL = os.environ.get("APP_URL", "https://stacksift.goodfolkdigital.com")
 def send_email(to: str, subject: str, html: str) -> bool:
     """Send email via Resend. Returns True on success.
 
-    If RESEND_API_KEY is not set, logs the email and returns True
-    (dev/test mode — don't fail auth flows).
+    Missing configuration returns False; callers keep public responses generic.
     """
     if not RESEND_API_KEY:
-        logger.info("Email (not sent, no RESEND_API_KEY): to=%s subject=%s", to, subject)
-        logger.info("Email body: %s", html)
-        return True
+        logger.warning("Account email not sent: email delivery is not configured.")
+        return False
     try:
         resp = httpx.post(
             "https://api.resend.com/emails",
@@ -37,14 +34,14 @@ def send_email(to: str, subject: str, html: str) -> bool:
         )
         resp.raise_for_status()
         return True
-    except httpx.HTTPError as e:
-        logger.error("Failed to send email to %s: %s", to, e)
+    except httpx.HTTPError:
+        logger.error("Account email delivery failed.")
         return False
 
 
 def send_verification_email(to: str, token: str) -> bool:
     """Send email verification link."""
-    url = f"{APP_URL}/auth/verify?token={token}"
+    url = f"{APP_URL}/verify?token={token}"
     html = f"""<p>Welcome to StackSift!</p>
 <p>Please verify your email by clicking the link below:</p>
 <p><a href="{url}">{url}</a></p>
@@ -55,7 +52,7 @@ def send_verification_email(to: str, token: str) -> bool:
 
 def send_password_reset_email(to: str, token: str) -> bool:
     """Send password reset link."""
-    url = f"{APP_URL}/auth/reset?token={token}"
+    url = f"{APP_URL}/reset?token={token}"
     html = f"""<p>You requested a password reset for your StackSift account.</p>
 <p>Click the link below to reset your password:</p>
 <p><a href="{url}">{url}</a></p>

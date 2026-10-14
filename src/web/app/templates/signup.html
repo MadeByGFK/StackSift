@@ -46,7 +46,9 @@
         Sign up with GitHub
       </a>
       <div class="divider">— or with email —</div>
-      <form method="post" action="/auth/signup">
+      <form method="post" action="/auth/signup" data-auth-form>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" aria-live="polite"></p>
         <label for="email">Email</label>
         <input type="email" id="email" name="email" required autocomplete="email">
         <label for="password">Password</label>
@@ -58,5 +60,6 @@
     </div>
   </div>
 </div>
+{% include "auth_form_script.html" %}
 </body>
 </html>
