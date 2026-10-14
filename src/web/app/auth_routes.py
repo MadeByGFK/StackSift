@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -38,7 +40,7 @@ from app.db import get_db
 from app.models import EmailVerification, PasswordReset, User
 
 router = APIRouter()
-templates = Jinja2Templates(directory="src/web/app/templates")
+templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # Generic responses (no enumeration)
 GENERIC_SIGNUP = "If this email is valid, a verification link has been sent."
