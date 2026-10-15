@@ -14,6 +14,13 @@ from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./stacksift.db")
 
+# Normalize Postgres URL scheme: SQLAlchemy 2.x defaults to psycopg (v3)
+# driver for postgresql:// URLs, but we ship psycopg2-binary. Force psycopg2.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+
 # SQLite needs check_same_thread=False for FastAPI
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
