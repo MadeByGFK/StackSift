@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift — Pricing</title>
+<meta name="description" content="StackSift pricing: free log analysis for everyone, premium capabilities with credits.">
+<link rel="stylesheet" href="/static/style.css?v=3">
+<style>
+.pricing-hero { text-align: center; padding: 48px 0 24px; }
+.pricing-hero h1 { font-size: 36px; margin: 0 0 12px; letter-spacing: -1px; }
+.pricing-hero h1 span { color: var(--accent); }
+.pricing-hero p { color: var(--muted); font-size: 1.05rem; max-width: 600px; margin: 0 auto; }
+.tier-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 32px 0; }
+@media (max-width: 640px) { .tier-grid { grid-template-columns: 1fr; } }
+.tier { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
+.tier.premium { border-color: var(--accent); position: relative; }
+.tier-badge { position: absolute; top: -12px; left: 24px; background: var(--accent); color: #1a1a2e; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px; }
+.tier h2 { margin: 0 0 8px; font-size: 1.4rem; }
+.tier .price { font-size: 2rem; font-weight: 700; margin: 8px 0; }
+.tier .price span { font-size: 1rem; font-weight: 400; color: var(--muted); }
+.tier ul { list-style: none; padding: 0; margin: 16px 0; }
+.tier ul li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
+.tier ul li:last-child { border-bottom: none; }
+.tier ul li::before { content: "✓ "; color: var(--green); font-weight: 700; }
+.tier .cta { display: block; text-align: center; margin-top: 20px; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+.tier .cta-primary { background: var(--accent); color: #1a1a2e; }
+.tier .cta-primary:hover { filter: brightness(1.1); }
+.tier .cta-secondary { border: 1px solid var(--border); color: var(--text); }
+.tier .cta-secondary:hover { border-color: var(--accent); }
+.coming-soon { background: #1e2a4a; border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin: 24px 0; text-align: center; }
+.coming-soon p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.faq { margin: 32px 0; }
+.faq h3 { font-size: 1.1rem; margin: 20px 0 8px; }
+.faq p { color: var(--muted); font-size: 0.95rem; margin: 0 0 16px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+    <nav class="nav-links">
+      <a href="/pricing">Pricing</a>
+      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+      {% if current_user %}
+        <span class="user-email">{{ current_user.email }}</span>
+        <a href="/settings">Settings</a>
+        <a href="/auth/logout">Log out</a>
+      {% else %}
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <section class="pricing-hero">
+    <h1>Simple pricing for <span>everyone</span>.</h1>
+    <p>Free log analysis, no signup required. Premium capabilities for when you need more.</p>
+  </section>
+
+  <div class="tier-grid">
+    <div class="tier">
+      <h2>Free</h2>
+      <div class="price">$0 <span>forever</span></div>
+      <p style="color:var(--muted);font-size:0.95rem;">For quick incident triage. No account needed.</p>
+      <ul>
+        <li>10 analyses per hour</li>
+        <li>10 MB / 50,000 line limit</li>
+        <li>Single file upload</li>
+        <li>HTML report in browser</li>
+        <li>No signup required</li>
+      </ul>
+      <a href="/" class="cta cta-secondary">Analyze a log</a>
+    </div>
+
+    <div class="tier premium">
+      <div class="tier-badge">Coming Soon</div>
+      <h2>Premium</h2>
+      <div class="price">$10 <span>for 40 credits</span></div>
+      <p style="color:var(--muted);font-size:0.95rem;">For power users who need more from their logs.</p>
+      <ul>
+        <li>Everything in Free</li>
+        <li><strong>PDF export</strong> — 1 credit per report</li>
+        <li><strong>Batch analysis</strong> — 1 credit per batch (up to 5 files)</li>
+        <li>Priority processing</li>
+      </ul>
+      {% if current_user %}
+        <a href="/settings" class="cta cta-primary">You're signed up — we'll notify you</a>
+      {% else %}
+        <a href="/signup" class="cta cta-primary">Sign up for 3 free credits</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="coming-soon">
+    <p><strong>Premium features are coming soon.</strong> Sign up now to get 3 free credits when premium launches — enough to try PDF export or batch analysis on us.</p>
+  </div>
+
+  <section class="faq">
+    <h3>Do I need an account to use StackSift?</h3>
+    <p>No. The free tier works without signup — just drop in a log file and get your incident summary. Accounts are only needed for premium features.</p>
+
+    <h3>What are credits?</h3>
+    <p>Credits unlock premium capabilities like PDF export and batch analysis. One credit is deducted per premium operation, only after it succeeds. Credits never expire.</p>
+
+    <h3>What happens if my analysis fails?</h3>
+    <p>You are never charged for failed analyses. Credits are only deducted after a successful operation. If something goes wrong on our end, your credit is refunded automatically.</p>
+
+    <h3>Can I get a refund?</h3>
+    <p>Yes. Contact support within 30 days for a full refund on unused credits.</p>
+  </section>
+
+</div>
+</body>
+</html>

@@ -65,6 +65,24 @@ app.include_router(auth_router)
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
 burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
 
+
+def _get_current_user_optional(request: Request):
+    """Return the logged-in user or None. Safe when DB is unavailable."""
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return None
+    try:
+        from app.db import SessionLocal
+        from app import auth as auth_helpers
+        db = SessionLocal()
+        try:
+            session = auth_helpers.get_session_from_cookie(db, request)
+            return session.user if session else None
+        finally:
+            db.close()
+    except Exception:
+        return None
+
 # NOTE: Global admission control REMOVED - does not work with
 # blocking sync analysis in async endpoints. The event loop
 # serializes requests, so the counter never reaches the limit.
@@ -85,6 +103,13 @@ async def security_headers(request: Request, call_next):
 
 
 
+@app.get("/pricing", response_class=HTMLResponse)
+async def pricing(request: Request):
+    return templates.TemplateResponse(
+        request, "pricing.html", {"current_user": _get_current_user_optional(request)}
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -93,7 +118,7 @@ async def health():
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(
-        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request))}
+        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request)), "current_user": _get_current_user_optional(request)}
     )
 
 
@@ -106,6 +131,8 @@ async def demo(request: Request):
     """
     data = analyze_upload(SAMPLE_FILENAME, SAMPLE_LOG.encode("utf-8"))
     data["is_demo"] = True
+    data["current_user"] = _get_current_user_optional(request)
+    data["current_user"] = _get_current_user_optional(request)
     return templates.TemplateResponse(request, "report.html", data)
 
 
@@ -121,7 +148,7 @@ async def analyze(
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"error": message, "remaining": limiter.remaining(ip)},
+            {"error": message, "remaining": limiter.remaining(ip), "current_user": _get_current_user_optional(request)},
             status_code=status,
             headers=headers or {},
         )
@@ -178,4 +205,5 @@ async def analyze(
             headers={"Content-Disposition": f'attachment; filename="{stem}-stacksift.txt"'},
         )
 
+    data["current_user"] = _get_current_user_optional(request)
     return templates.TemplateResponse(request, "report.html", data)

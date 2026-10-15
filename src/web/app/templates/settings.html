@@ -22,8 +22,19 @@
 <body>
 <div class="wrap">
   <header class="top">
-    <div class="logo"><a href="/" style="color:inherit;text-decoration:none">Stack<span>Sift</span></a></div>
-    <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+    <nav class="nav-links">
+      <a href="/pricing">Pricing</a>
+      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+      {% if current_user %}
+        <span class="user-email">{{ current_user.email }}</span>
+        <a href="/settings">Settings</a>
+        <a href="/auth/logout">Log out</a>
+      {% else %}
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
   </header>
   <div class="settings-wrap">
     <div class="settings-card">

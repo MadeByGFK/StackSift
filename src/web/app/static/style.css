@@ -31,6 +31,16 @@ header.top {
 .logo span { color: var(--accent); }
 .top a { color: var(--muted); text-decoration: none; font-size: 14px; }
 .top a:hover { color: var(--text); }
+/* Auth navigation */
+.nav-links { display: flex; align-items: center; gap: 18px; }
+.nav-links a { color: var(--muted); text-decoration: none; font-size: 14px; }
+.nav-links a:hover { color: var(--text); }
+.user-email { color: var(--muted); font-size: 14px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-login { border: 1px solid var(--border); border-radius: 8px; padding: 8px 16px !important; }
+.btn-login:hover { border-color: var(--accent); }
+.btn-signup { background: var(--accent); color: #1a1a2e !important; border-radius: 8px; padding: 8px 16px !important; font-weight: 600; }
+.btn-signup:hover { filter: brightness(1.1); color: #1a1a2e !important; }
+
 
 .hero { text-align: center; padding: 56px 0 30px; }
 .hero h1 { font-size: 40px; margin: 0 0 10px; letter-spacing: -1px; }

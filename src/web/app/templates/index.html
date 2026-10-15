@@ -40,8 +40,19 @@ document.getElementById('upload-form').addEventListener('submit', function() {
 <div class="wrap">
 
   <header class="top">
-    <div class="logo">Stack<span>Sift</span></div>
-    <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+    <nav class="nav-links">
+      <a href="/pricing">Pricing</a>
+      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+      {% if current_user %}
+        <span class="user-email">{{ current_user.email }}</span>
+        <a href="/settings">Settings</a>
+        <a href="/auth/logout">Log out</a>
+      {% else %}
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
   </header>
 
   <section class="hero">

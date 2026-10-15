@@ -81,8 +81,9 @@ def _get_current_user(request: Request, db: DBSession) -> User | None:
 
 def _page(request, db, name, **context):
     session = auth_helpers.get_session_from_cookie(db, request)
+    user = session.user if session else None
     csrf = session.csrf_token if session else request.cookies.get(auth_helpers.CSRF_COOKIE) or auth_helpers.generate_token()
-    response = templates.TemplateResponse(request, name, {"error": None, "message": None, "csrf_token": csrf, **context})
+    response = templates.TemplateResponse(request, name, {"error": None, "message": None, "csrf_token": csrf, "current_user": user, **context})
     if not session:
         response.set_cookie(auth_helpers.CSRF_COOKIE, csrf, secure=True, httponly=True, samesite="lax", path="/")
     return response
@@ -152,6 +153,7 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
         "settings.html",
         {
             "user": user,
+            "current_user": user,
             "sessions": sessions,
             "current_session_id": str(session.id) if session else None,
             "csrf_token": session.csrf_token if session else "",
