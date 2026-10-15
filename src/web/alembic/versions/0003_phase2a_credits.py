@@ -337,10 +337,17 @@ def downgrade() -> None:
     #   credit_ledger.adjustment_id -> admin_adjustments.id
     #   admin_adjustments.applied_ledger_id -> credit_ledger.id
     # Drop both FK constraints before dropping either table.
+    #
+    # Also handle mutual dependencies between operations and results/consents:
+    #   operations.result_id -> results.id  /  results.operation_id -> operations.id
+    #   operations.consent_id -> consents.id / consents.consumed_by_operation_id -> operations.id
+    # Drop the operations-side constraints so results/consents can drop first.
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
         op.drop_constraint("fk_ledger_adjustment_id", "credit_ledger", type_="foreignkey")
         op.drop_constraint("fk_adjustments_applied_ledger", "admin_adjustments", type_="foreignkey")
+        op.drop_constraint("fk_operations_result_id", "operations", type_="foreignkey")
+        op.drop_constraint("fk_operations_consent_id", "operations", type_="foreignkey")
     elif bind.dialect.name == "sqlite":
         with op.batch_alter_table("credit_ledger") as batch_op:
             try:
@@ -350,6 +357,15 @@ def downgrade() -> None:
         with op.batch_alter_table("admin_adjustments") as batch_op:
             try:
                 batch_op.drop_constraint("fk_adjustments_applied_ledger", type_="foreignkey")
+            except Exception:
+                pass
+        with op.batch_alter_table("operations") as batch_op:
+            try:
+                batch_op.drop_constraint("fk_operations_result_id", type_="foreignkey")
+            except Exception:
+                pass
+            try:
+                batch_op.drop_constraint("fk_operations_consent_id", type_="foreignkey")
             except Exception:
                 pass
 
