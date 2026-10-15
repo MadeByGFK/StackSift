@@ -26,6 +26,25 @@ from app.auth_routes import router as auth_router
 BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title="StackSift", docs_url=None, redoc_url=None)
+
+
+@app.on_event("startup")
+async def run_migrations():
+    """Run Alembic migrations on startup (if DATABASE_URL is set)."""
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return
+    try:
+        from alembic.config import Config
+        from alembic import command
+        from pathlib import Path
+        alembic_ini = Path(__file__).resolve().parent.parent / "alembic.ini"
+        if alembic_ini.exists():
+            cfg = Config(str(alembic_ini))
+            command.upgrade(cfg, "head")
+    except Exception as e:
+        # Log but don't crash — app can run without DB for anonymous tier
+        print(f"Migration failed (non-fatal): {e}")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
