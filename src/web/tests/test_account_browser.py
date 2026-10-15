@@ -102,7 +102,7 @@ def test_https_account_forms_end_to_end(auth_env, tmp_path, monkeypatch):
                 page.wait_for_url(base + "/settings")
             with auth_env.sessions() as db:
                 assert db.query(OAuthAccount).count() == 2
-            page.get_by_role("button", name="Log out", exact=True).click()
+            page.get_by_role("navigation").get_by_role("button", name="Log out", exact=True).click()
             page.wait_for_url(base + "/login")
             assert not any(c["name"] == auth.SESSION_COOKIE for c in context.cookies())
             page.goto(base + "/settings")

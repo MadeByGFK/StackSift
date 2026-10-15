@@ -251,12 +251,12 @@ class Operation(Base):
     input_manifest = Column(Text, nullable=True)  # JSON describing inputs
     cost = Column(Integer, nullable=False)  # immutable snapshotted cost
     pricing_version = Column(Integer, nullable=False, default=1)
-    consent_id = Column(GUID(), ForeignKey("consents.id"), nullable=True)
+    consent_id = Column(GUID(), ForeignKey("consents.id", use_alter=True, name="fk_operations_consent_id"), nullable=True)
     status = Column(String(20), nullable=False, default="reserved")  # reserved|completed|failed|expired
     worker_id = Column(String(255), nullable=False)
     lease_generation = Column(Integer, nullable=False, default=1)
     lease_expires_at = Column(DateTime(timezone=True), nullable=False)
-    result_id = Column(GUID(), ForeignKey("results.id"), nullable=True)
+    result_id = Column(GUID(), ForeignKey("results.id", use_alter=True, name="fk_operations_result_id"), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     failure_code = Column(String(50), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -333,6 +333,7 @@ class Consent(Base):
     pricing_version = Column(Integer, nullable=False, default=1)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     consumed_by_operation_id = Column(GUID(), ForeignKey("operations.id"), nullable=True, unique=True)
+    consumed_by_free_request_id = Column(String(255), ForeignKey("free_requests.request_id", use_alter=True, name="fk_consent_free_request"), nullable=True, unique=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     __table_args__ = (CheckConstraint("max_cost > 0", name="ck_consent_max_cost_positive"),)
@@ -353,7 +354,7 @@ class AdminAdjustment(Base):
     actor = Column(String(255), nullable=False)
     approval_at = Column(DateTime(timezone=True), nullable=False)
     status = Column(String(20), nullable=False, default="queued")  # queued|applied|cancelled
-    applied_ledger_id = Column(GUID(), ForeignKey("credit_ledger.id"), nullable=True)
+    applied_ledger_id = Column(GUID(), ForeignKey("credit_ledger.id", use_alter=True, name="fk_adjustments_applied_ledger"), nullable=True)
     request_key = Column(String(255), nullable=False, unique=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)

@@ -339,6 +339,8 @@ def downgrade() -> None:
     # Drop both FK constraints before dropping either table.
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
+        op.drop_constraint("fk_operations_result_id", "operations", type_="foreignkey")
+        op.drop_constraint("fk_operations_consent_id", "operations", type_="foreignkey")
         op.drop_constraint("fk_ledger_adjustment_id", "credit_ledger", type_="foreignkey")
         op.drop_constraint("fk_adjustments_applied_ledger", "admin_adjustments", type_="foreignkey")
     elif bind.dialect.name == "sqlite":
