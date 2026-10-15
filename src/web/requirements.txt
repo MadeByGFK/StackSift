@@ -7,6 +7,8 @@ alembic>=1.13
 bcrypt>=4.1
 httpx>=0.27
 psycopg2-binary>=2.9
+# SQLAlchemy 2.1 uses psycopg 3 for unqualified postgresql:// URLs.
+psycopg[binary]>=3.2,<4
 # NOTE: StackSift diagnostic library is fully vendored in app/vendor/
 # (see app/vendor/VENDORING.md). The pip-installed 'stacksift' package
 # is NOT required and MUST NOT be used for diagnostic functions.

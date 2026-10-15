@@ -1,6 +1,6 @@
 """SQLite and real PostgreSQL migrations/constraints/atomic redemption.
 
-Set TEST_POSTGRES_URL to a disposable test server. Each test uses a unique
+Set TEST_POSTGRES_URL to a disposable UTF-8 PostgreSQL database. Each test uses a unique
 schema; no existing schemas or application database configuration are changed.
 """
 import os
@@ -16,6 +16,7 @@ from alembic.config import Config
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -25,14 +26,15 @@ from app.auth import generate_token, hash_token
 from app.account_tokens import redeem
 
 
-@pytest.fixture(params=["sqlite", "postgresql"])
+@pytest.fixture(params=["sqlite", "postgresql", "postgresql+psycopg2", "postgresql+psycopg"])
 def migrated_engine(request, tmp_path):
     schema = None
     admin = None
-    if request.param == "postgresql":
+    if request.param != "sqlite":
         url = os.environ.get("TEST_POSTGRES_URL")
         if not url:
             pytest.skip("TEST_POSTGRES_URL is required for actual PostgreSQL tests")
+        url = make_url(url).set(drivername=request.param)
         schema = "auth_test_" + uuid.uuid4().hex
         admin = create_engine(url)
         with admin.begin() as conn:
@@ -140,3 +142,15 @@ def test_expired_tokens_leave_account_unchanged(migrated_engine, model):
         db.expire_all()
         assert db.get(User, ident).password_hash == "unchanged"
         assert db.get(User, ident).email_verified is False
+
+
+@pytest.mark.parametrize("driver", ["postgresql", "postgresql+psycopg2", "postgresql+psycopg"])
+def test_app_imports_with_postgres_url_without_connecting(driver):
+    """Catch missing drivers at the same import boundary as deployed Uvicorn."""
+    import subprocess
+    import sys
+    env = {**os.environ, "DATABASE_URL": f"{driver}://test:test@localhost:1/test",
+           "PYTHONPATH": str(Path(__file__).parents[1])}
+    result = subprocess.run([sys.executable, "-c", "from app.main import app; assert app"],
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
