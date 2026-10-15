@@ -70,18 +70,20 @@ def _get_current_user_optional(request: Request):
     """Return the logged-in user or None. Safe when DB is unavailable."""
     import os
     if not os.environ.get("DATABASE_URL"):
-        return None
+        return None, ""
     try:
         from app.db import SessionLocal
         from app import auth as auth_helpers
         db = SessionLocal()
         try:
             session = auth_helpers.get_session_from_cookie(db, request)
-            return session.user if session else None
+            if session:
+                return session.user, session.csrf_token
+            return None, ""
         finally:
             db.close()
     except Exception:
-        return None
+        return None, ""
 
 # NOTE: Global admission control REMOVED - does not work with
 # blocking sync analysis in async endpoints. The event loop
@@ -105,8 +107,9 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/pricing", response_class=HTMLResponse)
 async def pricing(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
-        request, "pricing.html", {"current_user": _get_current_user_optional(request)}
+        request, "pricing.html", {"current_user": _user, "csrf_token": _csrf}
     )
 
 
@@ -117,8 +120,9 @@ async def health():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
-        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request)), "current_user": _get_current_user_optional(request)}
+        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
     )
 
 
@@ -131,8 +135,9 @@ async def demo(request: Request):
     """
     data = analyze_upload(SAMPLE_FILENAME, SAMPLE_LOG.encode("utf-8"))
     data["is_demo"] = True
-    data["current_user"] = _get_current_user_optional(request)
-    data["current_user"] = _get_current_user_optional(request)
+    _user, _csrf = _get_current_user_optional(request)
+    data["current_user"] = _user
+    data["csrf_token"] = _csrf
     return templates.TemplateResponse(request, "report.html", data)
 
 
@@ -145,10 +150,11 @@ async def analyze(
     ip = _client_ip(request)
 
     def error(message: str, status: int = 400, headers: dict = None):
+        _user, _csrf = _get_current_user_optional(request)
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"error": message, "remaining": limiter.remaining(ip), "current_user": _get_current_user_optional(request)},
+            {"error": message, "remaining": limiter.remaining(ip), "current_user": _user, "csrf_token": _csrf},
             status_code=status,
             headers=headers or {},
         )
@@ -205,5 +211,7 @@ async def analyze(
             headers={"Content-Disposition": f'attachment; filename="{stem}-stacksift.txt"'},
         )
 
-    data["current_user"] = _get_current_user_optional(request)
+    _user, _csrf = _get_current_user_optional(request)
+    data["current_user"] = _user
+    data["csrf_token"] = _csrf
     return templates.TemplateResponse(request, "report.html", data)
