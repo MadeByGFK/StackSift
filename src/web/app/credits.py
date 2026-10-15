@@ -578,13 +578,65 @@ def complete_operation(
     worker_id: str,
     result_id: uuid.UUID | None = None,
 ) -> models.Operation:
-    """COMPLETE: settle allocations, no ledger change (already debited at RESERVE)."""
+    """COMPLETE: settle allocations, no ledger change (already debited at RESERVE).
+
+    Follows global lock order (v11.1 Section 4.1):
+      capacity_scopes -> credit_accounts -> credit_grants -> operations
+    Discovery reads precede the transaction; re-validate under locks.
+    """
+    # Phase 1: Discovery (no locks) - find which rows we'll need
+    disc_op = db.get(models.Operation, operation_id)
+    if disc_op is None:
+        raise AdmissionError("operation not found")
+    if disc_op.status != "reserved":
+        if disc_op.status == "completed":
+            return disc_op
+        raise AdmissionError(f"operation already {disc_op.status}")
+
+    disc_permit = db.execute(
+        select(models.Permit).where(models.Permit.operation_id == operation_id)
+    ).scalar_one_or_none()
+    scope_keys: list[str] = []
+    if disc_permit:
+        scope_keys = sorted([
+            ps.scope_key for ps in db.execute(
+                select(models.PermitScope).where(models.PermitScope.permit_id == disc_permit.id)
+            ).scalars().all()
+        ])
+
+    disc_allocs = db.execute(
+        select(models.OperationAllocation).where(
+            models.OperationAllocation.operation_id == operation_id,
+            models.OperationAllocation.state == "reserved",
+        )
+    ).scalars().all()
+    grant_ids = sorted(set(a.grant_id for a in disc_allocs))
+    user_id = disc_op.user_id
+
+    # Phase 2: Acquire locks in global order
+    # 1. capacity_scopes (lexicographic)
+    for sk in scope_keys:
+        db.execute(
+            select(models.CapacityScope).where(models.CapacityScope.scope_key == sk)
+            .with_for_update()
+        ).scalar_one()
+    # 2. credit_accounts
+    account = db.execute(
+        select(models.CreditAccount).where(models.CreditAccount.user_id == user_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    # 3. credit_grants (ID order)
+    grants: dict[uuid.UUID, models.CreditGrant] = {}
+    for gid in grant_ids:
+        grants[gid] = db.execute(
+            select(models.CreditGrant).where(models.CreditGrant.id == gid)
+            .with_for_update()
+        ).scalar_one()
+    # 4. operations (re-validate under lock)
     op = db.execute(
         select(models.Operation).where(models.Operation.id == operation_id)
         .with_for_update()
-    ).scalar_one_or_none()
-    if op is None:
-        raise AdmissionError("operation not found")
+    ).scalar_one()
     if op.status != "reserved":
         if op.status == "completed":
             return op
@@ -594,6 +646,11 @@ def complete_operation(
     if _as_aware(op.lease_expires_at) < _utcnow():
         raise AdmissionError("lease expired")
 
+    # Phase 3: Work (all locks held)
+    # Require a stored result (v11.1: every charged operation needs durable result)
+    if result_id is None and op.result_id is None:
+        raise AdmissionError("completion requires a stored result")
+
     allocations = db.execute(
         select(models.OperationAllocation).where(
             models.OperationAllocation.operation_id == operation_id,
@@ -602,10 +659,7 @@ def complete_operation(
     ).scalars().all()
 
     for alloc in allocations:
-        grant = db.execute(
-            select(models.CreditGrant).where(models.CreditGrant.id == alloc.grant_id)
-            .with_for_update()
-        ).scalar_one()
+        grant = grants[alloc.grant_id]
         grant.reserved -= alloc.quantity
         grant.remaining -= alloc.quantity
         assert grant.reserved >= 0 and grant.remaining >= 0
@@ -618,12 +672,26 @@ def complete_operation(
         op.result_id = result_id
     db.flush()
 
+    # Release capacity (permit already discovered; re-fetch under lock)
     permit = db.execute(
         select(models.Permit).where(models.Permit.operation_id == operation_id)
+        .with_for_update()
     ).scalar_one_or_none()
-    if permit:
-        _release_capacity(db, permit, op.user_id)
-
+    if permit and permit.released_at is None:
+        permit.released_at = _utcnow()
+        for sk in scope_keys:
+            scope = db.execute(
+                select(models.CapacityScope).where(models.CapacityScope.scope_key == sk)
+                .with_for_update()
+            ).scalar_one()
+            # Find quantity from permit_scopes
+            ps = db.execute(
+                select(models.PermitScope).where(
+                    models.PermitScope.permit_id == permit.id,
+                    models.PermitScope.scope_key == sk,
+                )
+            ).scalar_one()
+            scope.used = max(0, scope.used - ps.quantity)
     db.flush()
     return op
 
@@ -639,13 +707,64 @@ def release_operation(
     failure_code: str,
     _is_recovery: bool = False,
 ) -> models.Operation:
-    """RELEASE: return reserved credits via compensating ledger entry."""
+    """RELEASE: return reserved credits via compensating ledger entry.
+
+    Follows global lock order (v11.1 Section 4.1):
+      capacity_scopes -> credit_accounts -> credit_grants -> operations
+    """
+    # Phase 1: Discovery (no locks)
+    disc_op = db.get(models.Operation, operation_id)
+    if disc_op is None:
+        raise AdmissionError("operation not found")
+    if disc_op.status != "reserved":
+        if disc_op.status in ("failed", "expired"):
+            return disc_op
+        raise AdmissionError(f"operation already {disc_op.status}")
+
+    disc_permit = db.execute(
+        select(models.Permit).where(models.Permit.operation_id == operation_id)
+    ).scalar_one_or_none()
+    scope_keys: list[str] = []
+    if disc_permit:
+        scope_keys = sorted([
+            ps.scope_key for ps in db.execute(
+                select(models.PermitScope).where(models.PermitScope.permit_id == disc_permit.id)
+            ).scalars().all()
+        ])
+
+    disc_allocs = db.execute(
+        select(models.OperationAllocation).where(
+            models.OperationAllocation.operation_id == operation_id,
+            models.OperationAllocation.state == "reserved",
+        )
+    ).scalars().all()
+    grant_ids = sorted(set(a.grant_id for a in disc_allocs))
+    user_id = disc_op.user_id
+
+    # Phase 2: Acquire locks in global order
+    for sk in scope_keys:
+        db.execute(
+            select(models.CapacityScope).where(models.CapacityScope.scope_key == sk)
+            .with_for_update()
+        ).scalar_one()
+    account = db.execute(
+        select(models.CreditAccount).where(models.CreditAccount.user_id == user_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if account is None:
+        account = models.CreditAccount(user_id=user_id, balance=0, ledger_sequence=0)
+        db.add(account)
+        db.flush()
+    grants: dict[uuid.UUID, models.CreditGrant] = {}
+    for gid in grant_ids:
+        grants[gid] = db.execute(
+            select(models.CreditGrant).where(models.CreditGrant.id == gid)
+            .with_for_update()
+        ).scalar_one()
     op = db.execute(
         select(models.Operation).where(models.Operation.id == operation_id)
         .with_for_update()
-    ).scalar_one_or_none()
-    if op is None:
-        raise AdmissionError("operation not found")
+    ).scalar_one()
     if op.status != "reserved":
         if op.status in ("failed", "expired"):
             return op
@@ -653,6 +772,7 @@ def release_operation(
     if not _is_recovery and op.worker_id != worker_id:
         raise AdmissionError("worker ownership mismatch")
 
+    # Phase 3: Work (all locks held)
     allocations = db.execute(
         select(models.OperationAllocation).where(
             models.OperationAllocation.operation_id == operation_id,
@@ -662,17 +782,13 @@ def release_operation(
 
     grant_splits = []
     for alloc in allocations:
-        grant = db.execute(
-            select(models.CreditGrant).where(models.CreditGrant.id == alloc.grant_id)
-            .with_for_update()
-        ).scalar_one()
+        grant = grants[alloc.grant_id]
         grant.reserved -= alloc.quantity
         assert grant.reserved >= 0
         alloc.state = "released"
         grant_splits.append((grant.id, alloc.quantity))
     db.flush()
 
-    account = get_or_create_account(db, op.user_id, for_update=True)
     original = db.execute(
         select(models.CreditLedger).where(
             models.CreditLedger.user_id == op.user_id,
@@ -699,10 +815,22 @@ def release_operation(
 
     permit = db.execute(
         select(models.Permit).where(models.Permit.operation_id == operation_id)
+        .with_for_update()
     ).scalar_one_or_none()
-    if permit:
-        _release_capacity(db, permit, op.user_id)
-
+    if permit and permit.released_at is None:
+        permit.released_at = _utcnow()
+        for sk in scope_keys:
+            scope = db.execute(
+                select(models.CapacityScope).where(models.CapacityScope.scope_key == sk)
+                .with_for_update()
+            ).scalar_one()
+            ps = db.execute(
+                select(models.PermitScope).where(
+                    models.PermitScope.permit_id == permit.id,
+                    models.PermitScope.scope_key == sk,
+                )
+            ).scalar_one()
+            scope.used = max(0, scope.used - ps.quantity)
     db.flush()
     return op
 
@@ -712,7 +840,11 @@ def release_operation(
 # ---------------------------------------------------------------------------
 
 def recover_expired_operations(db: Session, batch_size: int = 100) -> int:
-    """Find reserved operations with expired leases and release them."""
+    """Find reserved operations with expired leases and release them.
+    
+    If a ready Result exists (linked or unlinked), complete instead of release.
+    This handles crashes between Result creation and operation.result_id update.
+    """
     now = _utcnow()
     candidates = db.execute(
         select(models.Operation.id).where(
@@ -732,10 +864,24 @@ def recover_expired_operations(db: Session, batch_size: int = 100) -> int:
                 continue
             if _as_aware(op.lease_expires_at) >= _utcnow():
                 continue
-            if op.result_id:
-                result = db.get(models.Result, op.result_id)
+            # Check for ready result: first via op.result_id, then via
+            # Result.operation_id (handles crash between Result creation
+            # and operation.result_id update)
+            result_id = op.result_id
+            if result_id is None:
+                orphan = db.execute(
+                    select(models.Result).where(
+                        models.Result.operation_id == op_id,
+                        models.Result.ready_at.isnot(None),
+                        models.Result.deleted_at.is_(None),
+                    )
+                ).scalar_one_or_none()
+                if orphan:
+                    result_id = orphan.id
+            if result_id:
+                result = db.get(models.Result, result_id)
                 if result and result.ready_at and not result.deleted_at:
-                    complete_operation(db, op_id, op.worker_id)
+                    complete_operation(db, op_id, op.worker_id, result_id=result_id)
                     db.commit()
                     recovered += 1
                     continue

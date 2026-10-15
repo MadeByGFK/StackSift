@@ -342,6 +342,8 @@ async def analyze_paid(
     from app.db import SessionLocal
     from app import credits as credits_helpers
     from app import auth as auth_helpers
+    from app import models
+    from datetime import datetime, timezone
 
     def error(message: str, status: int = 400):
         _user, _csrf = _get_current_user_optional(request)
@@ -413,10 +415,47 @@ async def analyze_paid(
         op_id = operation.id
 
         # Idempotent replay: if operation already completed, return stored result
-        if operation.status == "completed" and operation.result_id:
-            # TODO Phase 2B: retrieve stored result. For 2A, re-render is acceptable
-            # since analysis is deterministic; no new charge was made (A11).
-            pass
+        # (no new charge, no re-execution). If failed/expired, require new request.
+        if operation.status == "completed":
+            if operation.result_id:
+                result = db.get(models.Result, operation.result_id)
+                if result and not result.deleted_at:
+                    import json as _json
+                    data = _json.loads(result.storage_manifest)
+                    _delete_paid_pending(file_hash)
+                    _user, _csrf = _get_current_user_optional(request)
+                    data["current_user"] = _user
+                    data["csrf_token"] = _csrf
+                    data["paid_credits_used"] = 0  # replay, no new charge
+                    db.close()
+                    return templates.TemplateResponse(request, "report.html", data)
+            # Completed but no retrievable result: fall through to error
+            db.close()
+            return error("This analysis was already completed. Please start a new request.", status=409)
+        elif operation.status in ("failed", "expired"):
+            db.close()
+            return error(
+                "This analysis request already failed. Please upload the file again for a new analysis.",
+                status=409,
+            )
+        elif operation.status == "reserved":
+            # Operation is in-flight (or lease-valid). Do not re-execute;
+            # client should wait for the original request to complete.
+            # If the lease expired, recovery will mark it expired on next sweep.
+            from app import credits as _ch
+            lease_valid = _ch._as_aware(operation.lease_expires_at) > _ch._utcnow()
+            db.close()
+            if lease_valid:
+                return error(
+                    "This analysis is already in progress. Please wait for it to complete.",
+                    status=429,
+                )
+            else:
+                return error(
+                    "This analysis request expired. Please upload the file again for a new analysis.",
+                    status=409,
+                )
+        # Unreachable: all operation statuses handled above
 
     except credits_helpers.InsufficientCredits:
         db.rollback()
@@ -444,10 +483,30 @@ async def analyze_paid(
                 db2.close()
             return error(data.get("message", "Analysis failed."), status=400)
 
-        # COMPLETE the operation
+        # Create durable result (v11.1: every charged operation needs one)
+        import json as _json
+        from datetime import timedelta as _td
+        result_data = {k: v for k, v in data.items() if k not in ("current_user", "csrf_token")}
+        result_json = _json.dumps(result_data, default=str)
+        result_digest = credits_helpers.hash_input(result_json.encode("utf-8"))
+        now = datetime.now(timezone.utc)
         db2 = SessionLocal()
         try:
-            credits_helpers.complete_operation(db2, op_id, worker_id)
+            result = models.Result(
+                user_id=user.id,
+                operation_id=op_id,
+                type="analysis",
+                storage_manifest=result_json,
+                integrity_digest=result_digest,
+                byte_count=len(result_json.encode("utf-8")),
+                ready_at=now,
+                expires_at=now + _td(days=7),  # v11.1: 7-day retention
+            )
+            db2.add(result)
+            db2.flush()
+            result_id = result.id
+            # COMPLETE the operation with the stored result
+            credits_helpers.complete_operation(db2, op_id, worker_id, result_id=result_id)
             db2.commit()
         finally:
             db2.close()

@@ -209,7 +209,7 @@ class CreditLedger(Base):
     reason = Column(String(30), nullable=False)  # grant|reserve|operation_release|cash_refund|admin_revoke|admin_grant
     operation_id = Column(GUID(), ForeignKey("operations.id"), nullable=True)
     refund_id = Column(GUID(), nullable=True)  # Phase 3 FK
-    adjustment_id = Column(GUID(), ForeignKey("admin_adjustments.id"), nullable=True)
+    adjustment_id = Column(GUID(), nullable=True)
     reverses_entry_id = Column(GUID(), ForeignKey("credit_ledger.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
@@ -218,6 +218,8 @@ class CreditLedger(Base):
         CheckConstraint("balance_after >= 0", name="ck_ledger_balance_nonneg"),
         UniqueConstraint("user_id", "event_key", name="uq_ledger_user_event_key"),
         UniqueConstraint("user_id", "account_sequence", name="uq_ledger_user_sequence"),
+        sa.ForeignKeyConstraint(["adjustment_id"], ["admin_adjustments.id"],
+                                name="fk_ledger_adjustment_id"),
         Index("ix_ledger_reverses", "reverses_entry_id", unique=True,
               postgresql_where="reverses_entry_id IS NOT NULL",
               sqlite_where=sa.text("reverses_entry_id IS NOT NULL")),

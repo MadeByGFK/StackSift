@@ -176,13 +176,15 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(30), nullable=False),
         sa.Column("operation_id", UUID_TYPE, sa.ForeignKey("operations.id"), nullable=True),
         sa.Column("refund_id", UUID_TYPE, nullable=True),
-        sa.Column("adjustment_id", UUID_TYPE, sa.ForeignKey("admin_adjustments.id"), nullable=True),
+        sa.Column("adjustment_id", UUID_TYPE, nullable=True),
         sa.Column("reverses_entry_id", UUID_TYPE, sa.ForeignKey("credit_ledger.id"), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.CheckConstraint("delta != 0", name="ck_ledger_delta_nonzero"),
         sa.CheckConstraint("balance_after >= 0", name="ck_ledger_balance_nonneg"),
         sa.UniqueConstraint("user_id", "event_key", name="uq_ledger_user_event_key"),
         sa.UniqueConstraint("user_id", "account_sequence", name="uq_ledger_user_sequence"),
+        sa.ForeignKeyConstraint(["adjustment_id"], ["admin_adjustments.id"],
+                                name="fk_ledger_adjustment_id"),
     )
     op.create_index("ix_credit_ledger_user_id", "credit_ledger", ["user_id"])
     op.execute(
@@ -331,7 +333,29 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Dropping tables automatically removes their constraints/FKs.
+    # Handle circular FK between credit_ledger and admin_adjustments:
+    #   credit_ledger.adjustment_id -> admin_adjustments.id
+    #   admin_adjustments.applied_ledger_id -> credit_ledger.id
+    # Drop both FK constraints before dropping either table.
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.drop_constraint("fk_ledger_adjustment_id", "credit_ledger", type_="foreignkey")
+        op.drop_constraint("fk_adjustments_applied_ledger", "admin_adjustments", type_="foreignkey")
+    elif bind.dialect.name == "sqlite":
+        with op.batch_alter_table("credit_ledger") as batch_op:
+            try:
+                batch_op.drop_constraint("fk_ledger_adjustment_id", type_="foreignkey")
+            except Exception:
+                pass
+        with op.batch_alter_table("admin_adjustments") as batch_op:
+            try:
+                batch_op.drop_constraint("fk_adjustments_applied_ledger", type_="foreignkey")
+            except Exception:
+                pass
+
+    # Drop in reverse dependency order. Tables referencing operations
+    # (permits, operation_allocations, credit_ledger, results, consents)
+    # must go before operations.
     op.drop_table("restrictions")
     op.drop_table("free_requests")
     op.drop_table("free_buckets")
@@ -342,10 +366,10 @@ def downgrade() -> None:
     op.drop_table("signup_eligibility")
     op.drop_table("operation_allocations")
     op.drop_table("ledger_grants")
+    op.drop_table("admin_adjustments")
     op.drop_table("credit_ledger")
     op.drop_table("results")
     op.drop_table("consents")
     op.drop_table("operations")
-    op.drop_table("admin_adjustments")
     op.drop_table("credit_grants")
     op.drop_table("credit_accounts")

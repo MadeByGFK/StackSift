@@ -38,6 +38,23 @@ def user(db):
     return uid
 
 
+def _make_result(db, user_id, op_id):
+    """Create a durable ready Result for an operation (v11.1 requirement)."""
+    r = models.Result(
+        user_id=user_id,
+        operation_id=op_id,
+        type="analysis",
+        storage_manifest='{"test": true}',
+        integrity_digest="abc123",
+        byte_count=14,
+        ready_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+    )
+    db.add(r)
+    db.flush()
+    return r
+
+
 def _consent(db, user_id, op_type="additional_analysis", h="hash", cost=1):
     c = C.create_consent(db, user_id, op_type, h, cost)
     db.commit()
@@ -71,7 +88,7 @@ def test_t01_reservation_accounting(db, user):
     op2 = _admit(db, user, "k2", "h2", 3)
     assert _balance(db, user) == 2
 
-    C.complete_operation(db, op1.id, "w1")
+    C.complete_operation(db, op1.id, "w1", result_id=_make_result(db, user, op1.id).id)
     db.commit()
     assert _balance(db, user) == 2
 
@@ -90,7 +107,7 @@ def test_t01_grant_remaining_tracks(db, user):
     grant = db.execute(select(models.CreditGrant)).scalar_one()
     assert grant.remaining == 10 and grant.reserved == 8
 
-    C.complete_operation(db, op1.id, "w1")
+    C.complete_operation(db, op1.id, "w1", result_id=_make_result(db, user, op1.id).id)
     db.commit()
     db.refresh(grant)
     assert grant.remaining == 5 and grant.reserved == 3
@@ -119,7 +136,7 @@ def test_t02_mixed_grants_fifo(db, user):
     assert len(allocs) == 2
     assert sorted(a.quantity for a in allocs) == [2, 3]
 
-    C.complete_operation(db, op.id, "w1")
+    C.complete_operation(db, op.id, "w1", result_id=_make_result(db, user, op.id).id)
     db.commit()
 
     grants = {g.source: g for g in db.execute(select(models.CreditGrant)).scalars().all()}
@@ -247,7 +264,7 @@ def test_t39_completion_under_restriction(db, user):
     op = _admit(db, user, "k1", "h1", 5)
     _impose(db, user)
 
-    C.complete_operation(db, op.id, "w1")
+    C.complete_operation(db, op.id, "w1", result_id=_make_result(db, user, op.id).id)
     db.commit()
     assert _balance(db, user) == 20
     grant = db.execute(select(models.CreditGrant)).scalar_one()
@@ -270,8 +287,9 @@ def test_t23_capacity_limits(db, user):
             db.rollback()
     assert len(ops) == 2
 
-    C.complete_operation(db, ops[0].id, "w1")
+    C.complete_operation(db, ops[0].id, "w1", result_id=_make_result(db, user, ops[0].id).id)
     db.commit()
+    # Idempotent: second completion returns existing without needing new result
     C.complete_operation(db, ops[0].id, "w1")
     db.commit()
     assert not C.verify_capacity_invariants(db)
@@ -340,7 +358,7 @@ def test_t34_invariant_snapshot_consistent(db, user):
     db.commit()
     op = _admit(db, user, "k1", "h1", 5)
     assert not C.verify_account_invariants(db, user)
-    C.complete_operation(db, op.id, "w1")
+    C.complete_operation(db, op.id, "w1", result_id=_make_result(db, user, op.id).id)
     db.commit()
     assert not C.verify_account_invariants(db, user)
 
