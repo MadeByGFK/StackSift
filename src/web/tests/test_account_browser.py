@@ -106,6 +106,12 @@ def test_https_account_forms_end_to_end(auth_env, tmp_path, monkeypatch):
             # both a nav-bar logout (plain POST, no redirect) and the in-page
             # logout button (data-auth-form, JS-redirects to /login on success).
             # The test exercises the in-page logout flow.
+            # wait_for_url can resolve before the page finishes parsing, and the
+            # data-auth-form submit handler is registered by an end-of-body
+            # script. An early click would submit a plain POST (JSON response,
+            # no redirect) instead of the JS fetch -> /login flow, so wait for
+            # the page to finish loading first.
+            page.wait_for_load_state()
             page.locator('form[data-auth-form]').get_by_role("button", name="Log out", exact=True).click()
             page.wait_for_url(base + "/login")
             assert not any(c["name"] == auth.SESSION_COOKIE for c in context.cookies())
