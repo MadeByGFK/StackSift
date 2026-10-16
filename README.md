@@ -7,8 +7,10 @@ Turn noisy application logs into a quick, readable incident summary.
 
 Drop in a `.log` file and get severity counts, recurring issues ranked by
 severity and frequency, a health verdict, and the #1 thing to investigate
-first. Your file is analyzed in memory and deleted immediately — nothing is
-ever stored.
+first. Your file is processed using temporary storage and cleaned up when
+analysis finishes — no upload archive, and uploads are never used for
+training. (The framework may briefly spool the raw upload to disk before
+redaction; operational request logs are recorded. See Privacy below.)
 
 Prefer the terminal? StackSift is also a Python CLI (see below).
 
@@ -34,10 +36,11 @@ The hosted version lives at
 - Plain-text logs plus auto-detected **JSON-lines**
 - Beautiful HTML incident report, or download a `.txt` summary
 - Free tier: 10 analyses/hour, no account needed
-- Private by design: files are processed in memory and deleted on the spot
+- Private by design: uploads use temporary storage and are cleaned up after
+  processing — see the [privacy model](src/web/README.md#privacy-model)
 
 The web app is a thin FastAPI wrapper around the analyzer in this repo. Want
-to host your own? See `web/README.md`.
+to host your own? See `src/web/README.md`.
 
 ## CLI
 
@@ -118,15 +121,26 @@ unsupported lines are counted separately rather than silently dropped.
 
 ## Privacy
 
-- The web version analyzes uploads in memory and deletes them immediately.
-  Nothing is stored, logged, or used to train anything.
+- The web version processes uploads using temporary storage and cleans it
+  up when analysis finishes. Recognized secret patterns are redacted before
+  the analysis temp file is created; that file is deleted in a `finally`
+  block during normal processing. The framework may spool the raw upload
+  to disk before redaction, and abrupt termination can interrupt cleanup —
+  this is not a secure-erasure guarantee. Redaction is best effort and can
+  miss secrets.
+- We keep no upload archive and do not use uploads for training. (This
+  describes current behavior — durable results storage for account holders
+  is planned for a future release.) Operational request logs are recorded.
+- Analysis works anonymously — no account required for the free tier.
+  Optional accounts (email/password, Google, GitHub) use a session cookie
+  to keep you signed in.
 - The CLI runs entirely on your machine — your logs never leave it.
 
 ## Tech Stack
 
 - Python 3.10+
 - Typer, Rich, pytest, setuptools
-- Web: FastAPI + Jinja2 (see `web/`)
+- Web: FastAPI + Jinja2 (see `src/web/`)
 
 ## Roadmap
 

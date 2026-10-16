@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StackSift — Drop in a log file. Get an incident summary.</title>
-<meta name="description" content="StackSift turns noisy application logs into a quick, readable incident summary. Free, no signup, uploads use temporary storage.">
+<meta name="description" content="StackSift turns noisy application logs into a quick, readable incident summary. Free, no signup required for analysis, uploads use temporary storage.">
 <link rel="stylesheet" href="/static/style.css?v=3">
 <style>
 .spinner {
@@ -84,7 +84,7 @@ document.getElementById('upload-form').addEventListener('submit', function() {
     <p>Analyzing your log... This may take up to 30 seconds for large files.</p>
   </div>
   <p class="demo-cta">No log handy? <a href="/demo">Try with sample logs →</a></p>
-  <p class="rate-note">Free tier: {{ remaining }} of 10 analyses left this hour · No signup · Temporary processing</p>
+  <p class="rate-note">Free tier: {{ remaining }} of 10 analyses left this hour · No signup needed · Temporary processing</p>
 
   <div class="privacy-notice">
     <h3>Privacy</h3>
@@ -107,8 +107,8 @@ document.getElementById('upload-form').addEventListener('submit', function() {
       <ul>
         <li>Uploads use <strong>temporary storage</strong> during processing.</li>
         <li>Recognized secret patterns are <strong>redacted</strong> before analysis; other sensitive data may appear in reports.</li>
-        <li>We do not maintain an upload archive or use uploads for training. Operational request logs are recorded.</li>
-        <li>No account, no cookies, no tracking of file contents.</li>
+        <li>We currently keep no upload archive and don't use uploads for training. Operational request logs are recorded. (Durable results storage is planned for a future release.)</li>
+        <li>No account needed for analysis — optional accounts use a <strong>session cookie</strong> to stay signed in. File contents are not logged or retained after processing.</li>
       </ul>
     </div>
     <div class="card">
