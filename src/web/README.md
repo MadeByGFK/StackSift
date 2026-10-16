@@ -6,14 +6,15 @@ The hosted front end for [StackSift](https://github.com/MadeByGFK/StackSift).
 
 Drop in a log file, get an incident summary — severity counts, recurring
 issues ranked by severity, a health verdict, and the #1 thing to investigate
-first. Free, no signup, no upload archive.
+first. Free, no signup required for the free tier, no upload archive.
 
 ## Features
 
 - Drag-and-drop upload (`.log` / `.txt`, up to 10 MB)
 - Plain-text logs plus auto-detected **JSON-lines** (converted on the fly)
 - HTML incident report in the browser, or download a `.txt` summary
-- Free tier: 10 analyses/hour per IP (in-memory limiter, no accounts yet)
+- Free tier: 10 analyses/hour per IP (in-memory limiter; anonymous analysis
+  needs no account — optional accounts available)
 - Private by design: temporary uploads with best-effort secret redaction
 
 ## Run locally
@@ -61,7 +62,15 @@ redacts recognized patterns, writes a separate temporary analysis file, and
 unlinks it in a finally block. The framework closes the upload spool during
 request cleanup. Abrupt termination can interrupt cleanup; this is not a
 secure-erasure guarantee. Redaction is best effort and can miss secrets.
-Operational request logs remain enabled. No upload archive is maintained.
+Operational request logs remain enabled. No upload archive is currently
+maintained.
+
+Optional accounts (email/password, Google, GitHub OAuth) use a session
+cookie (`__Host-stacksift_session` in `app/auth.py`) to keep you signed in.
+Anonymous analysis requires no account.
+
+This section describes current behavior. Durable results storage for
+account holders is planned for a future release.
 
 Disabling spooling alone would put larger uploads in RAM without solving
 admission control. A memory-only guarantee requires bounded streaming input,
