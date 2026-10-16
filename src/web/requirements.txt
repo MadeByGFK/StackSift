@@ -2,7 +2,14 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 jinja2>=3.1
 python-multipart>=0.0.9
+sqlalchemy>=2.0
+alembic>=1.13
+bcrypt>=4.1
+httpx>=0.27
+psycopg2-binary>=2.9
 # NOTE: StackSift diagnostic library is fully vendored in app/vendor/
 # (see app/vendor/VENDORING.md). The pip-installed 'stacksift' package
 # is NOT required and MUST NOT be used for diagnostic functions.
 # This eliminates Railway pip-cache staleness as a deployment risk.
+
+PyJWT[crypto]>=2.10,<3
