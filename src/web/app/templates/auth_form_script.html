@@ -1,0 +1,23 @@
+<script>
+for (const form of document.querySelectorAll('form[data-auth-form]')) {
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const output = form.querySelector('[role="status"]');
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    output.textContent = '';
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST', credentials: 'same-origin', body: new FormData(form),
+      });
+      const result = await response.json();
+      output.textContent = result.error || (typeof result.detail === 'string' ? result.detail : '') || result.message || 'Unable to complete this request. Please try again.';
+      if (response.ok && form.dataset.successUrl) location.assign(form.dataset.successUrl);
+    } catch (_) {
+      output.textContent = 'Unable to connect. Please try again.';
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+</script>

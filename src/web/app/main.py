@@ -2,6 +2,8 @@
 
 Thin slice: upload a log file, get an incident summary. No accounts or retained upload archive. Rate-limited free tier; auth + credits come later once usage proves
 demand.
+
+Phase 1: Accounts added — email/password auth, Google/GitHub OAuth, sessions.
 """
 
 from __future__ import annotations
@@ -18,15 +20,70 @@ from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
 from app.service import analyze_upload, render_text_report
 
+# Phase 1: Auth
+from app.auth_routes import router as auth_router
+
 BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title="StackSift", docs_url=None, redoc_url=None)
+
+
+@app.on_event("startup")
+async def run_migrations():
+    """Upgrade the configured account database; keep anonymous analysis available."""
+    import logging
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return
+    try:
+        from alembic.config import Config
+        from alembic import command
+        from app.db import engine
+
+        # Use the application's normalized URL/driver, not Alembic's raw env URL.
+        # Programmatic config avoids resetting application loggers via fileConfig.
+        cfg = Config()
+        cfg.set_main_option("script_location", str(BASE_DIR.parent / "alembic"))
+        with engine.begin() as connection:
+            cfg.attributes["connection"] = connection
+            command.upgrade(cfg, "head")
+    except Exception as exc:
+        # Driver errors may contain credentials/URLs; log the exception type only.
+        logging.getLogger(__name__).error(
+            "Account migrations failed (%s); account routes are unavailable.",
+            type(exc).__name__,
+        )
+
+
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+# Phase 1: Auth routes (signup, login, OAuth, sessions, settings)
+app.include_router(auth_router)
 
 # Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
 burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
+
+
+def _get_current_user_optional(request: Request):
+    """Return the logged-in user or None. Safe when DB is unavailable."""
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return None, ""
+    try:
+        from app.db import SessionLocal
+        from app import auth as auth_helpers
+        db = SessionLocal()
+        try:
+            session = auth_helpers.get_session_from_cookie(db, request)
+            if session:
+                return session.user, session.csrf_token
+            return None, ""
+        finally:
+            db.close()
+    except Exception:
+        return None, ""
 
 # NOTE: Global admission control REMOVED - does not work with
 # blocking sync analysis in async endpoints. The event loop
@@ -48,6 +105,14 @@ async def security_headers(request: Request, call_next):
 
 
 
+@app.get("/pricing", response_class=HTMLResponse)
+async def pricing(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request, "pricing.html", {"current_user": _user, "csrf_token": _csrf}
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -55,8 +120,9 @@ async def health():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
-        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request))}
+        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
     )
 
 
@@ -69,6 +135,9 @@ async def demo(request: Request):
     """
     data = analyze_upload(SAMPLE_FILENAME, SAMPLE_LOG.encode("utf-8"))
     data["is_demo"] = True
+    _user, _csrf = _get_current_user_optional(request)
+    data["current_user"] = _user
+    data["csrf_token"] = _csrf
     return templates.TemplateResponse(request, "report.html", data)
 
 
@@ -81,10 +150,11 @@ async def analyze(
     ip = _client_ip(request)
 
     def error(message: str, status: int = 400, headers: dict = None):
+        _user, _csrf = _get_current_user_optional(request)
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"error": message, "remaining": limiter.remaining(ip)},
+            {"error": message, "remaining": limiter.remaining(ip), "current_user": _user, "csrf_token": _csrf},
             status_code=status,
             headers=headers or {},
         )
@@ -141,4 +211,7 @@ async def analyze(
             headers={"Content-Disposition": f'attachment; filename="{stem}-stacksift.txt"'},
         )
 
+    _user, _csrf = _get_current_user_optional(request)
+    data["current_user"] = _user
+    data["csrf_token"] = _csrf
     return templates.TemplateResponse(request, "report.html", data)

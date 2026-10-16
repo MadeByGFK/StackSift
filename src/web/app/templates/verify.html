@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Email verification — StackSift</title>
+<link rel="stylesheet" href="/static/style.css?v=3">
+<style>
+.auth-wrap { max-width: 420px; margin: 3rem auto; padding: 0 1rem; }
+.auth-card { background: #1e2a4a; border: 1px solid #2d3d6b; border-radius: 12px; padding: 2rem; text-align: center; }
+.auth-card h1 { color: #fff; margin: 0 0 0.5rem 0; font-size: 1.5rem; }
+.auth-card p { color: #a0aec0; margin: 0 0 1rem 0; }
+.auth-card .error { background: #4a1e1e; border: 1px solid #7a2a2a; color: #ff9999; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+.auth-card .success { background: #1e4a2a; border: 1px solid #2a7a4a; color: #99ffaa; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+.auth-links { text-align: center; margin-top: 1.5rem; font-size: 0.9rem; color: #a0aec0; }
+.auth-links a { color: #ecc94b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+    <nav class="nav-links">
+      <a href="/pricing">Pricing</a>
+      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+      {% if current_user %}
+        <span class="user-email">{{ current_user.email }}</span>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <h1>Verify your email</h1>
+      <p>Confirm that you requested this StackSift account.</p>
+      <form method="post" action="/auth/verify" data-auth-form>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="token" value="{{ token }}">
+        <p role="status" aria-live="polite"></p>
+        <button type="submit" class="btn-primary">Verify email</button>
+      </form>
+      <div class="auth-links"><a href="/login">Log in</a></div>
+
+    </div>
+  </div>
+</div>
+{% include "auth_form_script.html" %}
+</body>
+</html>
