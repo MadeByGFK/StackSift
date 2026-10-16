@@ -344,10 +344,10 @@ def downgrade() -> None:
     # Drop the operations-side constraints so results/consents can drop first.
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        op.drop_constraint("fk_ledger_adjustment_id", "credit_ledger", type_="foreignkey")
-        op.drop_constraint("fk_adjustments_applied_ledger", "admin_adjustments", type_="foreignkey")
         op.drop_constraint("fk_operations_result_id", "operations", type_="foreignkey")
         op.drop_constraint("fk_operations_consent_id", "operations", type_="foreignkey")
+        op.drop_constraint("fk_ledger_adjustment_id", "credit_ledger", type_="foreignkey")
+        op.drop_constraint("fk_adjustments_applied_ledger", "admin_adjustments", type_="foreignkey")
     elif bind.dialect.name == "sqlite":
         with op.batch_alter_table("credit_ledger") as batch_op:
             try:
