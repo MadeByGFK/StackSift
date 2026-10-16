@@ -7,8 +7,8 @@ Turn noisy application logs into a quick, readable incident summary.
 
 Drop in a `.log` file and get severity counts, recurring issues ranked by
 severity and frequency, a health verdict, and the #1 thing to investigate
-first. Your file is analyzed in memory and deleted immediately — nothing is
-ever stored.
+first. Web uploads use temporary storage during processing. See [Privacy](#privacy)
+for storage, cleanup, and redaction details.
 
 Prefer the terminal? StackSift is also a Python CLI (see below).
 
@@ -34,10 +34,10 @@ The hosted version lives at
 - Plain-text logs plus auto-detected **JSON-lines**
 - Beautiful HTML incident report, or download a `.txt` summary
 - Free tier: 10 analyses/hour, no account needed
-- Private by design: files are processed in memory and deleted on the spot
+- Temporary upload processing with best-effort secret redaction
 
 The web app is a thin FastAPI wrapper around the analyzer in this repo. Want
-to host your own? See `web/README.md`.
+to host your own? See the [web README](src/web/README.md).
 
 ## CLI
 
@@ -118,15 +118,22 @@ unsupported lines are counted separately rather than silently dropped.
 
 ## Privacy
 
-- The web version analyzes uploads in memory and deletes them immediately.
-  Nothing is stored, logged, or used to train anything.
+- Web uploads may be temporarily written to disk before redaction while they
+  are received. Recognized secret patterns are redacted before a separate
+  temporary analysis file is created.
+- Temporary files are cleaned up during normal request processing. Abrupt
+  termination can interrupt cleanup; this is not a secure-erasure guarantee.
+- Redaction is best effort and may miss sensitive data. Review logs before
+  uploading and reports before sharing.
+- No upload archive is maintained. Operational request logs remain enabled.
+  See the [web privacy model](src/web/README.md#privacy-model) for details.
 - The CLI runs entirely on your machine — your logs never leave it.
 
 ## Tech Stack
 
 - Python 3.10+
 - Typer, Rich, pytest, setuptools
-- Web: FastAPI + Jinja2 (see `web/`)
+- Web: FastAPI + Jinja2 (see [src/web/](src/web/))
 
 ## Roadmap
 
