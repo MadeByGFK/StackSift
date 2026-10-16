@@ -45,7 +45,7 @@ def _make_result(db, user_id, op_id):
         operation_id=op_id,
         type="analysis",
         storage_manifest='{"test": true}',
-        integrity_digest="abc123",
+        integrity_digest=C.hash_input(b'{"test": true}'),
         byte_count=14,
         ready_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) + timedelta(days=7),
@@ -177,7 +177,7 @@ def test_t03_recovery_releases_expired(db, user):
     op.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     db.commit()
 
-    recovered = C.recover_expired_operations(db)
+    recovered = C.recover_expired_operations(db, executor_stopped=lambda *_: True)
     assert recovered == 1
     assert _balance(db, user) == 10
     assert not C.verify_account_invariants(db, user)
