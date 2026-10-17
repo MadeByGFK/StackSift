@@ -117,7 +117,14 @@ class PostgresRateLimiter:
 
         Returns ``'ok'`` when the analysis is admitted and recorded, or
         ``'replay'`` when ``request_id`` identifies an already-completed
-        request from the same IP — replays never consume quota.
+        request from the same IP.
+
+        CONTRACT for 'replay': no quota was consumed, and the caller MUST
+        serve the existing result through the durable-result path
+        (PR #17's ``_durable_analysis``). It MUST NOT rerun the analysis:
+        rerunning without charging would silently give away unmetered
+        work, and rerunning *with* a charge would violate the idempotency
+        guarantee. See ``main._serve_replay``.
 
         Raises ``BurstLimited`` / ``HourlyLimited`` when a limit is hit and
         ``RateLimitUnavailable`` when the database cannot be reached (the
