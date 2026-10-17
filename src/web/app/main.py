@@ -20,7 +20,6 @@ from app.rate_limit import (
     HourlyLimited,
     PostgresRateLimiter,
     RateLimiter,
-    RateLimitUnavailable,
 )
 from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
@@ -77,24 +76,36 @@ shared_limiter = PostgresRateLimiter(
 )
 
 
-def _db_session():
-    """Return a new database session, or None when no database is configured."""
+def _use_shared_limiter() -> bool:
+    """True when the database is configured (shared enforcement applies)."""
     import os
 
-    if not os.environ.get("DATABASE_URL"):
-        return None
+    return bool(os.environ.get("DATABASE_URL"))
+
+
+def _db_session():
+    """Return a new database session. Raises on connection failure."""
     from app.db import SessionLocal
 
     return SessionLocal()
 
 
 def _remaining(ip: str) -> int:
-    """Hourly quota remaining for ``ip``, shared across processes when possible."""
-    db = _db_session()
-    if db is None:
+    """Hourly quota remaining for ``ip``, shared across processes when possible.
+
+    Fail-closed display: any database failure shows 0 remaining rather than
+    promising quota that cannot be delivered (the /analyze path 503s then).
+    """
+    if not _use_shared_limiter():
         return limiter.remaining(ip)
     try:
+        db = _db_session()
+    except Exception:
+        return 0
+    try:
         return shared_limiter.remaining(db, ip)
+    except Exception:
+        return 0
     finally:
         db.close()
 
@@ -136,6 +147,39 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+
+
+def _serve_replay(request: Request, file: UploadFile, content: bytes, request_id: str, output: str, ip: str):
+    """Serve the stored result for an already-completed request_id.
+
+    Contract (see PostgresRateLimiter.admit): a 'replay' verdict means the
+    request already completed AND no quota was consumed. The caller must
+    serve the existing result via the durable-result path — it must never
+    silently rerun the analysis here.
+
+    PR #17 provides the durable path as ``_durable_analysis`` in this
+    module; it re-looks-up the request and serves the stored result without
+    consuming quota. If the durable path is unavailable (impossible when
+    replays are genuinely possible, since they require PR #17's tables),
+    fail closed with 503.
+    """
+    durable = globals().get("_durable_analysis")
+    if durable is not None:
+        return durable(request, file.filename, content, request_id, output)
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "error": "This analysis was already completed, but its stored result "
+            "is temporarily unavailable. Please try again shortly.",
+            "remaining": _remaining(ip),
+            "current_user": _user,
+            "csrf_token": _csrf,
+        },
+        status_code=503,
+        headers={"Retry-After": "60"},
+    )
 
 
 @app.get("/pricing", response_class=HTMLResponse)
@@ -210,12 +254,16 @@ async def analyze(
         return error("That file is over the 10 MB free-tier limit.")
 
     # Shared atomic enforcement when the database is configured; the
-    # in-memory limiters remain for the no-database demo path.
-    # A completed request_id never consumes quota (idempotent retry).
-    db = _db_session()
-    if db is not None:
+    # in-memory limiters remain for the no-database demo path ONLY.
+    # NOTE: the in-memory path is never a fallback for database failures —
+    # any database/limiter failure below fails closed with HTTP 503.
+    if _use_shared_limiter():
         try:
-            shared_limiter.admit(db, ip, request_id=request_id or None)
+            db = _db_session()
+            try:
+                verdict = shared_limiter.admit(db, ip, request_id=request_id or None)
+            finally:
+                db.close()
         except BurstLimited:
             return error(
                 "Too many requests. Please wait a minute and try again.",
@@ -228,15 +276,19 @@ async def analyze(
                 status=429,
                 headers={"Retry-After": "3600"},
             )
-        except RateLimitUnavailable:
-            # Fail closed: never silently disable the limits.
+        except Exception:
+            # Fail closed: session-creation failure, RateLimitUnavailable,
+            # or any unexpected limiter error must never silently bypass
+            # the limits into an unlimited analysis path.
             return error(
                 "Rate limiting is temporarily unavailable. Please try again shortly.",
                 status=503,
                 headers={"Retry-After": "60"},
             )
-        finally:
-            db.close()
+        if verdict == "replay":
+            # Already completed: serve the stored result via the durable
+            # path. Never rerun the analysis here, and no quota was consumed.
+            return _serve_replay(request, file, content, request_id, output, ip)
     else:
         # Atomic check: verify both limits before recording either.
         # Prevents rejected requests from consuming quota in the other limiter.
