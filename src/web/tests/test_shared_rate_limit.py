@@ -213,7 +213,7 @@ def test_replay_consumes_no_quota(pg_schema):
     factory, engine = _factory(url, schema)
     try:
         _create_free_requests(engine)
-        _insert_request(engine, 'req-1', 'completed', '127.0.0.1')
+        _insert_request(engine, 'req-1', 'completed', '203.0.113.12')
         limiter = PostgresRateLimiter()
         with factory() as db:
             assert limiter.admit(db, "203.0.113.12", request_id="req-1") == "replay"
