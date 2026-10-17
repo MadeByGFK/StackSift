@@ -11,23 +11,55 @@
 .pricing-hero h1 { font-size: 36px; margin: 0 0 12px; letter-spacing: -1px; }
 .pricing-hero h1 span { color: var(--accent); }
 .pricing-hero p { color: var(--muted); font-size: 1.05rem; max-width: 600px; margin: 0 auto; }
-.tier-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 32px 0; }
-@media (max-width: 640px) { .tier-grid { grid-template-columns: 1fr; } }
-.tier { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
-.tier.premium { border-color: var(--accent); position: relative; }
-.tier-badge { position: absolute; top: -12px; left: 24px; background: var(--accent); color: #1a1a2e; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px; }
-.tier h2 { margin: 0 0 8px; font-size: 1.4rem; }
-.tier .price { font-size: 2rem; font-weight: 700; margin: 8px 0; }
-.tier .price span { font-size: 1rem; font-weight: 400; color: var(--muted); }
-.tier ul { list-style: none; padding: 0; margin: 16px 0; }
-.tier ul li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
-.tier ul li:last-child { border-bottom: none; }
-.tier ul li::before { content: "✓ "; color: var(--green); font-weight: 700; }
-.tier .cta { display: block; text-align: center; margin-top: 20px; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; }
-.tier .cta-primary { background: var(--accent); color: #1a1a2e; }
-.tier .cta-primary:hover { filter: brightness(1.1); }
-.tier .cta-secondary { border: 1px solid var(--border); color: var(--text); }
-.tier .cta-secondary:hover { border-color: var(--accent); }
+.section-head { text-align: center; margin: 40px 0 8px; }
+.section-head h2 { font-size: 1.6rem; margin: 0 0 8px; }
+.section-head p { color: var(--muted); font-size: 0.95rem; margin: 0 auto; max-width: 560px; }
+.free-banner { display: flex; gap: 32px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin: 24px 0; }
+.free-main { flex: 1; min-width: 0; }
+.free-main h2 { margin: 0 0 8px; font-size: 1.4rem; }
+.free-main .price { font-size: 2rem; font-weight: 700; margin: 8px 0; }
+.free-main .price span { font-size: 1rem; font-weight: 400; color: var(--muted); }
+.free-main p { color: var(--muted); font-size: 0.95rem; }
+.free-banner ul { flex: 1; list-style: none; padding: 0; margin: 0; min-width: 0; }
+.free-banner ul li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
+.free-banner ul li:last-child { border-bottom: none; }
+.free-banner ul li::before { content: "✓ "; color: var(--green); font-weight: 700; }
+@media (max-width: 640px) { .free-banner { flex-direction: column; align-items: stretch; } }
+.pack-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; margin: 24px 0; }
+@media (max-width: 800px) { .pack-grid { grid-template-columns: 1fr; } }
+.pack { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; position: relative; text-align: center; }
+.pack.highlight { border-color: var(--accent); }
+.pack-badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #1a1a2e; font-size: 12px; font-weight: 700; padding: 4px 14px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+.pack h3 { margin: 0 0 4px; font-size: 1.1rem; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.pack-price { font-size: 2.6rem; font-weight: 700; margin: 8px 0 0; }
+.pack-credits { font-size: 1.2rem; font-weight: 600; color: var(--accent); margin: 2px 0 8px; }
+.pack-econ { font-size: 0.9rem; color: var(--muted); margin-bottom: 12px; }
+.pack-value { display: inline-block; font-size: 0.85rem; font-weight: 700; color: #1a1a2e; background: var(--accent); border-radius: 20px; padding: 4px 12px; margin-bottom: 16px; }
+.pack-value.subtle { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 400; }
+.pack ul { list-style: none; padding: 0; margin: 0 0 16px; text-align: left; }
+.pack ul li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
+.pack ul li:last-child { border-bottom: none; }
+.pack ul li::before { content: "✓ "; color: var(--green); font-weight: 700; }
+.pack-soon { display: inline-block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); border: 1px dashed var(--border); border-radius: 20px; padding: 6px 16px; }
+.pack-note { text-align: center; color: var(--muted); font-size: 0.9rem; margin: 4px 0 20px; }
+.signup-cta { text-align: center; margin: 8px 0 32px; }
+.signup-cta .cta { display: inline-block; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; background: var(--accent); color: #1a1a2e; }
+.signup-cta .cta:hover { filter: brightness(1.1); }
+.signup-cta p { color: var(--muted); font-size: 0.9rem; margin-top: 10px; }
+.usage { margin: 32px 0; }
+.usage h2 { font-size: 1.4rem; margin: 0 0 4px; text-align: center; }
+.usage > p { text-align: center; color: var(--muted); font-size: 0.95rem; margin: 0 0 16px; }
+.usage table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.usage th, .usage td { text-align: left; padding: 14px 20px; font-size: 0.95rem; border-bottom: 1px solid var(--border); }
+.usage tr:last-child th, .usage tr:last-child td { border-bottom: none; }
+.usage th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.5px; }
+.usage td.cost { font-weight: 700; white-space: nowrap; }
+.usage .muted { color: var(--muted); }
+.policies { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 32px 0; }
+@media (max-width: 640px) { .policies { grid-template-columns: 1fr; } }
+.policy { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
+.policy strong { display: block; font-size: 1rem; margin-bottom: 6px; }
+.policy span { color: var(--muted); font-size: 0.9rem; }
 .coming-soon { background: #1e2a4a; border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin: 24px 0; text-align: center; }
 .coming-soon p { margin: 0; color: var(--muted); font-size: 0.95rem; }
 .faq { margin: 32px 0; }
@@ -59,50 +91,113 @@
 
   <section class="pricing-hero">
     <h1>Simple pricing for <span>everyone</span>.</h1>
-    <p>Free log analysis, no signup required. Premium capabilities for when you need more.</p>
+    <p>Free log analysis, no signup required. Credit packs for when you need premium capabilities.</p>
   </section>
 
-  <div class="tier-grid">
-    <div class="tier">
+  <section class="free-banner">
+    <div class="free-main">
       <h2>Free</h2>
       <div class="price">$0 <span>forever</span></div>
-      <p style="color:var(--muted);font-size:0.95rem;">For quick incident triage. No account needed.</p>
-      <ul>
-        <li>10 analyses per hour</li>
-        <li>10 MB / 50,000 line limit</li>
-        <li>Single file upload</li>
-        <li>HTML report in browser</li>
-        <li>No signup required</li>
-      </ul>
-      <a href="/" class="cta cta-secondary">Analyze a log</a>
+      <p>For quick incident triage. No account needed — just drop in a log file.</p>
     </div>
+    <ul>
+      <li>10 analyses per hour</li>
+      <li>10 MB / 50,000 line limit</li>
+      <li>Single file upload</li>
+      <li>HTML report in browser</li>
+      <li>No signup required</li>
+    </ul>
+  </section>
 
-    <div class="tier premium">
-      <div class="tier-badge">Coming Soon</div>
-      <h2>Premium</h2>
-      <div class="price">$5 <span>for 10 credits</span></div>
-      <p style="color:var(--muted);font-size:0.95rem;">For power users who need more from their logs. Launching soon — here’s our planned launch pricing.</p>
+  <div class="section-head">
+    <h2>Credit packs</h2>
+    <p>One-time purchases — no subscription, no auto-renewal. Here&rsquo;s our planned launch pricing; premium is coming soon.</p>
+  </div>
+
+  <div class="pack-grid">
+    <div class="pack">
+      <h3>Starter</h3>
+      <div class="pack-price">$5</div>
+      <div class="pack-credits">10 credits</div>
+      <div class="pack-econ">$0.50 per credit &middot; ~5 PDF exports</div>
+      <div class="pack-value subtle">Perfect for trying premium</div>
       <ul>
         <li>Everything in Free</li>
-        <li><strong>PDF export</strong> — 2 credits per report</li>
-        <li>Credit packs: <strong>$5 for 10</strong>, <strong>$10 for 25</strong>, <strong>$25 for 75</strong></li>
-        <li><strong>3 free credits</strong> when you sign up</li>
+        <li>Credits never expire</li>
       </ul>
-      {% if current_user %}
-        <a href="/settings" class="cta cta-primary">You're signed up — we'll notify you</a>
-      {% else %}
-        <a href="/signup" class="cta cta-primary">Sign up for 3 free credits</a>
-      {% endif %}
+      <span class="pack-soon">Coming soon</span>
+    </div>
+
+    <div class="pack highlight">
+      <div class="pack-badge">Most Popular</div>
+      <h3>Growth</h3>
+      <div class="pack-price">$10</div>
+      <div class="pack-credits">25 credits</div>
+      <div class="pack-econ">$0.40 per credit &middot; ~12 PDF exports</div>
+      <div class="pack-value">25% more credits per dollar</div>
+      <ul>
+        <li>Everything in Free</li>
+        <li>Credits never expire</li>
+      </ul>
+      <span class="pack-soon">Coming soon</span>
+    </div>
+
+    <div class="pack highlight">
+      <div class="pack-badge">Best Value</div>
+      <h3>Power</h3>
+      <div class="pack-price">$25</div>
+      <div class="pack-credits">75 credits</div>
+      <div class="pack-econ">$0.33 per credit &middot; ~37 PDF exports</div>
+      <div class="pack-value">50% more credits per dollar</div>
+      <ul>
+        <li>Everything in Free</li>
+        <li>Credits never expire</li>
+      </ul>
+      <span class="pack-soon">Coming soon</span>
     </div>
   </div>
 
+  <div class="signup-cta">
+    {% if current_user %}
+      <a href="/settings" class="cta">You&rsquo;re signed up &mdash; we&rsquo;ll notify you at launch</a>
+    {% else %}
+      <a href="/signup" class="cta">Sign up &mdash; get 3 free credits at launch</a>
+    {% endif %}
+    <p>Everyone who signs up gets 3 free credits when premium launches.</p>
+  </div>
+
+  <section class="usage">
+    <h2>Where can I use credits?</h2>
+    <p>Credits are spent only on premium capabilities, and only after a successful operation.</p>
+    <table>
+      <tr><th>Capability</th><th>Cost</th></tr>
+      <tr><td><strong>PDF export</strong> &mdash; a shareable incident report</td><td class="cost">2 credits per report</td></tr>
+      <tr><td class="muted">More premium capabilities</td><td class="muted">Coming soon</td></tr>
+    </table>
+  </section>
+
+  <section class="policies">
+    <div class="policy">
+      <strong>Credits never expire</strong>
+      <span>Buy once — they&rsquo;re yours until you spend them.</span>
+    </div>
+    <div class="policy">
+      <strong>Results kept 7 days</strong>
+      <span>Generated reports stay available for 7 days after creation.</span>
+    </div>
+    <div class="policy">
+      <strong>All sales final</strong>
+      <span>Credit purchases are non-refundable.</span>
+    </div>
+  </section>
+
   <div class="coming-soon">
-    <p><strong>Premium features are coming soon.</strong> Free analysis is available now, no signup needed. Sign up today and get 3 free credits when premium launches — enough to try PDF export on us.</p>
+    <p><strong>Premium features are coming soon.</strong> Free analysis is available now, no signup needed. Sign up today and get 3 free credits when premium launches &mdash; enough to try PDF export on us.</p>
   </div>
 
   <section class="faq">
     <h3>Do I need an account to use StackSift?</h3>
-    <p>No. The free tier works without signup — just drop in a log file and get your incident summary. Accounts are only needed for premium features.</p>
+    <p>No. The free tier works without signup &mdash; just drop in a log file and get your incident summary. Accounts are only needed for premium features.</p>
 
     <h3>What are credits?</h3>
     <p>Credits unlock premium capabilities like PDF export. Credits are deducted per premium operation, only after a successful operation. Credits never expire.</p>
