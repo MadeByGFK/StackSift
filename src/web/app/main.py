@@ -15,7 +15,13 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.rate_limit import RateLimiter
+from app.rate_limit import (
+    BurstLimited,
+    HourlyLimited,
+    PostgresRateLimiter,
+    RateLimiter,
+    RateLimitUnavailable,
+)
 from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
 from app.service import analyze_upload, render_text_report
@@ -64,6 +70,33 @@ app.include_router(auth_router)
 # Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
 burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
+# Shared enforcement for multi-process deployments (staging/production).
+# Replaces the in-memory limiters above whenever the database is configured.
+shared_limiter = PostgresRateLimiter(
+    burst_max=2, burst_window=60, hourly_max=10, hourly_window=3600
+)
+
+
+def _db_session():
+    """Return a new database session, or None when no database is configured."""
+    import os
+
+    if not os.environ.get("DATABASE_URL"):
+        return None
+    from app.db import SessionLocal
+
+    return SessionLocal()
+
+
+def _remaining(ip: str) -> int:
+    """Hourly quota remaining for ``ip``, shared across processes when possible."""
+    db = _db_session()
+    if db is None:
+        return limiter.remaining(ip)
+    try:
+        return shared_limiter.remaining(db, ip)
+    finally:
+        db.close()
 
 
 def _get_current_user_optional(request: Request):
@@ -122,7 +155,7 @@ async def health():
 async def index(request: Request):
     _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
-        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
+        request, "index.html", {"error": None, "remaining": _remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
     )
 
 
@@ -146,6 +179,7 @@ async def analyze(
     request: Request,
     file: UploadFile = File(...),
     output: str = Form("html"),
+    request_id: str = Form(""),
 ):
     ip = _client_ip(request)
 
@@ -154,7 +188,7 @@ async def analyze(
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"error": message, "remaining": limiter.remaining(ip), "current_user": _user, "csrf_token": _csrf},
+            {"error": message, "remaining": _remaining(ip), "current_user": _user, "csrf_token": _csrf},
             status_code=status,
             headers=headers or {},
         )
@@ -175,25 +209,54 @@ async def analyze(
     if len(content) > MAX_BYTES:
         return error("That file is over the 10 MB free-tier limit.")
 
-    # Atomic check: verify both limits before recording either.
-    # Prevents rejected requests from consuming quota in the other limiter.
-    burst_ok = burst_limiter.check(ip)
-    hourly_ok = limiter.check(ip)
-    if not burst_ok:
-        return error(
-            "Too many requests. Please wait a minute and try again.",
-            status=429,
-            headers={"Retry-After": "60"},
-        )
-    if not hourly_ok:
-        return error(
-            "Free-tier limit reached (10 analyses/hour). Please try again later.",
-            status=429,
-            headers={"Retry-After": "3600"},
-        )
-    # Both pass: record in both limiters
-    burst_limiter.record(ip)
-    limiter.record(ip)
+    # Shared atomic enforcement when the database is configured; the
+    # in-memory limiters remain for the no-database demo path.
+    # A completed request_id never consumes quota (idempotent retry).
+    db = _db_session()
+    if db is not None:
+        try:
+            shared_limiter.admit(db, ip, request_id=request_id or None)
+        except BurstLimited:
+            return error(
+                "Too many requests. Please wait a minute and try again.",
+                status=429,
+                headers={"Retry-After": "60"},
+            )
+        except HourlyLimited:
+            return error(
+                "Free-tier limit reached (10 analyses/hour). Please try again later.",
+                status=429,
+                headers={"Retry-After": "3600"},
+            )
+        except RateLimitUnavailable:
+            # Fail closed: never silently disable the limits.
+            return error(
+                "Rate limiting is temporarily unavailable. Please try again shortly.",
+                status=503,
+                headers={"Retry-After": "60"},
+            )
+        finally:
+            db.close()
+    else:
+        # Atomic check: verify both limits before recording either.
+        # Prevents rejected requests from consuming quota in the other limiter.
+        burst_ok = burst_limiter.check(ip)
+        hourly_ok = limiter.check(ip)
+        if not burst_ok:
+            return error(
+                "Too many requests. Please wait a minute and try again.",
+                status=429,
+                headers={"Retry-After": "60"},
+            )
+        if not hourly_ok:
+            return error(
+                "Free-tier limit reached (10 analyses/hour). Please try again later.",
+                status=429,
+                headers={"Retry-After": "3600"},
+            )
+        # Both pass: record in both limiters
+        burst_limiter.record(ip)
+        limiter.record(ip)
 
     # The upload is analyzed from a temp file and deleted immediately —
     # see app/service.py. The framework may also spool the raw upload to disk.
