@@ -45,7 +45,6 @@ document.getElementById('upload-form').addEventListener('submit', function() {
       <a href="/pricing">Pricing</a>
       <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
       {% if current_user %}
-        <span class="user-email">{{ current_user.email }}</span>
         <a href="/settings">Settings</a>
         <form method="post" action="/auth/logout" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
