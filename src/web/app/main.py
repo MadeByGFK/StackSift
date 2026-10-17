@@ -55,8 +55,39 @@ async def run_migrations():
         )
 
 
+@app.on_event("startup")
+async def start_credit_maintenance():
+    import asyncio
+    if not os.environ.get("DATABASE_URL"):
+        return
+    async def loop():
+        from app.credit_maintenance import run_once
+        tick = 0
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await asyncio.to_thread(run_once, reconcile=(tick % 60 == 0))
+            except Exception:
+                logging.getLogger(__name__).exception("Credit maintenance failed")
+            tick += 1
+    app.state.credit_maintenance = asyncio.create_task(loop())
+
+
+@app.on_event("shutdown")
+async def stop_credit_maintenance():
+    import asyncio
+    task = getattr(app.state, "credit_maintenance", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+templates.env.globals["new_request_id"] = lambda: __import__("uuid").uuid4().hex
 
 # Phase 1: Auth routes (signup, login, OAuth, sessions, settings)
 app.include_router(auth_router)
@@ -146,6 +177,7 @@ async def analyze(
     request: Request,
     file: UploadFile = File(...),
     output: str = Form("html"),
+    request_id: str = Form(""),
 ):
     ip = _client_ip(request)
 
@@ -175,6 +207,9 @@ async def analyze(
     if len(content) > MAX_BYTES:
         return error("That file is over the 10 MB free-tier limit.")
 
+    if os.environ.get("DATABASE_URL"):
+        return _durable_analysis(request, file.filename, content, request_id or uuid_module.uuid4().hex, output)
+
     # Atomic check: verify both limits before recording either.
     # Prevents rejected requests from consuming quota in the other limiter.
     burst_ok = burst_limiter.check(ip)
@@ -186,6 +221,13 @@ async def analyze(
             headers={"Retry-After": "60"},
         )
     if not hourly_ok:
+        # Phase 2A: offer paid path if user is logged in (free-first per v11.1).
+        _user, _csrf = _get_current_user_optional(request)
+        if _user is not None:
+            try:
+                return _paid_consent_page(request, file.filename, content, _user, _csrf, ip)
+            except Exception:
+                pass  # fall through to free-tier error
         return error(
             "Free-tier limit reached (10 analyses/hour). Please try again later.",
             status=429,
@@ -215,3 +257,270 @@ async def analyze(
     data["current_user"] = _user
     data["csrf_token"] = _csrf
     return templates.TemplateResponse(request, "report.html", data)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2A: Paid analysis flow (free-first per v11.1 Section 6)
+#
+# When the free hourly quota is exhausted and the user is logged in:
+#   1. /analyze returns a consent page quoting 1 credit.
+#   2. User confirms -> POST /analyze/paid with consent_id + file.
+#   3. Server re-checks free quota (T27), then atomically admits paid op.
+# ---------------------------------------------------------------------------
+
+import hashlib
+import logging
+import json
+import os
+import tempfile
+import uuid as uuid_module
+from datetime import datetime, timezone
+
+# Temp file storage for consent flow (15-min TTL, keyed by content hash).
+# Single-worker deployment; files deleted after use or expiry.
+_PAID_PENDING_DIR = os.environ.get("STACKSIFT_PAID_TMP", tempfile.gettempdir() + "/stacksift-paid")
+_PAID_PENDING_TTL = 900  # 15 minutes
+
+
+def _paid_pending_path(file_hash: str) -> str:
+    os.makedirs(_PAID_PENDING_DIR, exist_ok=True)
+    # Only server-generated consent IDs may select a file; filenames/digests cannot.
+    token = uuid_module.UUID(file_hash).hex
+    return os.path.join(_PAID_PENDING_DIR, f"pending-{token}.bin")
+
+
+def _store_paid_pending(file_hash: str, filename: str, content: bytes) -> None:
+    path = _paid_pending_path(file_hash)
+    cleanup_pending_uploads()
+    if sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin")) + len(content) > 64*1024*1024:
+        raise RuntimeError("Pending upload capacity exhausted")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(json.dumps(filename).encode("utf-8") + b"\n")
+        f.write(content)
+
+
+def _load_paid_pending(file_hash: str) -> tuple[str, bytes] | None:
+    path = _paid_pending_path(file_hash)
+    try:
+        stat = os.stat(path)
+        age = datetime.now(timezone.utc).timestamp() - stat.st_mtime
+        if age > _PAID_PENDING_TTL:
+            os.unlink(path)
+            return None
+        with open(path, "rb") as f:
+            raw = f.read()
+        nl = raw.index(b"\n")
+        filename = json.loads(raw[:nl].decode("utf-8"))
+        content = raw[nl + 1:]
+        return filename, content
+    except (OSError, ValueError):
+        return None
+
+
+def cleanup_pending_uploads():
+    cutoff = datetime.now(timezone.utc).timestamp() - _PAID_PENDING_TTL
+    for path in Path(_PAID_PENDING_DIR).glob("pending-*.bin"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _delete_paid_pending(file_hash: str) -> None:
+    try:
+        os.unlink(_paid_pending_path(file_hash))
+    except OSError:
+        pass
+
+
+def _paid_consent_page(request: Request, filename: str, content: bytes, user, csrf_token: str, ip: str):
+    """Return a consent page offering 1-credit paid analysis. Raises on no DB."""
+    import os as _os
+    if not _os.environ.get("DATABASE_URL"):
+        raise RuntimeError("no database")
+    from app.db import SessionLocal
+    from app import credits as credits_helpers
+
+    from app.analysis_admission import fingerprint
+    file_hash = fingerprint(filename, content)
+    db = SessionLocal()
+    try:
+        # Check eligible credits
+        summary = credits_helpers.get_balance_summary(db, user.id)
+        if summary["eligible"] < 1:
+            raise RuntimeError("insufficient credits")
+        # Create server-bound consent
+        consent = credits_helpers.create_consent(
+            db, user.id, "additional_analysis", file_hash,
+            credits_helpers.COST_ADDITIONAL_ANALYSIS,
+        )
+        db.commit()
+        consent_id = str(consent.id)
+    finally:
+        db.close()
+
+    # Store file for the paid endpoint (deleted after use)
+    _store_paid_pending(consent_id, filename, content)
+
+    return templates.TemplateResponse(
+        request,
+        "paid_consent.html",
+        {
+            "current_user": user,
+            "csrf_token": csrf_token,
+            "filename": filename,
+            "file_hash": file_hash,
+            "consent_id": consent_id,
+            "cost": 1,
+            "balance": summary["balance"],
+            "eligible": summary["eligible"],
+        },
+        status_code=402,  # Payment Required
+    )
+
+
+def _analysis_response(request, status, data=None, message=None, *, output="html", filename="analysis.log"):
+    user, csrf = _get_current_user_optional(request)
+    if data is None:
+        return templates.TemplateResponse(request, "index.html", {
+            "error": message, "remaining": limiter.remaining(_client_ip(request)),
+            "current_user": user, "csrf_token": csrf}, status_code=status)
+    if output == "txt":
+        return PlainTextResponse(render_text_report(data), headers={
+            "Content-Disposition": f'attachment; filename="{Path(filename).stem}-stacksift.txt"'})
+    data = dict(data, current_user=user, csrf_token=csrf)
+    return templates.TemplateResponse(request, "report.html", data, status_code=status)
+
+
+def _durable_analysis(request, filename, content, key, output="html", *, consent_id=None, digest=None):
+    from app.db import SessionLocal
+    from app import auth, credits as C, models as M, analysis_admission as A
+    from sqlalchemy import select
+    import secrets
+    user, _ = _get_current_user_optional(request)
+    user_id = user.id if user else None
+    anon = None
+    cookie = None
+    with SessionLocal() as db:
+        if user_id is None:
+            cookie = request.cookies.get("__Host-stacksift_analysis", "")
+            known = len(cookie) == 64 and db.scalar(select(M.FreeRequest.request_id).where(
+                M.FreeRequest.anonymous_session_hash == auth.hash_token(cookie)).limit(1))
+            if not known:
+                cookie = secrets.token_hex(32)
+            anon = auth.hash_token(cookie)
+        digest = digest or A.fingerprint(filename, content)
+        if not key or len(key) > 255:
+            return _analysis_response(request, 400, message="Invalid request identity.")
+        try:
+            existing = A.lookup(db, user_id, anon, key, digest)
+            if existing:
+                status, data, message = A.replay(db, existing, user_id)
+                return _analysis_response(request, status, data, message, output=output, filename=filename)
+            if consent_id:
+                C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1)
+                pending = _load_paid_pending(str(consent_id))
+                if pending is None:
+                    return _analysis_response(request, 410, message="Upload expired. Please upload the file again.")
+                filename, content = pending
+                if A.fingerprint(filename, content) != digest:
+                    return _analysis_response(request, 409, message="Upload does not match your consent.")
+            worker = uuid_module.uuid4().hex
+            item, created = A.admit(db, user_id, anon, key, digest, _client_ip(request), worker, consent_id)
+            if item is None:
+                db.rollback()
+                if user:
+                    return _paid_consent_page(request, filename, content, user, _get_current_user_optional(request)[1], _client_ip(request))
+                return _analysis_response(request, 429, message="Free-tier limit reached (10 analyses/hour). Please try again later.")
+            paid = isinstance(item, M.Operation)
+            identity = item.id if paid else item.request_id
+            db.commit()
+            if not created:
+                status, data, message = A.replay(db, item, user_id)
+                return _analysis_response(request, status, data, message, output=output, filename=filename)
+        except C.InsufficientCredits:
+            db.rollback()
+            return _analysis_response(request, 402, message="Insufficient Power-Up credits.")
+        except C.AdmissionError as exc:
+            db.rollback()
+            return _analysis_response(request, 409 if '409' in str(exc) else 429, message=str(exc))
+        except Exception:
+            db.rollback()
+            logging.getLogger(__name__).exception("Analysis admission failed")
+            return _analysis_response(request, 503, message="Could not start analysis. Please retry this request.")
+    try:
+        data = analyze_upload(filename, content)
+        failure = data.get("message", "Analysis failed.") if isinstance(data, dict) and "error" in data else None
+        with SessionLocal() as db:
+            if paid:
+                if failure:
+                    C.release_operation(db, identity, worker, "analysis_failed")
+                else:
+                    result = C.store_result(db, user_id, identity, data)
+                    C.complete_operation(db, identity, worker, result.id)
+            else:
+                A.finish_free(db, identity, data, failure)
+            db.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("Analysis execution or settlement failed")
+        # Execution has returned/stopped here. Completion is never reversed.
+        try:
+            with SessionLocal() as db:
+                if paid:
+                    C.release_operation(db, identity, worker, "execution_failed")
+                else:
+                    A.finish_free(db, identity, failure="execution_failed")
+                db.commit()
+        except Exception:
+            logging.getLogger(__name__).exception("Analysis settlement needs recovery")
+        return _analysis_response(request, 503, message="Analysis could not be delivered. Retry this request to check its outcome.")
+    finally:
+        if consent_id:
+            _delete_paid_pending(str(consent_id))
+    response = _analysis_response(request, 400 if failure else 200, None if failure else data,
+        failure, output=output, filename=filename)
+    if cookie:
+        response.set_cookie("__Host-stacksift_analysis", cookie, secure=True, httponly=True, samesite="lax", max_age=7*86400)
+    response.headers["X-Analysis-Request-ID"] = key
+    return response
+
+
+@app.post("/analyze/paid", response_class=HTMLResponse)
+async def analyze_paid(request: Request, consent_id: str = Form(...), file_hash: str = Form(...),
+                       idempotency_key: str = Form(...), csrf_token: str = Form("")):
+    from app.db import SessionLocal
+    from app import auth
+    import hmac
+    with SessionLocal() as db:
+        session = auth.get_session_from_cookie(db, request)
+        if not session:
+            return _analysis_response(request, 401, message="Please log in to use Power-Up credits.")
+        if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+            return _analysis_response(request, 403, message="Invalid request. Please try again.")
+    try:
+        consent_uuid = uuid_module.UUID(consent_id)
+    except ValueError:
+        return _analysis_response(request, 400, message="Invalid consent.")
+    return _durable_analysis(request, "", b"", idempotency_key, consent_id=consent_uuid, digest=file_hash)
+
+
+@app.get("/credits/balance")
+async def credits_balance(request: Request):
+    """JSON API: current user's credit balance summary."""
+    from fastapi.responses import JSONResponse
+    import os as _os
+    if not _os.environ.get("DATABASE_URL"):
+        return JSONResponse({"error": "credits unavailable"}, status_code=503)
+    _user, _ = _get_current_user_optional(request)
+    if not _user:
+        return JSONResponse({"error": "login required"}, status_code=401)
+    from app.db import SessionLocal
+    from app import credits as credits_helpers
+    db = SessionLocal()
+    try:
+        summary = credits_helpers.get_balance_summary(db, _user.id)
+        return JSONResponse(summary)
+    finally:
+        db.close()
