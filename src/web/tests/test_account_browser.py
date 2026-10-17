@@ -102,7 +102,10 @@ def test_https_account_forms_end_to_end(auth_env, tmp_path, monkeypatch):
                 page.wait_for_url(base + "/settings")
             with auth_env.sessions() as db:
                 assert db.query(OAuthAccount).count() == 2
-            page.get_by_role("button", name="Log out", exact=True).click()
+            # The settings page renders two "Log out" buttons (nav header + settings
+            # card). Target the settings-card form, whose declared success URL
+            # matches the /login expectation below.
+            page.locator('form[data-success-url="/login"] button[type="submit"]').click()
             page.wait_for_url(base + "/login")
             assert not any(c["name"] == auth.SESSION_COOKIE for c in context.cookies())
             page.goto(base + "/settings")
