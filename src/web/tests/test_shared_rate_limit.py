@@ -296,6 +296,7 @@ def test_http_429_shapes(monkeypatch, pg_schema):
     url, schema = pg_schema
     factory, engine = _factory(url, schema)
     try:
+        monkeypatch.setattr(main, "_use_shared_limiter", lambda: True)
         monkeypatch.setattr(main, "_db_session", lambda: factory())
         monkeypatch.setattr(main, "analyze_upload", lambda *args: {})
         monkeypatch.setattr(main, "render_text_report", lambda data: "report")
@@ -314,6 +315,178 @@ def test_http_429_shapes(monkeypatch, pg_schema):
                 responses = [await post() for _ in range(3)]
                 assert [r.status_code for r in responses] == [200, 200, 429]
                 assert responses[2].headers["retry-after"] == "60"
+
+        asyncio.run(run())
+    finally:
+        engine.dispose()
+
+
+def _post_analyze(c, request_id=None):
+    data = {"output": "txt"}
+    if request_id:
+        data["request_id"] = request_id
+    return c.post(
+        "/analyze",
+        files={"file": ("test.log", b"ERROR synthetic")},
+        data=data,
+    )
+
+
+def test_replay_serves_stored_result_not_rerun(monkeypatch, pg_schema):
+    """Finding 1: a completed request_id hands off to the durable path.
+
+    analyze_upload must NOT run again, quota must NOT be consumed, and the
+    stored result is served.
+    """
+    import asyncio
+    import httpx
+    from fastapi.responses import PlainTextResponse
+    from app import main
+
+    url, schema = pg_schema
+    factory, engine = _factory(url, schema)
+    try:
+        _create_free_requests(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO free_requests (request_id, status, quota_bucket_trusted_ip) "
+                    "VALUES ('req-replay', 'completed', '127.0.0.1')"
+                )
+            )
+        monkeypatch.setattr(main, "_use_shared_limiter", lambda: True)
+        monkeypatch.setattr(main, "_db_session", lambda: factory())
+        calls = {"analyzed": 0, "durable": 0}
+
+        def fake_analyze(*args):
+            calls["analyzed"] += 1
+            return {}
+
+        def fake_durable(request, filename, content, request_id, output):
+            calls["durable"] += 1
+            assert request_id == "req-replay"
+            return PlainTextResponse("stored-result")
+
+        monkeypatch.setattr(main, "analyze_upload", fake_analyze)
+        monkeypatch.setattr(main, "_durable_analysis", fake_durable, raising=False)
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+            ) as c:
+                r = await _post_analyze(c, request_id="req-replay")
+                assert r.status_code == 200
+                assert r.text == "stored-result"
+
+        asyncio.run(run())
+        assert calls == {"analyzed": 0, "durable": 1}
+        with factory() as db:
+            assert main.shared_limiter.remaining(db, "127.0.0.1") == 10
+    finally:
+        engine.dispose()
+
+
+def test_replay_without_durable_path_fails_closed(monkeypatch, pg_schema):
+    """Finding 1: replay with no durable path -> 503, never a silent rerun."""
+    import asyncio
+    import httpx
+    from app import main
+
+    url, schema = pg_schema
+    factory, engine = _factory(url, schema)
+    try:
+        _create_free_requests(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO free_requests (request_id, status, quota_bucket_trusted_ip) "
+                    "VALUES ('req-replay2', 'completed', '127.0.0.1')"
+                )
+            )
+        monkeypatch.setattr(main, "_use_shared_limiter", lambda: True)
+        monkeypatch.setattr(main, "_db_session", lambda: factory())
+        calls = {"analyzed": 0}
+
+        def fake_analyze(*args):
+            calls["analyzed"] += 1
+            return {}
+
+        monkeypatch.setattr(main, "analyze_upload", fake_analyze)
+        # No _durable_analysis on this branch: must fail closed, not rerun.
+        assert not hasattr(main, "_durable_analysis")
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+            ) as c:
+                r = await _post_analyze(c, request_id="req-replay2")
+                assert r.status_code == 503
+
+        asyncio.run(run())
+        assert calls == {"analyzed": 0}
+        with factory() as db:
+            assert main.shared_limiter.remaining(db, "127.0.0.1") == 10
+    finally:
+        engine.dispose()
+
+
+def test_session_creation_failure_fails_closed(monkeypatch, pg_schema):
+    """Finding 2: if even session creation fails, /analyze 503s (never bypasses)."""
+    import asyncio
+    import httpx
+    from sqlalchemy.exc import OperationalError
+    from app import main
+
+    url, schema = pg_schema
+    _, engine = _factory(url, schema)
+    try:
+        monkeypatch.setattr(main, "_use_shared_limiter", lambda: True)
+
+        def broken_session():
+            raise OperationalError("connection failed", None, None)
+
+        monkeypatch.setattr(main, "_db_session", broken_session)
+        calls = {"analyzed": 0}
+        monkeypatch.setattr(main, "analyze_upload", lambda *a: calls.__setitem__("analyzed", 1) or {})
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+            ) as c:
+                r = await _post_analyze(c)
+                assert r.status_code == 503
+                assert r.headers["retry-after"] == "60"
+
+        asyncio.run(run())
+        assert calls == {"analyzed": 0}
+    finally:
+        engine.dispose()
+
+
+def test_remaining_display_failure_shows_zero(monkeypatch, pg_schema):
+    """Finding 2: quota-display DB failure -> '0 of 10', page still renders 200."""
+    import asyncio
+    import httpx
+    from sqlalchemy.exc import OperationalError
+    from app import main
+
+    url, schema = pg_schema
+    _, engine = _factory(url, schema)
+    try:
+        monkeypatch.setattr(main, "_use_shared_limiter", lambda: True)
+
+        def broken_session():
+            raise OperationalError("connection failed", None, None)
+
+        monkeypatch.setattr(main, "_db_session", broken_session)
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+            ) as c:
+                r = await c.get("/")
+                assert r.status_code == 200
+                assert "0 of 10 analyses left" in r.text
 
         asyncio.run(run())
     finally:
