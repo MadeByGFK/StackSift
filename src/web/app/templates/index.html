@@ -31,8 +31,38 @@
 .privacy-notice p { margin: 0; font-size: 0.9rem; color: #a0aec0; line-height: 1.6; }
 </style>
 <script>
-document.getElementById('upload-form').addEventListener('submit', function() {
-  document.getElementById('loading').style.display = 'block';
+document.addEventListener('DOMContentLoaded', function() {
+  var form = document.getElementById('upload-form');
+  if (!form) return;
+  var loading = document.getElementById('loading');
+  var submitButtons = form.querySelectorAll('button[type="submit"]');
+  function resetFormState() {
+    delete form.dataset.submitting;
+    for (var i = 0; i < submitButtons.length; i++) { submitButtons[i].disabled = false; }
+    if (loading) { loading.style.display = 'none'; }
+  }
+  // If the user returns via the back button after submitting, the page may be
+  // restored with disabled controls; reset so the form stays usable.
+  window.addEventListener('pageshow', function(e) { if (e.persisted) resetFormState(); });
+  form.addEventListener('submit', function(e) {
+    // Prevent duplicate submissions from repeated clicks or keys while a
+    // request is already in flight.
+    if (form.dataset.submitting === '1') { e.preventDefault(); return; }
+    form.dataset.submitting = '1';
+    // Preserve which output was requested. A disabled submit button may not
+    // contribute its name/value to the form data, so record it explicitly.
+    // (The value is copied from the submitter, so a duplicate is harmless.)
+    var submitter = e.submitter;
+    if (submitter && submitter.name) {
+      var hidden = document.createElement('input');
+      hidden.type = 'hidden';
+      hidden.name = submitter.name;
+      hidden.value = submitter.value;
+      form.appendChild(hidden);
+    }
+    for (var j = 0; j < submitButtons.length; j++) { submitButtons[j].disabled = true; }
+    if (loading) { loading.style.display = 'block'; }
+  });
 });
 </script>
 </head>
@@ -79,7 +109,7 @@ document.getElementById('upload-form').addEventListener('submit', function() {
       <button type="submit" class="btn-ghost" name="output" value="txt">Download .txt report</button>
     </div>
   </form>
-  <div id="loading" style="display:none; text-align:center; padding:2rem;">
+  <div id="loading" role="status" style="display:none; text-align:center; padding:2rem;">
     <div class="spinner"></div>
     <p>Analyzing your log... This may take up to 30 seconds for large files.</p>
   </div>
