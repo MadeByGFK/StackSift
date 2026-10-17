@@ -129,6 +129,24 @@ async def verify_page(request: Request, token: str = "", db: DBSession = Depends
 async def verify_email(request: Request, token: str = Form(...), db: DBSession = Depends(get_db)):
     if not redeem(db, EmailVerification, token):
         return JSONResponse({"error": "Invalid or expired verification link."}, status_code=400)
+    # Phase 2A: grant the approved 3-credit signup reward (idempotent per email).
+    # Failures here must not break verification; log and continue.
+    try:
+        from app import credits as credits_helpers
+        from app.models import User as UserModel
+        # Find the user by the verification token we just redeemed
+        from app.auth import hash_token as _hash_token
+        verif = db.query(EmailVerification).filter(
+            EmailVerification.token_hash == _hash_token(token)).first()
+        if verif:
+            user = db.get(UserModel, verif.user_id)
+            if user:
+                credits_helpers.grant_signup_reward(db, user.id, user.email)
+                db.commit()
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("signup reward grant failed")
     return JSONResponse({"message": "Email verified. You can now log in."})
 
 
