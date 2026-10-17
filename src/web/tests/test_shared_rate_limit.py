@@ -207,18 +207,6 @@ def _insert_request(engine, rid, status, ip):
             {"rid": rid, "status": status, "ip": ip},
         )
 
-def _insert_request(engine, rid, status, ip):
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO free_requests "
-                "(request_id, status, quota_bucket_trusted_ip, fingerprint, deadline) "
-                "VALUES (:rid, :status, :ip, 'fp', now() + interval '1 hour')"
-            ),
-            {"rid": rid, "status": status, "ip": ip},
-        )
-
-
 def test_replay_consumes_no_quota(pg_schema):
     """A completed request_id retried from the same IP is a replay: no quota burned."""
     url, schema = pg_schema
