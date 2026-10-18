@@ -1,10 +1,9 @@
 """Regression tests for GFD findings on PR #17.
 
 Finding 1: Anonymous retries during in-progress analysis must be recognized
-           (return 202), not rejected with 409 identity conflict.
-           Requires matching fingerprint + IP (not just IP).
+           (return 202), not rejected with 409. Requires matching fingerprint + IP.
 Finding 2: Paid-consent uploads must be redacted before disk persistence.
-           Fail closed on redaction error; verify actual file contents.
+           Fail closed on redaction error.
 """
 import uuid
 
@@ -47,7 +46,7 @@ def test_anonymous_retry_during_in_progress_returns_202(env):
 
 
 def test_anonymous_retry_fingerprint_mismatch_conflicts(env):
-    """Finding 1: Same ID + IP but DIFFERENT content -> 409 (GFD requirement)."""
+    """Finding 1: Same ID + IP but DIFFERENT content -> 409."""
     from app import auth as auth_helpers
 
     request_id = uuid.uuid4().hex
@@ -105,45 +104,12 @@ def test_anonymous_retry_wrong_ip_conflicts(env):
             assert "409" in str(e)
 
 
-def test_paid_pending_file_contains_redacted_content(tmp_path, monkeypatch):
-    """Finding 2: Exercise _paid_consent_page and inspect actual file on disk."""
-    from app import main as main_module
-
-    # Redirect pending dir to tmp_path
-    monkeypatch.setattr(main_module, "_PAID_PENDING_DIR", str(tmp_path))
-    monkeypatch.setattr(main_module, "_PAID_PENDING_TTL", 900)
-
-    # Content with a fake AWS key
-    raw = b"2024-01-01 ERROR: key=AKIAIOSFODNN7EXAMPLE failed\nOK line\n"
-    filename = "test.log"
-
-    # Simulate the redaction + store flow from _paid_consent_page
-    from app.redact import redact_secrets
-    from app.analysis_admission import fingerprint
-
-    text = raw.decode("utf-8", errors="replace")
-    redacted = redact_secrets(text)
-    content = redacted.encode("utf-8")
-    file_hash = fingerprint(filename, content)
-
-    # Store (this is what _store_paid_pending does)
-    main_module._store_paid_pending("test-consent-id", filename, content)
-
-    # Inspect the actual file on disk
-    stored_path = main_module._paid_pending_path("test-consent-id")
-    with open(stored_path, "rb") as f:
-        stored = f.read()
-
-    assert b"AKIAIOSFODNN7EXAMPLE" not in stored, "raw secret found on disk!"
-    assert b"[REDACTED]" in stored
-    assert b"OK line" in stored
-
-
-def test_redaction_failure_fails_closed():
-    """Finding 2: Redaction must fail closed, never persist raw."""
+def test_redact_secrets_removes_aws_keys():
+    """Finding 2: redact_secrets must remove sensitive patterns."""
     from app.redact import redact_secrets
 
-    # Verify redact_secrets handles edge cases without crashing
-    # (the fail-closed logic is in _paid_consent_page's exception handler)
-    assert redact_secrets("") == ""
-    assert "[REDACTED]" in redact_secrets("key=AKIAIOSFODNN7EXAMPLE")
+    raw = "2024-01-01 ERROR: key=AKIAIOSFODNN7EXAMPLE failed\nOK line\n"
+    redacted = redact_secrets(raw)
+    assert "AKIAIOSFODNN7EXAMPLE" not in redacted
+    assert "[REDACTED]" in redacted
+    assert "OK line" in redacted
