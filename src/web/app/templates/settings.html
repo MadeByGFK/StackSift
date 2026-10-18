@@ -45,11 +45,6 @@
       <p>Email {% if user.email_verified %}✓ verified{% else %}— not verified{% endif %}</p>
     </div>
     <div class="settings-card">
-      <form method="post" action="/auth/logout" data-auth-form data-success-url="/login">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <p role="status" aria-live="polite"></p>
-        <button type="submit" class="btn-small">Log out</button>
-      </form>
       <h2>Connected accounts</h2>
       <p>Link Google or GitHub to sign in with one click.</p>
       <div class="oauth-row">
