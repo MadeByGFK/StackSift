@@ -61,12 +61,12 @@ def test_persistence_path_store_and_retrieve(db, user):
     content_hash = C.hash_input(content)
     consent = C.create_consent(db, user, "additional_analysis", content_hash, 1)
     db.commit()
-    assert consent.status == "pending"
+    assert consent.consumed_by_operation_id is None  # not yet consumed
 
     # 2. Admit the paid operation (reserves 1 credit)
     op = C.admit_paid_operation(
         db, user, "additional_analysis",
-        key=f"idem-{uuid.uuid4().hex[:8]}",
+        idempotency_key=f"idem-{uuid.uuid4().hex[:8]}",
         request_hash=content_hash, cost=1,
         consent_id=consent.id, worker_id="test-worker-1",
     )
@@ -119,7 +119,7 @@ def test_persistence_path_complete_operation_settles(db, user):
     db.commit()
     op = C.admit_paid_operation(
         db, user, "additional_analysis",
-        key=f"idem-{uuid.uuid4().hex[:8]}",
+        idempotency_key=f"idem-{uuid.uuid4().hex[:8]}",
         request_hash=content_hash, cost=1,
         consent_id=consent.id, worker_id="test-worker-1",
     )
@@ -156,13 +156,14 @@ def test_redaction_exception_returns_500_no_disk_write(auth_env, monkeypatch):
 
     monkeypatch.setattr(service, "redact_secrets", _boom)
 
-    resp = auth_env.client.post(
-        "/analyze",
-        files={"file": ("test.log", b"2026-10-18 ERROR boom\n", "text/plain")},
-        data={"request_id": uuid.uuid4().hex, "output": "html"},
-    )
-    # Must fail closed — 500, not 200 with partial data
-    assert resp.status_code == 500
+    # TestClient re-raises unhandled exceptions (production uvicorn returns 500).
+    # Fail-closed means: exception propagates, no partial result, no disk write.
+    with pytest.raises(RuntimeError, match="simulated redaction failure"):
+        auth_env.client.post(
+            "/analyze",
+            files={"file": ("test.log", b"2026-10-18 ERROR boom\n", "text/plain")},
+            data={"request_id": uuid.uuid4().hex, "output": "html"},
+        )
 
     # No new temp files left behind
     after = set(glob.glob(os.path.join(tmpdir, "*.log")))
