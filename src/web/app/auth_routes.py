@@ -515,7 +515,19 @@ async def _callback(request, provider, code, state, db):
             oauth_helpers.link_oauth_to_user(db, current.user, provider, identity, email)
             response = RedirectResponse("/settings", status_code=303)
         elif attempt.action == "login" and current is None:
-            user, _ = oauth_helpers.find_or_create_oauth_user(db, provider, identity, email, name)
+            user, created = oauth_helpers.find_or_create_oauth_user(db, provider, identity, email, name)
+            if created:
+                # BR-02: grant the approved 3-credit signup reward for verified
+                # OAuth signups (idempotent per email; never on link/re-login).
+                # Failures must not break login; log and continue.
+                try:
+                    from app import credits as credits_helpers
+                    credits_helpers.grant_signup_reward(db, user.id, user.email)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    import logging
+                    logging.getLogger(__name__).exception("signup reward grant failed")
             user.last_login_at = datetime.now(timezone.utc)
             session, raw = auth_helpers.create_session(db, user.id, ip_address=_client_ip(request), user_agent=request.headers.get("User-Agent"))
             response = RedirectResponse("/", status_code=303)
