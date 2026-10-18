@@ -154,3 +154,52 @@ def test_app_imports_with_postgres_url_without_connecting(driver):
     result = subprocess.run([sys.executable, "-c", "from app.main import app; assert app"],
                             env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+
+def test_startup_migrates_configured_engine_from_any_directory(migrated_engine, monkeypatch, tmp_path):
+    import asyncio
+    from app import db as database
+    from app.main import run_migrations
+    engine, config = migrated_engine
+    with engine.begin() as conn:
+        config.attributes["connection"] = conn
+        command.downgrade(config, "base")
+    # Deliberately invalid raw URL proves startup uses the already configured engine.
+    monkeypatch.setenv("DATABASE_URL", "must-not-be-reparsed://")
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.chdir(tmp_path)
+    asyncio.run(run_migrations())
+    assert set(Base.metadata.tables).issubset(inspect(engine).get_table_names())
+    with sessionmaker(bind=engine)() as db:
+        db.add(User(email="startup@example.com"))
+        db.commit()
+    asyncio.run(run_migrations())
+    with sessionmaker(bind=engine)() as db:
+        assert db.query(User).filter_by(email="startup@example.com").count() == 1
+
+
+def test_startup_skips_without_database_url(monkeypatch):
+    import asyncio
+    from unittest.mock import Mock
+    from app import db as database
+    from app.main import run_migrations
+    engine = Mock()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(database, "engine", engine)
+    asyncio.run(run_migrations())
+    engine.begin.assert_not_called()
+
+
+def test_startup_failure_does_not_log_credentials(monkeypatch, caplog):
+    import asyncio
+    from unittest.mock import Mock
+    from app import db as database
+    from app.main import run_migrations
+    engine = Mock()
+    engine.begin.side_effect = RuntimeError("database-password-secret")
+    monkeypatch.setenv("DATABASE_URL", "configured")
+    monkeypatch.setattr(database, "engine", engine)
+    asyncio.run(run_migrations())
+    assert "Account migrations failed (RuntimeError)" in caplog.text
+    assert "database-password-secret" not in caplog.text
