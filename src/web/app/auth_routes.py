@@ -226,13 +226,28 @@ async def signup(
             db.add(existing)
             db.flush()
         except IntegrityError:
+            # Race: another request created the user. Re-query for consistent handling.
             db.rollback()
+            existing = db.query(User).filter(User.email == email_norm).first()
+            if existing and existing.email_verified:
+                return JSONResponse(
+                    {"error": "This email is already registered. Try logging in instead."},
+                    status_code=409,
+                )
             return JSONResponse({"message": GENERIC_SIGNUP})
-    if not existing.email_verified:
-        token = auth_helpers.generate_token()
-        db.add(EmailVerification(user_id=existing.id, token_hash=auth_helpers.hash_token(token),
-                                 expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
-        background.add_task(email_helpers.send_verification_email, existing.email, token)
+    if existing.email_verified:
+        # Account already exists and is verified — tell the user directly
+        # instead of the misleading "verification link sent" message.
+        # (Founder decision 2026-10-18: UX clarity over enumeration protection on signup.)
+        db.commit()
+        return JSONResponse(
+            {"error": "This email is already registered. Try logging in instead."},
+            status_code=409,
+        )
+    token = auth_helpers.generate_token()
+    db.add(EmailVerification(user_id=existing.id, token_hash=auth_helpers.hash_token(token),
+                             expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
+    background.add_task(email_helpers.send_verification_email, existing.email, token)
     db.commit()
     return JSONResponse({"message": GENERIC_SIGNUP})
 
@@ -361,6 +376,19 @@ async def me(request: Request, db: DBSession = Depends(get_db)):
 
 
 # --- Sessions management ---
+
+@router.get("/auth/balance")
+async def balance(request: Request, db: DBSession = Depends(get_db)):
+    """Return credit balance for the logged-in user (for nav display)."""
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"balance": None})
+    try:
+        from app import credits as credits_helpers
+        summary = credits_helpers.get_balance_summary(db, session.user_id)
+        return JSONResponse({"balance": summary["balance"]})
+    except Exception:
+        return JSONResponse({"balance": None})
 
 @router.get("/auth/sessions")
 async def list_sessions(request: Request, db: DBSession = Depends(get_db)):

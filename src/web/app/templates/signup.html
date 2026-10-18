@@ -69,12 +69,25 @@
         <p class="pw-hint">At least 12 characters, with uppercase, lowercase, number, and special character.</p>
         <button type="submit" class="btn-primary">Create account</button>
       </form>
-      <div class="auth-links" style="margin-top:1rem">
+      <div class="auth-links" id="resend-section" style="margin-top:1rem;display:none">
         <span style="font-size:0.85rem">Didn't get the email?</span>
         <button type="button" id="resend-btn" class="btn-small" style="margin-left:0.5rem">Resend verification email</button>
       </div>
       <div class="auth-links">Already have an account? <a href="/login">Log in</a></div>
       <script>
+      // Show resend option after signup submission (email sent)
+      const _origFetch = window.fetch;
+      const _signupForm = document.querySelector('form[data-auth-form]');
+      if (_signupForm) {
+        _signupForm.addEventListener('submit', function() {
+          setTimeout(function() {
+            const status = _signupForm.querySelector('[role="status"]');
+            if (status && status.textContent.toLowerCase().includes('verification')) {
+              document.getElementById('resend-section').style.display = 'block';
+            }
+          }, 1000);
+        });
+      }
       document.getElementById('resend-btn').addEventListener('click', function() {
         const form = document.querySelector('form[data-auth-form]');
         const email = form.querySelector('#email').value;

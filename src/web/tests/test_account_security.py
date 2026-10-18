@@ -178,11 +178,16 @@ def test_signup_and_forgot_responses_indistinguishable(auth_env):
     data = {"email": "new@example.com", "password": PASSWORD}
     first = auth_env.client.post("/auth/signup", data=data)
     duplicate = auth_env.client.post("/auth/signup", data=data)
+    # New vs unverified-duplicate remain indistinguishable (generic message)
+    assert [(r.status_code, r.content) for r in [first, duplicate]] == [(200, first.content)] * 2
     with auth_env.sessions() as db:
         db.query(User).one().email_verified = True
         db.commit()
     verified = auth_env.client.post("/auth/signup", data=data)
-    assert [(r.status_code, r.content) for r in [first, duplicate, verified]] == [(200, first.content)] * 3
+    # Founder decision 2026-10-18: verified emails get explicit "already registered"
+    # (409) for UX clarity, accepting enumeration tradeoff on signup only.
+    assert verified.status_code == 409
+    assert "already registered" in verified.json()["error"].lower()
     known = auth_env.client.post("/auth/forgot", data={"email": "new@example.com"})
     unknown = auth_env.client.post("/auth/forgot", data={"email": "unknown@example.com"})
     assert (known.status_code, known.content) == (unknown.status_code, unknown.content)

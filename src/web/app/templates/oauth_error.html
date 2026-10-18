@@ -1,5 +1,44 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Account linking — StackSift</title></head>
-<body><main><h1>Connect your account</h1><p role="alert">{{ error }}</p>
-<p><a href="/login">Sign in</a> · <a href="/forgot">Reset your password</a> · <a href="/settings">Account settings</a></p>
-<p>Once signed in, choose Link Google or Link GitHub in Account settings.</p></main></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect your account — StackSift</title>
+<link rel="stylesheet" href="/static/style.css?v=3">
+<style>
+.auth-wrap { max-width: 420px; margin: 3rem auto; padding: 0 1rem; }
+.auth-card { background: #1e2a4a; border: 1px solid #2d3d6b; border-radius: 12px; padding: 2rem; }
+.auth-card h1 { color: #fff; margin: 0 0 1rem 0; font-size: 1.5rem; }
+.auth-card .error { background: #4a1e1e; border: 1px solid #7a2a2a; color: #ff9999; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+.auth-card p { color: #a0aec0; font-size: 0.9rem; line-height: 1.5; }
+.auth-card a { color: #ecc94b; }
+.auth-links { margin-top: 1.5rem; font-size: 0.9rem; }
+.auth-links a { margin-right: 1rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+    <nav class="nav-links">
+      <a href="/credits">Credits</a>
+      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+      <a href="/login" class="btn-login">Log in</a>
+      <a href="/signup" class="btn-signup">Sign up</a>
+    </nav>
+  </header>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <h1>Connect your account</h1>
+      <div class="error" role="alert">{{ error }}</div>
+      <p>This email is already associated with a StackSift account. To connect {{ provider|default('this provider') }}, first sign in, then link it from your account settings.</p>
+      <div class="auth-links">
+        <a href="/login">Sign in</a>
+        <a href="/forgot">Reset your password</a>
+        <a href="/settings">Account settings</a>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
