@@ -129,3 +129,4 @@ def test_oauth_repeat_login_grants_no_second_reward(env, monkeypatch):
     with env.sessions() as db:
         user = db.query(M.User).filter_by(email="br02-repeat@example.com").first()
         assert C.get_balance_summary(db, user.id)["balance"] == 3
+# ci-trigger
