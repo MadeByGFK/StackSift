@@ -69,7 +69,22 @@
         <p class="pw-hint">At least 12 characters, with uppercase, lowercase, number, and special character.</p>
         <button type="submit" class="btn-primary">Create account</button>
       </form>
+      <div class="auth-links" style="margin-top:1rem">
+        <span style="font-size:0.85rem">Didn't get the email?</span>
+        <button type="button" id="resend-btn" class="btn-small" style="margin-left:0.5rem">Resend verification email</button>
+      </div>
       <div class="auth-links">Already have an account? <a href="/login">Log in</a></div>
+      <script>
+      document.getElementById('resend-btn').addEventListener('click', function() {
+        const form = document.querySelector('form[data-auth-form]');
+        const email = form.querySelector('#email').value;
+        if (!email) { alert('Please enter your email address first.'); return; }
+        // Re-submit signup form to trigger a new verification email
+        // (backend re-sends for existing unverified accounts)
+        form.querySelector('#password').value = form.querySelector('#password').value || 'ResendOnly123!';
+        form.requestSubmit();
+      });
+      </script>
     </div>
   </div>
 </div>

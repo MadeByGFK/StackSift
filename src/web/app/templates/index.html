@@ -76,7 +76,7 @@ document.addEventListener('DOMContentLoaded', function() {
       <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
       {% if current_user %}
         <a href="/settings">Settings</a>
-        <form method="post" action="/auth/logout" style="display:inline;margin:0">
+        <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="nav-logout">Log out</button>
         </form>
@@ -179,5 +179,6 @@ dz.addEventListener('drop', ev => {
   }
 });
 </script>
+{% include "auth_form_script.html" %}
 </body>
 </html>

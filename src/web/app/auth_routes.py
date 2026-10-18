@@ -166,6 +166,14 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
         .order_by(auth_helpers.SessionModel.created_at.desc())
         .all()
     )
+    # Query linked OAuth providers for connected-accounts display
+    from app.models import OAuthAccount
+    oauth_links = (
+        db.query(OAuthAccount.provider)
+        .filter(OAuthAccount.user_id == user.id)
+        .all()
+    )
+    linked_providers = {row[0] for row in oauth_links}
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -175,6 +183,7 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "sessions": sessions,
             "current_session_id": str(session.id) if session else None,
             "csrf_token": session.csrf_token if session else "",
+            "linked_providers": linked_providers,
         },
     )
 
@@ -271,6 +280,9 @@ async def logout(request: Request, db: DBSession = Depends(get_db)):
     if session:
         # CSRF check for cookie-authenticated state change
         auth_helpers.revoke_session(db, session)
+    # Return JSON; the auth_form_script.js handles navigation via
+    # data-success-url. Plain HTML forms must include data-auth-form
+    # and data-success-url attributes (see index.html fix).
     response = JSONResponse({"message": "Logged out."})
     _clear_session_cookie(response)
     return response

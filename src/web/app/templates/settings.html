@@ -54,17 +54,25 @@
       <p>Link Google or GitHub to sign in with one click.</p>
       <div class="oauth-row">
         <span>Google</span>
+        {% if linked_providers and 'google' in linked_providers %}
+        <span class="connected-badge">✓ Connected</span>
+        {% else %}
         <form method="post" action="/auth/link/google">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="btn-small">Link Google</button>
         </form>
+        {% endif %}
       </div>
       <div class="oauth-row">
         <span>GitHub</span>
+        {% if linked_providers and 'github' in linked_providers %}
+        <span class="connected-badge">✓ Connected</span>
+        {% else %}
         <form method="post" action="/auth/link/github">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="btn-small">Link GitHub</button>
         </form>
+        {% endif %}
       </div>
     </div>
     <div class="settings-card">
