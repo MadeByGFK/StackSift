@@ -8,6 +8,7 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
     output.textContent = '';
     try {
       const response = await fetch(form.action, {
+      headers: { "X-Requested-With": "XMLHttpRequest" },
         method: 'POST', credentials: 'same-origin', body: new FormData(form),
       });
       const result = await response.json();
