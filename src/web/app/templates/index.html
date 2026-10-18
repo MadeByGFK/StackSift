@@ -72,7 +72,6 @@ document.addEventListener('DOMContentLoaded', function() {
   <header class="top">
     <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
     <nav class="nav-links">
-      <a href="/credits">Credits</a>
       <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
       {% if current_user %}
         <a href="/settings">Settings</a>
@@ -81,6 +80,7 @@ document.addEventListener('DOMContentLoaded', function() {
           <button type="submit" class="nav-logout">Log out</button>
         </form>
       {% else %}
+        <a href="/credits">Credits</a>
         <a href="/login" class="btn-login">Log in</a>
         <a href="/signup" class="btn-signup">Sign up</a>
       {% endif %}
