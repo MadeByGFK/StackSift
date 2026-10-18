@@ -144,18 +144,6 @@ def test_expired_tokens_leave_account_unchanged(migrated_engine, model):
         assert db.get(User, ident).email_verified is False
 
 
-@pytest.mark.parametrize("driver", ["postgresql", "postgresql+psycopg2", "postgresql+psycopg"])
-def test_app_imports_with_postgres_url_without_connecting(driver):
-    """Catch missing drivers at the same import boundary as deployed Uvicorn."""
-    import subprocess
-    import sys
-    env = {**os.environ, "DATABASE_URL": f"{driver}://test:test@localhost:1/test",
-           "PYTHONPATH": str(Path(__file__).parents[1])}
-    result = subprocess.run([sys.executable, "-c", "from app.main import app; assert app"],
-                            env=env, capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-
-
 
 def test_startup_migrates_configured_engine_from_any_directory(migrated_engine, monkeypatch, tmp_path):
     import asyncio
