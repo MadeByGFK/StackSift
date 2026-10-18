@@ -350,7 +350,9 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
         # Check eligible credits
         summary = credits_helpers.get_balance_summary(db, user.id)
         if summary["eligible"] < 1:
-            raise RuntimeError("insufficient credits")
+            # BR-01: raise the domain exception so _durable_analysis returns
+            # HTTP 402 (credit limit), not a generic 503.
+            raise credits_helpers.InsufficientCredits("insufficient credits")
         # Create server-bound consent
         consent = credits_helpers.create_consent(
             db, user.id, "additional_analysis", file_hash,
