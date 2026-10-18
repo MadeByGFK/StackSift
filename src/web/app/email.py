@@ -34,8 +34,16 @@ def send_email(to: str, subject: str, html: str) -> bool:
         )
         resp.raise_for_status()
         return True
-    except httpx.HTTPError:
-        logger.error("Account email delivery failed.")
+    except httpx.HTTPStatusError as e:
+        # Log Resend's actual error response for diagnosis (not shown to user)
+        try:
+            detail = e.response.text[:500]
+        except Exception:
+            detail = "<unreadable>"
+        logger.error("Account email delivery failed: HTTP %s %s", e.response.status_code, detail)
+        return False
+    except httpx.HTTPError as e:
+        logger.error("Account email delivery failed: %s %s", type(e).__name__, str(e)[:300])
         return False
 
 
