@@ -166,6 +166,14 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
         .order_by(auth_helpers.SessionModel.created_at.desc())
         .all()
     )
+    # Query linked OAuth providers for connected-accounts display
+    from app.models import OAuthAccount
+    oauth_links = (
+        db.query(OAuthAccount.provider)
+        .filter(OAuthAccount.user_id == user.id)
+        .all()
+    )
+    linked_providers = {row[0] for row in oauth_links}
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -175,6 +183,7 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "sessions": sessions,
             "current_session_id": str(session.id) if session else None,
             "csrf_token": session.csrf_token if session else "",
+            "linked_providers": linked_providers,
         },
     )
 
