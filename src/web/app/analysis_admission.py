@@ -13,20 +13,32 @@ def fingerprint(filename, content):
     return C.hash_input(filename.encode() + b'\0' + content)
 
 
-def lookup(db, user_id, anonymous_hash, key, digest):
+def lookup(db, user_id, anonymous_hash, key, digest, ip=None):
     if user_id:
         op = C.find_operation(db, user_id, 'additional_analysis', key, digest)
         if op:
             return op
     fr = db.get(M.FreeRequest, key, populate_existing=True)
-    if fr and (fr.user_id != user_id or fr.anonymous_session_hash != anonymous_hash or fr.fingerprint != digest):
-        raise C.AdmissionError('request identity conflict (409)')
+    if fr:
+        # Finding 1: Allow anonymous browser retry while first request is in-progress.
+        # The browser hasn't received the identity cookie yet (set only after analysis
+        # completes), so the retry generates a different anon hash. The request_id is
+        # unguessable (uuid4 hex); IP match provides reasonable assurance it's the
+        # same client. Adopt the original identity for the replay path.
+        if (fr.anonymous_session_hash != anonymous_hash
+                and fr.status in ('reserved', 'in_progress')
+                and ip is not None
+                and fr.quota_bucket_trusted_ip == ip):
+            return fr
+        if (fr.user_id != user_id or fr.anonymous_session_hash != anonymous_hash
+                or fr.fingerprint != digest):
+            raise C.AdmissionError('request identity conflict (409)')
     return fr
 
 
 def admit(db, user_id, anonymous_hash, key, digest, ip, worker, consent_id=None):
     scope = C._ensure_capacity_scope(db, 'global:paid', C.DEFAULT_GLOBAL_CONCURRENT_LIMIT)
-    existing = lookup(db, user_id, anonymous_hash, key, digest)
+    existing = lookup(db, user_id, anonymous_hash, key, digest, ip)
     if existing:
         return existing, False
     consent = C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1) if consent_id else None
