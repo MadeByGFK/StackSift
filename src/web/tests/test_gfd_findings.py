@@ -105,10 +105,9 @@ def test_anonymous_retry_wrong_ip_conflicts(env):
             assert "409" in str(e)
 
 
-def test_paid_pending_file_contains_redacted_content(env, tmp_path, monkeypatch):
+def test_paid_pending_file_contains_redacted_content(tmp_path, monkeypatch):
     """Finding 2: Exercise _paid_consent_page and inspect actual file on disk."""
     from app import main as main_module
-    import os
 
     # Redirect pending dir to tmp_path
     monkeypatch.setattr(main_module, "_PAID_PENDING_DIR", str(tmp_path))
