@@ -280,7 +280,10 @@ async def logout(request: Request, db: DBSession = Depends(get_db)):
     if session:
         # CSRF check for cookie-authenticated state change
         auth_helpers.revoke_session(db, session)
-    response = RedirectResponse("/", status_code=303)
+    # Return JSON; the auth_form_script.js handles navigation via
+    # data-success-url. Plain HTML forms must include data-auth-form
+    # and data-success-url attributes (see index.html fix).
+    response = JSONResponse({"message": "Logged out."})
     _clear_session_cookie(response)
     return response
 
