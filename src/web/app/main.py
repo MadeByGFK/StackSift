@@ -182,12 +182,19 @@ def _serve_replay(request: Request, file: UploadFile, content: bytes, request_id
     )
 
 
-@app.get("/pricing", response_class=HTMLResponse)
-async def pricing(request: Request):
+
+@app.get("/credits", response_class=HTMLResponse)
+async def credits(request: Request):
     _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
         request, "pricing.html", {"current_user": _user, "csrf_token": _csrf}
     )
+
+
+@app.get("/pricing", include_in_schema=False)
+async def pricing_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/credits", status_code=301)
 
 
 @app.get("/health")
