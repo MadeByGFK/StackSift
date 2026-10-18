@@ -28,7 +28,10 @@ def lookup(db, user_id, anonymous_hash, key, digest, ip=None):
         if (fr.anonymous_session_hash != anonymous_hash
                 and fr.status in ('reserved', 'in_progress')
                 and ip is not None
-                and fr.quota_bucket_trusted_ip == ip):
+                and fr.quota_bucket_trusted_ip == ip
+                and fr.fingerprint == digest):
+            # GFD: Require matching fingerprint too. Same request_id + IP +
+            # same content = valid retry. Different content = conflict.
             return fr
         if (fr.user_id != user_id or fr.anonymous_session_hash != anonymous_hash
                 or fr.fingerprint != digest):
