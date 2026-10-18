@@ -15,7 +15,12 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.rate_limit import RateLimiter
+from app.rate_limit import (
+    BurstLimited,
+    HourlyLimited,
+    PostgresRateLimiter,
+    RateLimiter,
+)
 from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
 from app.service import analyze_upload, render_text_report
@@ -64,6 +69,45 @@ app.include_router(auth_router)
 # Free tier: 10 analyses per hour per IP. Tune as usage data comes in.
 limiter = RateLimiter(max_requests=10, window_seconds=3600)
 burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
+# Shared enforcement for multi-process deployments (staging/production).
+# Replaces the in-memory limiters above whenever the database is configured.
+shared_limiter = PostgresRateLimiter(
+    burst_max=2, burst_window=60, hourly_max=10, hourly_window=3600
+)
+
+
+def _use_shared_limiter() -> bool:
+    """True when the database is configured (shared enforcement applies)."""
+    import os
+
+    return bool(os.environ.get("DATABASE_URL"))
+
+
+def _db_session():
+    """Return a new database session. Raises on connection failure."""
+    from app.db import SessionLocal
+
+    return SessionLocal()
+
+
+def _remaining(ip: str) -> int:
+    """Hourly quota remaining for ``ip``, shared across processes when possible.
+
+    Fail-closed display: any database failure shows 0 remaining rather than
+    promising quota that cannot be delivered (the /analyze path 503s then).
+    """
+    if not _use_shared_limiter():
+        return limiter.remaining(ip)
+    try:
+        db = _db_session()
+    except Exception:
+        return 0
+    try:
+        return shared_limiter.remaining(db, ip)
+    except Exception:
+        return 0
+    finally:
+        db.close()
 
 
 def _get_current_user_optional(request: Request):
@@ -105,6 +149,40 @@ async def security_headers(request: Request, call_next):
 
 
 
+def _serve_replay(request: Request, file: UploadFile, content: bytes, request_id: str, output: str, ip: str):
+    """Serve the stored result for an already-completed request_id.
+
+    Contract (see PostgresRateLimiter.admit): a 'replay' verdict means the
+    request already completed AND no quota was consumed. The caller must
+    serve the existing result via the durable-result path — it must never
+    silently rerun the analysis here.
+
+    PR #17 provides the durable path as ``_durable_analysis`` in this
+    module; it re-looks-up the request and serves the stored result without
+    consuming quota. If the durable path is unavailable (impossible when
+    replays are genuinely possible, since they require PR #17's tables),
+    fail closed with 503.
+    """
+    durable = globals().get("_durable_analysis")
+    if durable is not None:
+        return durable(request, file.filename, content, request_id, output)
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "error": "This analysis was already completed, but its stored result "
+            "is temporarily unavailable. Please try again shortly.",
+            "remaining": _remaining(ip),
+            "current_user": _user,
+            "csrf_token": _csrf,
+        },
+        status_code=503,
+        headers={"Retry-After": "60"},
+    )
+
+
+
 @app.get("/credits", response_class=HTMLResponse)
 async def credits(request: Request):
     _user, _csrf = _get_current_user_optional(request)
@@ -128,7 +206,7 @@ async def health():
 async def index(request: Request):
     _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
-        request, "index.html", {"error": None, "remaining": limiter.remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
+        request, "index.html", {"error": None, "remaining": _remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
     )
 
 
@@ -152,6 +230,7 @@ async def analyze(
     request: Request,
     file: UploadFile = File(...),
     output: str = Form("html"),
+    request_id: str = Form(""),
 ):
     ip = _client_ip(request)
 
@@ -160,7 +239,7 @@ async def analyze(
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"error": message, "remaining": limiter.remaining(ip), "current_user": _user, "csrf_token": _csrf},
+            {"error": message, "remaining": _remaining(ip), "current_user": _user, "csrf_token": _csrf},
             status_code=status,
             headers=headers or {},
         )
@@ -181,25 +260,62 @@ async def analyze(
     if len(content) > MAX_BYTES:
         return error("That file is over the 10 MB free-tier limit.")
 
-    # Atomic check: verify both limits before recording either.
-    # Prevents rejected requests from consuming quota in the other limiter.
-    burst_ok = burst_limiter.check(ip)
-    hourly_ok = limiter.check(ip)
-    if not burst_ok:
-        return error(
-            "Too many requests. Please wait a minute and try again.",
-            status=429,
-            headers={"Retry-After": "60"},
-        )
-    if not hourly_ok:
-        return error(
-            "Free-tier limit reached (10 analyses/hour). Please try again later.",
-            status=429,
-            headers={"Retry-After": "3600"},
-        )
-    # Both pass: record in both limiters
-    burst_limiter.record(ip)
-    limiter.record(ip)
+    # Shared atomic enforcement when the database is configured; the
+    # in-memory limiters remain for the no-database demo path ONLY.
+    # NOTE: the in-memory path is never a fallback for database failures —
+    # any database/limiter failure below fails closed with HTTP 503.
+    if _use_shared_limiter():
+        try:
+            db = _db_session()
+            try:
+                verdict = shared_limiter.admit(db, ip, request_id=request_id or None)
+            finally:
+                db.close()
+        except BurstLimited:
+            return error(
+                "Too many requests. Please wait a minute and try again.",
+                status=429,
+                headers={"Retry-After": "60"},
+            )
+        except HourlyLimited:
+            return error(
+                "Free-tier limit reached (10 analyses/hour). Please try again later.",
+                status=429,
+                headers={"Retry-After": "3600"},
+            )
+        except Exception:
+            # Fail closed: session-creation failure, RateLimitUnavailable,
+            # or any unexpected limiter error must never silently bypass
+            # the limits into an unlimited analysis path.
+            return error(
+                "Rate limiting is temporarily unavailable. Please try again shortly.",
+                status=503,
+                headers={"Retry-After": "60"},
+            )
+        if verdict == "replay":
+            # Already completed: serve the stored result via the durable
+            # path. Never rerun the analysis here, and no quota was consumed.
+            return _serve_replay(request, file, content, request_id, output, ip)
+    else:
+        # Atomic check: verify both limits before recording either.
+        # Prevents rejected requests from consuming quota in the other limiter.
+        burst_ok = burst_limiter.check(ip)
+        hourly_ok = limiter.check(ip)
+        if not burst_ok:
+            return error(
+                "Too many requests. Please wait a minute and try again.",
+                status=429,
+                headers={"Retry-After": "60"},
+            )
+        if not hourly_ok:
+            return error(
+                "Free-tier limit reached (10 analyses/hour). Please try again later.",
+                status=429,
+                headers={"Retry-After": "3600"},
+            )
+        # Both pass: record in both limiters
+        burst_limiter.record(ip)
+        limiter.record(ip)
 
     # The upload is analyzed from a temp file and deleted immediately —
     # see app/service.py. The framework may also spool the raw upload to disk.

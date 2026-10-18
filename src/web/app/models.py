@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import TypeDecorator
@@ -131,3 +131,34 @@ class OAuthState(Base):
     nonce = Column(String(64), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class RateLimitBucket(Base):
+    """Per-IP lock row for atomic shared rate limiting.
+
+    One row per trusted client IP; it exists so concurrent admissions for
+    the same IP can serialize on ``SELECT ... FOR UPDATE``. See
+    app/rate_limit.py (PostgresRateLimiter).
+    """
+
+    __tablename__ = "rate_limit_buckets"
+
+    trusted_ip = Column(String(45), primary_key=True)
+
+
+class RateLimitHit(Base):
+    """One row per admitted analysis.
+
+    A hit counts toward both the burst window and the hourly window based
+    on ``hit_at``. Expired rows are deleted on write (per IP) plus an
+    opportunistic hourly sweep.
+    """
+
+    __tablename__ = "rate_limit_hits"
+    __table_args__ = (
+        Index("ix_rate_limit_hits_ip_time", "trusted_ip", "hit_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trusted_ip = Column(String(45), nullable=False)
+    hit_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
