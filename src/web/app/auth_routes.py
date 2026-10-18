@@ -226,7 +226,14 @@ async def signup(
             db.add(existing)
             db.flush()
         except IntegrityError:
+            # Race: another request created the user. Re-query for consistent handling.
             db.rollback()
+            existing = db.query(User).filter(User.email == email_norm).first()
+            if existing and existing.email_verified:
+                return JSONResponse(
+                    {"error": "This email is already registered. Try logging in instead."},
+                    status_code=409,
+                )
             return JSONResponse({"message": GENERIC_SIGNUP})
     if existing.email_verified:
         # Account already exists and is verified — tell the user directly
