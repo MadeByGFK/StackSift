@@ -377,6 +377,19 @@ async def me(request: Request, db: DBSession = Depends(get_db)):
 
 # --- Sessions management ---
 
+@router.get("/auth/balance")
+async def balance(request: Request, db: DBSession = Depends(get_db)):
+    """Return credit balance for the logged-in user (for nav display)."""
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"balance": None})
+    try:
+        from app import credits as credits_helpers
+        summary = credits_helpers.get_balance_summary(db, session.user_id)
+        return JSONResponse({"balance": summary["balance"]})
+    except Exception:
+        return JSONResponse({"balance": None})
+
 @router.get("/auth/sessions")
 async def list_sessions(request: Request, db: DBSession = Depends(get_db)):
     session = auth_helpers.get_session_from_cookie(db, request)
