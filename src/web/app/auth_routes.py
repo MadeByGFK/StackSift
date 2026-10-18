@@ -271,7 +271,7 @@ async def logout(request: Request, db: DBSession = Depends(get_db)):
     if session:
         # CSRF check for cookie-authenticated state change
         auth_helpers.revoke_session(db, session)
-    response = JSONResponse({"message": "Logged out."})
+    response = RedirectResponse("/", status_code=303)
     _clear_session_cookie(response)
     return response
 
