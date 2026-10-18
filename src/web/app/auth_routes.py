@@ -228,11 +228,19 @@ async def signup(
         except IntegrityError:
             db.rollback()
             return JSONResponse({"message": GENERIC_SIGNUP})
-    if not existing.email_verified:
-        token = auth_helpers.generate_token()
-        db.add(EmailVerification(user_id=existing.id, token_hash=auth_helpers.hash_token(token),
-                                 expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
-        background.add_task(email_helpers.send_verification_email, existing.email, token)
+    if existing.email_verified:
+        # Account already exists and is verified — tell the user directly
+        # instead of the misleading "verification link sent" message.
+        # (Founder decision 2026-10-18: UX clarity over enumeration protection on signup.)
+        db.commit()
+        return JSONResponse(
+            {"error": "This email is already registered. Try logging in instead."},
+            status_code=409,
+        )
+    token = auth_helpers.generate_token()
+    db.add(EmailVerification(user_id=existing.id, token_hash=auth_helpers.hash_token(token),
+                             expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
+    background.add_task(email_helpers.send_verification_email, existing.email, token)
     db.commit()
     return JSONResponse({"message": GENERIC_SIGNUP})
 
