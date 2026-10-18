@@ -464,7 +464,13 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
         redacted_text = redact_secrets(text)
         content = redacted_text.encode("utf-8")
     except Exception:
-        pass  # If redaction fails, proceed with original (fail-open for availability)
+        # GFD Finding 2: Fail closed. Never persist unredacted content.
+        # If redaction fails, abort rather than writing raw logs to disk.
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(
+            content="<h1>Upload processing error</h1><p>Could not securely process your file. Please try again.</p>",
+            status_code=500,
+        )
     file_hash = fingerprint(filename, content)
     db = SessionLocal()
     try:
