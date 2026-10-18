@@ -67,6 +67,7 @@ document.getElementById('upload-form').addEventListener('submit', function() {
   {% endif %}
 
   <form id="upload-form" action="/analyze" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="request_id" value="{{ new_request_id() }}">
     <div class="dropzone" id="dropzone">
       <div class="big">Drag &amp; drop your log file here</div>
       <div class="small">or click to browse — .log or .txt, up to 10 MB</div>

@@ -129,6 +129,24 @@ async def verify_page(request: Request, token: str = "", db: DBSession = Depends
 async def verify_email(request: Request, token: str = Form(...), db: DBSession = Depends(get_db)):
     if not redeem(db, EmailVerification, token):
         return JSONResponse({"error": "Invalid or expired verification link."}, status_code=400)
+    # Phase 2A: grant the approved 3-credit signup reward (idempotent per email).
+    # Failures here must not break verification; log and continue.
+    try:
+        from app import credits as credits_helpers
+        from app.models import User as UserModel
+        # Find the user by the verification token we just redeemed
+        from app.auth import hash_token as _hash_token
+        verif = db.query(EmailVerification).filter(
+            EmailVerification.token_hash == _hash_token(token)).first()
+        if verif:
+            user = db.get(UserModel, verif.user_id)
+            if user:
+                credits_helpers.grant_signup_reward(db, user.id, user.email)
+                db.commit()
+    except Exception:
+        db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("signup reward grant failed")
     return JSONResponse({"message": "Email verified. You can now log in."})
 
 
@@ -497,7 +515,19 @@ async def _callback(request, provider, code, state, db):
             oauth_helpers.link_oauth_to_user(db, current.user, provider, identity, email)
             response = RedirectResponse("/settings", status_code=303)
         elif attempt.action == "login" and current is None:
-            user, _ = oauth_helpers.find_or_create_oauth_user(db, provider, identity, email, name)
+            user, created = oauth_helpers.find_or_create_oauth_user(db, provider, identity, email, name)
+            if created:
+                # BR-02: grant the approved 3-credit signup reward for verified
+                # OAuth signups (idempotent per email; never on link/re-login).
+                # Failures must not break login; log and continue.
+                try:
+                    from app import credits as credits_helpers
+                    credits_helpers.grant_signup_reward(db, user.id, user.email)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    import logging
+                    logging.getLogger(__name__).exception("signup reward grant failed")
             user.last_login_at = datetime.now(timezone.utc)
             session, raw = auth_helpers.create_session(db, user.id, ip_address=_client_ip(request), user_agent=request.headers.get("User-Agent"))
             response = RedirectResponse("/", status_code=303)
