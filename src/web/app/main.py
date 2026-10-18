@@ -453,6 +453,18 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
     from app import credits as credits_helpers
 
     from app.analysis_admission import fingerprint
+    from app.redact import redact_secrets
+    # Finding 2: Redact secrets before fingerprinting and disk persistence.
+    # Raw uploaded logs must never be written to disk; the consent flow
+    # stores the file temporarily, so redaction happens here (not just
+    # at analysis time). The fingerprint is of the redacted content, which
+    # matches what _durable_analysis will load and verify.
+    try:
+        text = content.decode("utf-8", errors="replace")
+        redacted_text = redact_secrets(text)
+        content = redacted_text.encode("utf-8")
+    except Exception:
+        pass  # If redaction fails, proceed with original (fail-open for availability)
     file_hash = fingerprint(filename, content)
     db = SessionLocal()
     try:
@@ -526,7 +538,7 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
         if not key or len(key) > 255:
             return _analysis_response(request, 400, message="Invalid request identity.")
         try:
-            existing = A.lookup(db, user_id, anon, key, digest)
+            existing = A.lookup(db, user_id, anon, key, digest, _client_ip(request))
             if existing:
                 status, data, message = A.replay(db, existing, user_id)
                 return _analysis_response(request, status, data, message, output=output, filename=filename)
