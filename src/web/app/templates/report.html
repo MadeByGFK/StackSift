@@ -46,6 +46,14 @@
     <div>
       <span class="badge {{ health.color }}">{{ health.label }}</span>
     </div>
+    {% if current_user and report_id and not is_demo %}
+    <div class="report-actions" style="margin-top:1rem">
+      <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
+      </form>
+    </div>
+    {% endif %}
   </section>
 
   {% if complexity_truncated %}
