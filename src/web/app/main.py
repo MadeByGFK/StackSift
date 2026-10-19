@@ -816,7 +816,12 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                         headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
                     )
                 except (credits_helpers.AdmissionError, KeyError, ValueError):
-                    pass
+                    # Stored PDF is invalid or expired; don't attempt to reuse the
+                    # completed operation's idempotency key. Return a controlled error.
+                    return JSONResponse(
+                        {"error": "Previously generated PDF is no longer available. Please generate a new export."},
+                        status_code=410,
+                    )
         elif existing_op.status == "reserved":
             # Another request is already generating this PDF; don't hijack its operation
             return JSONResponse(
