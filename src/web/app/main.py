@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -656,11 +656,21 @@ async def credits_balance(request: Request):
 
 
 # ---------------------------------------------------------------------------
+
+def _get_db_dep():
+    """DB session dependency (overridable in tests)."""
+    from app.db import SessionLocal
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # Phase 2B: Report history + PDF export
 # ---------------------------------------------------------------------------
 
 @app.get("/reports", response_class=HTMLResponse)
-async def reports_list(request: Request, page: int = 1):
+async def reports_list(request: Request, page: int = 1, db=Depends(_get_db_dep)):
     """List the current user's analysis reports (7-day retention).
 
     Paginated: 20 per page.
@@ -672,10 +682,8 @@ async def reports_list(request: Request, page: int = 1):
     _user, _csrf = _get_current_user_optional(request)
     if not _user:
         return RedirectResponse("/login", status_code=303)
-    from app.db import SessionLocal
     from app import models
     from datetime import datetime, timezone
-    db = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
         per_page = 20
