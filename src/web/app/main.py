@@ -748,10 +748,15 @@ async def report_view(request: Request, result_id: str):
 
 @app.post("/reports/{result_id}/pdf")
 async def report_export_pdf(request: Request, result_id: str):
-    """Export a report as PDF. Costs 2 credits (COST_PDF)."""
+    """Export a report as PDF. Costs 2 credits (COST_PDF).
+
+    The user's click on "Export PDF (2 credits)" constitutes consent;
+    we create a server-bound consent for the operation.
+    """
     import os as _os
     import uuid as _uuid
     import hmac
+    import base64 as _b64
     from fastapi.responses import JSONResponse, Response
     if not _os.environ.get("DATABASE_URL"):
         return JSONResponse({"error": "PDF export unavailable"}, status_code=503)
@@ -779,9 +784,11 @@ async def report_export_pdf(request: Request, result_id: str):
         except ValueError:
             return JSONResponse({"error": "Invalid report ID"}, status_code=400)
 
+        # Restrict to analysis results only (not PDF results)
         result = db.query(models.Result).filter(
             models.Result.id == rid,
             models.Result.user_id == user.id,
+            models.Result.type == "analysis",
             models.Result.deleted_at.is_(None),
         ).first()
         if not result:
@@ -789,9 +796,44 @@ async def report_export_pdf(request: Request, result_id: str):
         if result.expires_at < datetime.now(timezone.utc):
             return JSONResponse({"error": "Report has expired"}, status_code=410)
 
-        # Admit the paid PDF operation (2 credits, idempotent per report)
+        # Idempotency: same report -> same operation. Check for existing completed op.
         idempotency_key = f"pdf-{result_id}"
         request_hash = result.integrity_digest
+        existing_op = db.query(models.Operation).filter(
+            models.Operation.user_id == user.id,
+            models.Operation.type == "pdf",
+            models.Operation.idempotency_key == idempotency_key,
+        ).first()
+        if existing_op and existing_op.status == "completed" and existing_op.result_id:
+            # Return the existing PDF (no new charge)
+            pdf_result = db.get(models.Result, existing_op.result_id)
+            if pdf_result:
+                try:
+                    manifest = json.loads(pdf_result.storage_manifest)
+                    pdf_bytes = _b64.b64decode(manifest["pdf_base64"])
+                    filename = manifest.get("filename", "report")
+                    return Response(
+                        content=pdf_bytes,
+                        media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+                    )
+                except (KeyError, ValueError, json.JSONDecodeError):
+                    pass  # Fall through to regenerate
+            # If we can't retrieve the old PDF, fall through to create a new operation
+            # (with a new idempotency key to avoid the completed-operation conflict)
+
+        # Create server-bound consent (user's click = consent for 2-credit PDF)
+        consent = credits_helpers.create_consent(
+            db,
+            user_id=user.id,
+            operation_type="pdf",
+            input_hash=request_hash,
+            max_cost=credits_helpers.COST_PDF,
+        )
+        db.flush()
+
+        # Admit the paid operation
+        worker_id = f"pdf-export-{_uuid.uuid4().hex[:8]}"
         try:
             op = credits_helpers.admit_paid_operation(
                 db,
@@ -800,8 +842,8 @@ async def report_export_pdf(request: Request, result_id: str):
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
                 cost=credits_helpers.COST_PDF,
-                consent_id=None,  # PDF export doesn't need consent flow
-                worker_id=f"pdf-export-{_uuid.uuid4().hex[:8]}",
+                consent_id=consent.id,
+                worker_id=worker_id,
             )
             db.commit()
         except credits_helpers.InsufficientCredits:
@@ -814,24 +856,42 @@ async def report_export_pdf(request: Request, result_id: str):
             db.rollback()
             return JSONResponse({"error": str(e)}, status_code=409)
 
-        # Generate the PDF
+        # Generate the PDF (if this fails, mark operation failed to release credits)
         from app.pdf_export import generate_report_pdf
         try:
-            manifest = json.loads(result.storage_manifest)
-            filename = manifest.get("filename", "report")
-        except (json.JSONDecodeError, TypeError):
-            filename = "report"
-        pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
+            try:
+                manifest_data = json.loads(result.storage_manifest)
+                filename = manifest_data.get("filename", "report")
+            except (json.JSONDecodeError, TypeError):
+                filename = "report"
+            pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
+        except Exception as e:
+            # Mark operation as failed so credits are released
+            try:
+                credits_helpers.fail_operation(db, op.id, worker_id, str(e)[:200])
+                db.commit()
+            except Exception:
+                db.rollback()
+            return JSONResponse({"error": "PDF generation failed"}, status_code=500)
 
         # Store the PDF result and complete the operation
-        pdf_result = credits_helpers.store_pdf_result(
-            db, user.id, op.id, pdf_bytes, filename
-        )
-        credits_helpers.complete_operation(
-            db, op.id, op.worker_id, result_id=pdf_result.id,
-            lease_generation=op.lease_generation,
-        )
-        db.commit()
+        try:
+            pdf_result = credits_helpers.store_pdf_result(
+                db, user.id, op.id, pdf_bytes, filename
+            )
+            credits_helpers.complete_operation(
+                db, op.id, worker_id, result_id=pdf_result.id,
+                lease_generation=op.lease_generation,
+            )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            try:
+                credits_helpers.fail_operation(db, op.id, worker_id, str(e)[:200])
+                db.commit()
+            except Exception:
+                pass
+            return JSONResponse({"error": "Failed to store PDF"}, status_code=500)
 
         return Response(
             content=pdf_bytes,
