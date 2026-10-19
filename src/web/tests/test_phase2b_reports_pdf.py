@@ -6,23 +6,35 @@ from datetime import datetime, timedelta, timezone
 
 
 def _signup_and_verify(auth_env, email=None):
-    """Create a verified user, return (email, user_id)."""
+    """Create a verified user. Returns (email, user_id)."""
+    from app.models import User
     email = email or f"test_{uuid.uuid4().hex[:8]}@example.com"
     auth_env.client.post("/auth/signup", data={
         "email": email, "password": "TestPass123!x",
     })
-    from app.models import User
-    with auth_env.sessions() as db:
+    db = auth_env.sessions()
+    try:
         user = db.query(User).filter(User.email == email).one()
         user.email_verified = True
         db.commit()
         return email, user.id
+    finally:
+        db.close()
+
+
+def _login(auth_env, email, password="TestPass123!x"):
+    """Log in via JSON API. Returns response."""
+    # Refresh CSRF header (fixture sets it, but login rotates it)
+    auth_env.client.headers["X-CSRF-Token"] = auth_env.client.get("/auth/csrf").json()["csrf_token"]
+    resp = auth_env.client.post("/auth/login", data={"email": email, "password": password})
+    if resp.status_code == 200:
+        auth_env.client.headers["X-CSRF-Token"] = resp.json()["csrf_token"]
+    return resp
 
 
 def _create_result(auth_env, user_id, filename="test.log"):
-    """Create a Result row directly (simulates a past analysis)."""
+    """Create a Result row using the test DB session."""
     from app import models
-    from app.db import SessionLocal
     import hashlib
     manifest = json.dumps({
         "filename": filename,
@@ -31,7 +43,7 @@ def _create_result(auth_env, user_id, filename="test.log"):
         "findings": [{"message": "Test finding 1"}, {"message": "Test finding 2"}],
     })
     now = datetime.now(timezone.utc)
-    db = SessionLocal()
+    db = auth_env.sessions()
     try:
         result = models.Result(
             user_id=user_id,
@@ -49,17 +61,12 @@ def _create_result(auth_env, user_id, filename="test.log"):
         db.close()
 
 
-def _login(auth_env, email):
-    """Log in and return (sets session cookies)."""
-    # Get CSRF from login page
-    resp = auth_env.client.get("/login")
+def _get_csrf_from_page(auth_env, url):
+    """Extract CSRF token from an HTML page."""
     import re
+    resp = auth_env.client.get(url)
     m = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
-    csrf = m.group(1) if m else ""
-    resp = auth_env.client.post("/auth/login", data={
-        "email": email, "password": "TestPass123!x", "csrf_token": csrf,
-    })
-    return resp
+    return m.group(1) if m else ""
 
 
 def test_reports_list_requires_login(auth_env):
@@ -72,7 +79,8 @@ def test_reports_list_requires_login(auth_env):
 def test_reports_list_empty(auth_env):
     """Logged-in user with no reports sees empty state."""
     email, user_id = _signup_and_verify(auth_env)
-    _login(auth_env, email)
+    resp = _login(auth_env, email)
+    assert resp.status_code == 200
     resp = auth_env.client.get("/reports")
     assert resp.status_code == 200
     assert "No reports yet" in resp.text
@@ -122,99 +130,166 @@ def test_report_view_own(auth_env):
     assert "myapp.log" in resp.text
 
 
-def test_pdf_export_requires_credits(auth_env):
-    """PDF export with 0 credits returns 402."""
+def test_report_view_expired(auth_env):
+    """Expired report returns 410."""
+    from app import models
+    import hashlib
     email, user_id = _signup_and_verify(auth_env)
-    # Don't grant signup reward (or spend it) - user has 0 credits
-    from app import credits as credits_helpers
-    from app.db import SessionLocal
-    db = SessionLocal()
+    manifest = json.dumps({"filename": "old.log"})
+    now = datetime.now(timezone.utc)
+    db = auth_env.sessions()
     try:
-        # Ensure zero balance by checking (signup reward is 3, so we need to spend or skip)
-        # For this test, we'll just verify the 402 path via insufficient credits
-        # by mocking the balance check
-        pass
+        result = models.Result(
+            user_id=user_id, type="analysis", storage_manifest=manifest,
+            integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
+            byte_count=len(manifest.encode()),
+            ready_at=now - timedelta(days=8),
+            expires_at=now - timedelta(days=1),
+        )
+        db.add(result)
+        db.commit()
+        rid = result.id
     finally:
         db.close()
+    _login(auth_env, email)
+    resp = auth_env.client.get(f"/reports/{rid}")
+    assert resp.status_code == 410
+
+
+def test_report_view_excludes_pdf_results(auth_env):
+    """Cannot view a PDF result via the report endpoint."""
+    from app import models
+    import hashlib
+    email, user_id = _signup_and_verify(auth_env)
+    manifest = json.dumps({"filename": "doc.pdf", "pdf_base64": "abc"})
+    now = datetime.now(timezone.utc)
+    db = auth_env.sessions()
+    try:
+        result = models.Result(
+            user_id=user_id, type="pdf",
+            storage_manifest=manifest,
+            integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
+            byte_count=len(manifest.encode()),
+            ready_at=now, expires_at=now + timedelta(days=7),
+        )
+        db.add(result)
+        db.commit()
+        rid = result.id
+    finally:
+        db.close()
+    _login(auth_env, email)
+    resp = auth_env.client.get(f"/reports/{rid}")
+    assert resp.status_code == 404
+
+
+def test_pdf_export_success(auth_env):
+    """PDF export with credits returns PDF bytes."""
+    email, user_id = _signup_and_verify(auth_env)
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
-    # Get CSRF
-    resp = auth_env.client.get(f"/reports/{rid}")
-    import re
-    m = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
-    csrf = m.group(1) if m else ""
-    # This will use the 3-credit signup reward, so it should succeed
-    # For 402 test, we'd need to exhaust credits first
+    csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    # With 3 credits, 2-credit PDF should succeed (200 with PDF bytes)
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/pdf"
+    assert resp.content[:4] == b"%PDF"
 
 
 def test_pdf_export_deducts_credits(auth_env):
     """PDF export deducts exactly 2 credits."""
+    from app import credits as credits_helpers
     email, user_id = _signup_and_verify(auth_env)
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
 
-    from app import credits as credits_helpers
-    from app.db import SessionLocal
-    db = SessionLocal()
+    db = auth_env.sessions()
     try:
-        before = credits_helpers.get_balance_summary(db, user_id)
-        before_balance = before["balance"]
+        before = credits_helpers.get_balance_summary(db, user_id)["balance"]
     finally:
         db.close()
 
-    resp = auth_env.client.get(f"/reports/{rid}")
-    import re
-    m = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
-    csrf = m.group(1) if m else ""
+    csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert resp.status_code == 200
 
-    db = SessionLocal()
+    db = auth_env.sessions()
     try:
-        after = credits_helpers.get_balance_summary(db, user_id)
-        assert after["balance"] == before_balance - 2
+        after = credits_helpers.get_balance_summary(db, user_id)["balance"]
+        assert after == before - 2
     finally:
         db.close()
 
 
 def test_pdf_export_idempotent(auth_env):
-    """Exporting PDF twice for same report doesn't double-charge."""
+    """Re-exporting same report doesn't double-charge."""
+    from app import credits as credits_helpers
     email, user_id = _signup_and_verify(auth_env)
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
+    csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
 
-    from app import credits as credits_helpers
-    from app.db import SessionLocal
-
-    resp = auth_env.client.get(f"/reports/{rid}")
-    import re
-    m = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
-    csrf = m.group(1) if m else ""
-
-    # First export
     r1 = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert r1.status_code == 200
 
-    db = SessionLocal()
+    db = auth_env.sessions()
     try:
         mid = credits_helpers.get_balance_summary(db, user_id)["balance"]
     finally:
         db.close()
 
-    # Second export (same report, same idempotency key)
     r2 = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert r2.status_code == 200
 
-    db = SessionLocal()
+    db = auth_env.sessions()
     try:
         after = credits_helpers.get_balance_summary(db, user_id)["balance"]
-        assert after == mid  # No additional charge
+        assert after == mid
     finally:
         db.close()
+
+
+def test_pdf_export_insufficient_credits(auth_env):
+    """PDF export with <2 credits returns 402."""
+    email, user_id = _signup_and_verify(auth_env)
+    rid = _create_result(auth_env, user_id)
+    _login(auth_env, email)
+    csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
+    # First export: 3 -> 1 credit
+    r1 = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert r1.status_code == 200
+    # Second report needs 2, only have 1
+    rid2 = _create_result(auth_env, user_id, "second.log")
+    r2 = auth_env.client.post(f"/reports/{rid2}/pdf", data={"csrf_token": csrf})
+    assert r2.status_code == 402
+    assert "Insufficient credits" in r2.json()["error"]
+
+
+def test_pdf_export_requires_csrf(auth_env):
+    """PDF export without CSRF returns 403."""
+    email, user_id = _signup_and_verify(auth_env)
+    rid = _create_result(auth_env, user_id)
+    _login(auth_env, email)
+    # Clear CSRF header and don't send token in form
+    old = auth_env.client.headers.pop("X-CSRF-Token", None)
+    try:
+        resp = auth_env.client.post(f"/reports/{rid}/pdf", data={})
+        assert resp.status_code == 403
+    finally:
+        if old:
+            auth_env.client.headers["X-CSRF-Token"] = old
+
+
+def test_reports_pagination(auth_env):
+    """Reports list paginates at 20 per page."""
+    email, user_id = _signup_and_verify(auth_env)
+    for i in range(25):
+        _create_result(auth_env, user_id, f"log{i}.log")
+    _login(auth_env, email)
+    r1 = auth_env.client.get("/reports?page=1")
+    assert r1.status_code == 200
+    assert "Page 1 of 2" in r1.text
+    r2 = auth_env.client.get("/reports?page=2")
+    assert r2.status_code == 200
+    assert "Page 2 of 2" in r2.text
 
 
 def test_pdf_generation_unit():
@@ -229,110 +304,3 @@ def test_pdf_generation_unit():
     pdf_bytes = generate_report_pdf(manifest, "test.log")
     assert pdf_bytes[:4] == b"%PDF"
     assert len(pdf_bytes) > 1000
-
-
-def test_report_view_expired(auth_env):
-    """Expired report returns 410."""
-    email, user_id = _signup_and_verify(auth_env)
-    from app import models
-    from app.db import SessionLocal
-    import hashlib
-    manifest = json.dumps({"filename": "old.log"})
-    now = datetime.now(timezone.utc)
-    db = SessionLocal()
-    try:
-        result = models.Result(
-            user_id=user_id, type="analysis", storage_manifest=manifest,
-            integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
-            byte_count=len(manifest.encode()),
-            ready_at=now - timedelta(days=8),
-            expires_at=now - timedelta(days=1),  # Expired
-        )
-        db.add(result)
-        db.commit()
-        rid = result.id
-    finally:
-        db.close()
-    _login(auth_env, email)
-    resp = auth_env.client.get(f"/reports/{rid}")
-    assert resp.status_code == 410
-
-
-def test_report_view_excludes_pdf_results(auth_env):
-    """Cannot view a PDF result via the report endpoint (type filter)."""
-    email, user_id = _signup_and_verify(auth_env)
-    from app import models
-    from app.db import SessionLocal
-    import hashlib
-    manifest = json.dumps({"filename": "doc.pdf", "pdf_base64": "abc"})
-    now = datetime.now(timezone.utc)
-    db = SessionLocal()
-    try:
-        result = models.Result(
-            user_id=user_id, type="pdf",  # PDF, not analysis
-            storage_manifest=manifest,
-            integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
-            byte_count=len(manifest.encode()),
-            ready_at=now, expires_at=now + timedelta(days=7),
-        )
-        db.add(result)
-        db.commit()
-        rid = result.id
-    finally:
-        db.close()
-    _login(auth_env, email)
-    resp = auth_env.client.get(f"/reports/{rid}")
-    assert resp.status_code == 404  # Not found (type filter)
-
-
-def test_pdf_export_insufficient_credits(auth_env):
-    """PDF export with 0 credits returns 402."""
-    email, user_id = _signup_and_verify(auth_env)
-    # Spend all credits first (signup gives 3, PDF costs 2)
-    # Create a result and export PDF twice to exhaust
-    rid = _create_result(auth_env, user_id)
-    _login(auth_env, email)
-    resp = auth_env.client.get(f"/reports/{rid}")
-    import re
-    m = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
-    csrf = m.group(1) if m else ""
-    # First export: 3 -> 1 credit
-    r1 = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert r1.status_code == 200
-    # Second export of different report would need 2, only have 1
-    rid2 = _create_result(auth_env, user_id, "second.log")
-    r2 = auth_env.client.post(f"/reports/{rid2}/pdf", data={"csrf_token": csrf})
-    assert r2.status_code == 402
-    assert "Insufficient credits" in r2.json()["error"]
-
-
-def test_pdf_export_requires_csrf(auth_env):
-    """PDF export without CSRF token returns 403."""
-    email, user_id = _signup_and_verify(auth_env)
-    rid = _create_result(auth_env, user_id)
-    _login(auth_env, email)
-    # Don't send CSRF token
-    old = auth_env.client.headers.pop("X-CSRF-Token", None)
-    try:
-        resp = auth_env.client.post(f"/reports/{rid}/pdf", data={})
-        assert resp.status_code == 403
-    finally:
-        if old:
-            auth_env.client.headers["X-CSRF-Token"] = old
-
-
-def test_reports_pagination(auth_env):
-    """Reports list paginates at 20 per page."""
-    email, user_id = _signup_and_verify(auth_env)
-    # Create 25 reports
-    for i in range(25):
-        _create_result(auth_env, user_id, f"log{i}.log")
-    _login(auth_env, email)
-    # Page 1 should have 20
-    r1 = auth_env.client.get("/reports?page=1")
-    assert r1.status_code == 200
-    assert "Page 1 of 2" in r1.text
-    # Page 2 should have 5
-    r2 = auth_env.client.get("/reports?page=2")
-    assert r2.status_code == 200
-    assert "Page 2 of 2" in r2.text
