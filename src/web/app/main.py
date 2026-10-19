@@ -868,7 +868,7 @@ async def report_export_pdf(request: Request, result_id: str):
         except Exception as e:
             # Mark operation as failed so credits are released
             try:
-                credits_helpers.fail_operation(db, op.id, worker_id, str(e)[:200])
+                credits_helpers.release_operation(db, op.id, worker_id, str(e)[:200])
                 db.commit()
             except Exception:
                 db.rollback()
@@ -887,7 +887,7 @@ async def report_export_pdf(request: Request, result_id: str):
         except Exception as e:
             db.rollback()
             try:
-                credits_helpers.fail_operation(db, op.id, worker_id, str(e)[:200])
+                credits_helpers.release_operation(db, op.id, worker_id, str(e)[:200])
                 db.commit()
             except Exception:
                 pass
