@@ -792,13 +792,20 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
 
-    idempotency_key = f"pdf-{result_id}"
+    base_idempotency_key = f"pdf-{result_id}"
     request_hash = result.integrity_digest
     existing_op = db.query(models.Operation).filter(
         models.Operation.user_id == user.id,
         models.Operation.type == "pdf",
-        models.Operation.idempotency_key == idempotency_key,
+        models.Operation.idempotency_key == base_idempotency_key,
     ).first()
+    # For failed/expired operations, use a new idempotency key so the retry
+    # gets a fresh operation identity (the old credits were released).
+    # The unique constraint on (user_id, type, idempotency_key) ensures safety.
+    idempotency_key = base_idempotency_key
+    if existing_op and existing_op.status in ("failed", "expired"):
+        idempotency_key = f"{base_idempotency_key}-retry-{_uuid.uuid4().hex[:8]}"
+        existing_op = None  # Force fresh admission with new key
     if existing_op:
         if existing_op.status == "completed" and existing_op.result_id:
             # Validate the saved PDF result before replaying (integrity, ownership, expiry)
