@@ -1,0 +1,80 @@
+<script>
+for (const form of document.querySelectorAll('form[data-auth-form]')) {
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const output = form.querySelector('[role="status"]');
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    output.textContent = '';
+    try {
+      const response = await fetch(form.action, {
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+        method: 'POST', credentials: 'same-origin', body: new FormData(form),
+      });
+      const result = await response.json();
+      output.textContent = result.error || (typeof result.detail === 'string' ? result.detail : '') || result.message || 'Unable to complete this request. Please try again.';
+      if (response.ok && form.dataset.successUrl) location.assign(form.dataset.successUrl);
+    } catch (_) {
+      output.textContent = 'Unable to connect. Please try again.';
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+// Credit balance badge in nav (logged-in users only)
+(function() {
+  // Only run if there's a logout form (indicates logged-in user)
+  const logoutForm = document.querySelector('form[action="/auth/logout"]');
+  if (!logoutForm) return;
+  const nav = logoutForm.closest('nav');
+  if (!nav || document.getElementById('credit-badge')) return;
+
+  fetch('/auth/balance', {credentials: 'same-origin'})
+    .then(r => r.json())
+    .then(data => {
+      if (data.balance === null || data.balance === undefined) return;
+      // Create badge
+      const badge = document.createElement('button');
+      badge.id = 'credit-badge';
+      badge.type = 'button';
+      badge.innerHTML = '\u{1FA99} ' + data.balance + ' credits';
+      badge.style.cssText = 'background:#2d3d6b;border:1px solid #4a5d8f;color:#fff;border-radius:20px;padding:0.35rem 0.8rem;font-size:0.85rem;cursor:pointer;margin-right:0.5rem;';
+      badge.title = 'View credit packs';
+      badge.addEventListener('click', showCreditModal);
+      // Insert before logout form
+      logoutForm.parentNode.insertBefore(badge, logoutForm);
+    })
+    .catch(() => {});
+
+  function showCreditModal() {
+    // Remove existing modal
+    const old = document.getElementById('credit-modal');
+    if (old) old.remove();
+    // Create overlay
+    const overlay = document.createElement('div');
+    overlay.id = 'credit-modal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;';
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    // Create card
+    const card = document.createElement('div');
+    card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
+    card.innerHTML =
+      '<h2 style="margin:0 0 0.5rem 0;font-size:1.3rem;">Credit Packs</h2>' +
+      '<p style="color:#a0aec0;font-size:0.9rem;margin:0 0 1.5rem 0;">Credits unlock premium features like PDF export. <a href="/credits" style="color:#ecc94b;">Learn more</a></p>' +
+      '<div style="display:grid;gap:0.75rem;">' +
+      '<div style="border:1px solid #2d3d6b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Starter</strong><br><span style="color:#a0aec0;font-size:0.85rem;">10 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$5</div></div>' +
+      '<div style="border:1px solid #ecc94b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Growth</strong> <span style="background:#ecc94b;color:#1a1a1a;font-size:0.7rem;padding:0.15rem 0.5rem;border-radius:10px;">POPULAR</span><br><span style="color:#a0aec0;font-size:0.85rem;">25 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$10</div></div>' +
+      '<div style="border:1px solid #2d3d6b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Power</strong><br><span style="color:#a0aec0;font-size:0.85rem;">75 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$25</div></div>' +
+      '</div>' +
+      '<p style="color:#a0aec0;font-size:0.85rem;text-align:center;margin:1.5rem 0 0 0;">Purchasing coming soon. <a href="/credits" style="color:#ecc94b;">View details</a></p>' +
+      '<button id="credit-modal-close" style="width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;">Close</button>';
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    document.getElementById('credit-modal-close').addEventListener('click', () => overlay.remove());
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); }
+    });
+  }
+})();
+</script>

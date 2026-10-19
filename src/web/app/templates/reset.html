@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reset password — StackSift</title>
+<link rel="stylesheet" href="/static/style.css?v=3">
+<style>
+.auth-wrap { max-width: 420px; margin: 3rem auto; padding: 0 1rem; }
+.auth-card { background: #1e2a4a; border: 1px solid #2d3d6b; border-radius: 12px; padding: 2rem; }
+.auth-card h1 { color: #fff; margin: 0 0 0.5rem 0; font-size: 1.5rem; }
+.auth-card p.sub { color: #a0aec0; margin: 0 0 1.5rem 0; font-size: 0.9rem; }
+.auth-card label { display: block; color: #fff; font-size: 0.85rem; margin: 1rem 0 0.25rem 0; }
+.auth-card input[type="password"] { width: 100%; padding: 0.6rem; border: 1px solid #2d3d6b; border-radius: 8px; background: #0f1a33; color: #fff; font-size: 1rem; box-sizing: border-box; }
+.auth-card .btn-primary { width: 100%; margin-top: 1.5rem; }
+.auth-card .error { background: #4a1e1e; border: 1px solid #7a2a2a; color: #ff9999; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+.auth-links { text-align: center; margin-top: 1.5rem; font-size: 0.9rem; color: #a0aec0; }
+.auth-links a { color: #ecc94b; }
+.pw-hint { font-size: 0.8rem; color: #a0aec0; margin-top: 0.25rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+    <nav class="nav-links">
+      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+      {% if current_user %}
+        <span class="user-email">{{ current_user.email }}</span>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/credits">Credits</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <h1>Reset password</h1>
+      <p class="sub">Choose a new password.</p>
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      <form method="post" action="/auth/reset" data-auth-form>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" aria-live="polite"></p>
+        <input type="hidden" name="token" value="{{ token }}">
+        <label for="new_password">New password</label>
+        <input type="password" id="new_password" name="new_password" required autocomplete="new-password">
+        <p class="pw-hint">At least 12 characters, with uppercase, lowercase, number, and special character.</p>
+        <button type="submit" class="btn-primary">Reset password</button>
+      </form>
+      <div class="auth-links"><a href="/login">Back to login</a></div>
+    </div>
+  </div>
+</div>
+{% include "auth_form_script.html" %}
+</body>
+</html>
