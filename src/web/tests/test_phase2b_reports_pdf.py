@@ -345,7 +345,7 @@ def test_pdf_export_concurrent_returns_409(auth_env):
             request_hash="dummy",
             cost=2,
             worker_id="other-worker-123",
-            reserved_at=datetime.now(timezone.utc),
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
         db.add(op)
         db.commit()
@@ -392,19 +392,17 @@ def test_pdf_replay_validates_integrity(auth_env):
             request_hash="dummy",
             cost=2,
             worker_id="worker-123",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
             result_id=pdf_result.id,
         )
         db.add(op)
         db.commit()
     finally:
         db.close()
-    # The replay should fail validation and proceed to generate a fresh PDF (not return corrupt data)
-    # Since we have credits (3 from signup), it should attempt a new export
+    # The replay should fail validation and return 410 (not return corrupt data,
+    # not attempt to reuse the completed operation's idempotency key)
     csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
     auth_env.client.headers["X-CSRF-Token"] = csrf
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    # Should NOT return the corrupt PDF; should either generate new or fail gracefully
-    # With valid credits, it will generate a fresh PDF (200 with PDF content)
-    assert resp.status_code in (200, 500)  # 200 = fresh PDF generated, 500 = generation failed safely
-    if resp.status_code == 200:
-        assert resp.headers["content-type"] == "application/pdf"
+    assert resp.status_code == 410
+    assert "no longer available" in resp.json()["error"].lower()
