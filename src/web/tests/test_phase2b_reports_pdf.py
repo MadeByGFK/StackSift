@@ -6,17 +6,24 @@ from datetime import datetime, timedelta, timezone
 
 
 def _signup_and_verify(auth_env, email=None):
-    """Create a verified user. Returns (email, user_id)."""
+    """Create a verified user via the real email-verification flow.
+
+    Redeems the actual verification token (captured by the fixture's
+    mocked mailer) so the 3-credit signup reward is granted exactly as
+    in production. Returns (email, user_id).
+    """
     from app.models import User
     email = email or f"test_{uuid.uuid4().hex[:8]}@example.com"
     auth_env.client.post("/auth/signup", data={
         "email": email, "password": "TestPass123!x",
     })
+    token = next(t for kind, addr, t in auth_env.sent if kind == "verify" and addr == email)
+    resp = auth_env.client.post("/auth/verify", data={"token": token})
+    assert resp.status_code == 200, f"verify failed: {resp.status_code} {resp.text[:200]}"
     db = auth_env.sessions()
     try:
         user = db.query(User).filter(User.email == email).one()
-        user.email_verified = True
-        db.commit()
+        assert user.email_verified
         return email, user.id
     finally:
         db.close()
@@ -33,15 +40,26 @@ def _login(auth_env, email, password="TestPass123!x"):
 
 
 def _create_result(auth_env, user_id, filename="test.log"):
-    """Create a Result row using the test DB session."""
+    """Create a Result row using the test DB session.
+
+    Builds the manifest with the real analysis service so the stored
+    schema matches production exactly (the report template requires the
+    full schema: level_counts, sorted_issues, timeline, ...).
+    """
     from app import models
+    from app.service import analyze_upload
     import hashlib
-    manifest = json.dumps({
-        "filename": filename,
-        "results": {"total_lines": 100, "parsed_lines": 95, "error_count": 5},
-        "health": {"label": "Needs attention", "color": "yellow"},
-        "findings": [{"message": "Test finding 1"}, {"message": "Test finding 2"}],
-    })
+    log_content = (
+        b"2024-01-01 10:00:00 INFO app starting\n"
+        b"2024-01-01 10:00:01 WARN deprecated config key used\n"
+        b"2024-01-01 10:00:02 ERROR failed to connect to db: timeout\n"
+        b"2024-01-01 10:00:03 ERROR failed to connect to db: timeout\n"
+        b"2024-01-01 10:00:04 INFO retrying connection\n"
+    )
+    data = analyze_upload(filename, log_content)
+    assert "error" not in data, f"fixture analysis failed: {data}"
+    # Same serialization as credits.store_result (default=str for datetimes).
+    manifest = json.dumps(data, default=str)
     now = datetime.now(timezone.utc)
     db = auth_env.sessions()
     try:
