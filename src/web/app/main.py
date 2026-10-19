@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from app.db import get_db
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -656,21 +657,11 @@ async def credits_balance(request: Request):
 
 
 # ---------------------------------------------------------------------------
-
-def _get_db_dep():
-    """DB session dependency (overridable in tests)."""
-    from app.db import SessionLocal
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 # Phase 2B: Report history + PDF export
 # ---------------------------------------------------------------------------
 
 @app.get("/reports", response_class=HTMLResponse)
-async def reports_list(request: Request, page: int = 1, db=Depends(_get_db_dep)):
+async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     """List the current user's analysis reports (7-day retention).
 
     Paginated: 20 per page.
@@ -729,7 +720,7 @@ async def reports_list(request: Request, page: int = 1, db=Depends(_get_db_dep))
 
 
 @app.get("/reports/{result_id}", response_class=HTMLResponse)
-async def report_view(request: Request, result_id: str):
+async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     """View a specific past analysis report (ownership-checked)."""
     import os as _os
     from fastapi.responses import RedirectResponse, JSONResponse
@@ -738,7 +729,6 @@ async def report_view(request: Request, result_id: str):
     _user, _csrf = _get_current_user_optional(request)
     if not _user:
         return RedirectResponse("/login", status_code=303)
-    from app.db import SessionLocal
     from app import models
     from datetime import datetime, timezone
     import uuid as _uuid
@@ -772,7 +762,7 @@ async def report_view(request: Request, result_id: str):
 
 
 @app.post("/reports/{result_id}/pdf")
-async def report_export_pdf(request: Request, result_id: str):
+async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)):
     """Export a report as PDF. Costs 2 credits (COST_PDF).
 
     The user's click on "Export PDF (2 credits)" constitutes consent;
