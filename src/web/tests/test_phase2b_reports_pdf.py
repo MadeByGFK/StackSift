@@ -406,3 +406,54 @@ def test_pdf_replay_validates_integrity(auth_env):
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert resp.status_code == 410
     assert "no longer available" in resp.json()["error"].lower()
+
+
+def test_pdf_export_retry_after_failure(auth_env):
+    """Failed PDF export can be retried with a new operation identity."""
+    from app import models
+    from datetime import datetime, timezone
+    email, user_id = _signup_and_verify(auth_env)
+    rid = _create_result(auth_env, user_id, "retry.log")
+    _login(auth_env, email)
+    # Create a failed operation for the same export (simulating a prior failure)
+    db = auth_env.sessions()
+    try:
+        failed_op = models.Operation(
+            user_id=user_id,
+            type="pdf",
+            status="failed",
+            idempotency_key=f"pdf-{rid}",
+            request_hash="dummy-hash",
+            cost=2,
+            worker_id="failed-worker-123",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            failure_code="generation_failed",
+        )
+        db.add(failed_op)
+        db.commit()
+        failed_op_id = failed_op.id
+    finally:
+        db.close()
+    # Retry should succeed with a NEW operation (not reuse the failed one)
+    # User has 3 credits from signup, export costs 2
+    csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
+    auth_env.client.headers["X-CSRF-Token"] = csrf
+    resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    # Verify a new operation was created (not the failed one)
+    db = auth_env.sessions()
+    try:
+        ops = db.query(models.Operation).filter(
+            models.Operation.user_id == user_id,
+            models.Operation.type == "pdf",
+        ).all()
+        # Should have 2 operations: the failed one and the new successful one
+        assert len(ops) == 2
+        new_ops = [op for op in ops if op.id != failed_op_id]
+        assert len(new_ops) == 1
+        assert new_ops[0].status == "completed"
+        assert new_ops[0].idempotency_key != f"pdf-{rid}"  # New key for retry
+        assert new_ops[0].idempotency_key.startswith(f"pdf-{rid}-retry-")
+    finally:
+        db.close()
