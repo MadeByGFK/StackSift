@@ -668,9 +668,12 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     import os as _os
     if not _os.environ.get("DATABASE_URL"):
         return RedirectResponse("/login", status_code=303)
-    _user, _csrf = _get_current_user_optional(request)
-    if not _user:
+    from app import auth as auth_helpers
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
         return RedirectResponse("/login", status_code=303)
+    _user = session.user
+    _csrf = session.csrf_token
     from app import models
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
@@ -717,9 +720,12 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     from fastapi.responses import RedirectResponse, JSONResponse
     if not _os.environ.get("DATABASE_URL"):
         return RedirectResponse("/login", status_code=303)
-    _user, _csrf = _get_current_user_optional(request)
-    if not _user:
+    from app import auth as auth_helpers
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
         return RedirectResponse("/login", status_code=303)
+    _user = session.user
+    _csrf = session.csrf_token
     from app import models
     from datetime import datetime, timezone
     try:
