@@ -660,8 +660,11 @@ async def credits_balance(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/reports", response_class=HTMLResponse)
-async def reports_list(request: Request):
-    """List the current user's analysis reports (7-day retention)."""
+async def reports_list(request: Request, page: int = 1):
+    """List the current user's analysis reports (7-day retention).
+
+    Paginated: 20 per page.
+    """
     import os as _os
     from fastapi.responses import RedirectResponse
     if not _os.environ.get("DATABASE_URL"):
@@ -675,12 +678,22 @@ async def reports_list(request: Request):
     db = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
+        per_page = 20
+        page = max(1, page)
+        offset = (page - 1) * per_page
+        total = db.query(models.Result).filter(
+            models.Result.user_id == _user.id,
+            models.Result.type == "analysis",
+            models.Result.expires_at > now,
+            models.Result.deleted_at.is_(None),
+        ).count()
         results = db.query(models.Result).filter(
             models.Result.user_id == _user.id,
             models.Result.type == "analysis",
             models.Result.expires_at > now,
             models.Result.deleted_at.is_(None),
-        ).order_by(models.Result.created_at.desc()).limit(50).all()
+        ).order_by(models.Result.created_at.desc()).offset(offset).limit(per_page).all()
+        total_pages = max(1, (total + per_page - 1) // per_page)
         # Enrich with filename from manifest
         reports = []
         for r in results:
@@ -699,6 +712,9 @@ async def reports_list(request: Request):
             "reports": reports,
             "current_user": _user,
             "csrf_token": _csrf,
+            "page": page,
+            "total_pages": total_pages,
+            "total": total,
         })
     finally:
         db.close()
@@ -727,6 +743,7 @@ async def report_view(request: Request, result_id: str):
         result = db.query(models.Result).filter(
             models.Result.id == rid,
             models.Result.user_id == _user.id,
+            models.Result.type == "analysis",
             models.Result.deleted_at.is_(None),
         ).first()
         if not result:
