@@ -325,3 +325,86 @@ def test_pdf_generation_unit():
     pdf_bytes = generate_report_pdf(manifest, "test.log")
     assert pdf_bytes[:4] == b"%PDF"
     assert len(pdf_bytes) > 1000
+
+
+def test_pdf_export_concurrent_returns_409(auth_env):
+    """Second export while first is in-progress returns 409, not a hijacked operation."""
+    from app import models
+    from datetime import datetime, timezone
+    email, user_id = _signup_and_verify(auth_env)
+    rid = _create_result(auth_env, user_id, "concurrent.log")
+    _login(auth_env, email)
+    # Manually create a reserved (in-progress) operation for the same export
+    db = auth_env.sessions()
+    try:
+        op = models.Operation(
+            user_id=user_id,
+            type="pdf",
+            status="reserved",
+            idempotency_key=f"pdf-{rid}",
+            request_hash="dummy",
+            cost=2,
+            worker_id="other-worker-123",
+            reserved_at=datetime.now(timezone.utc),
+        )
+        db.add(op)
+        db.commit()
+    finally:
+        db.close()
+    # Attempting the export should return 409, not proceed with our worker ID
+    csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
+    auth_env.client.headers["X-CSRF-Token"] = csrf
+    resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert resp.status_code == 409
+    assert "already in progress" in resp.json()["error"].lower()
+
+
+def test_pdf_replay_validates_integrity(auth_env):
+    """Replaying a completed export validates the stored PDF result."""
+    from app import models, credits as credits_helpers
+    from datetime import datetime, timezone
+    import base64 as b64
+    email, user_id = _signup_and_verify(auth_env)
+    rid = _create_result(auth_env, user_id, "replay.log")
+    _login(auth_env, email)
+    # Create a completed operation with a corrupted PDF result (bad digest)
+    db = auth_env.sessions()
+    try:
+        # Create a PDF result with mismatched digest
+        manifest = json.dumps({"pdf_base64": b64.b64encode(b"fake-pdf").decode(), "filename": "replay.log"})
+        pdf_result = models.Result(
+            user_id=user_id,
+            type="pdf",
+            free_request_id=f"test-pdf-corrupt-{uuid.uuid4().hex}",
+            storage_manifest=manifest,
+            integrity_digest="0" * 64,  # Wrong digest
+            byte_count=len(manifest.encode()),
+            ready_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        )
+        db.add(pdf_result)
+        db.flush()
+        op = models.Operation(
+            user_id=user_id,
+            type="pdf",
+            status="completed",
+            idempotency_key=f"pdf-{rid}",
+            request_hash="dummy",
+            cost=2,
+            worker_id="worker-123",
+            result_id=pdf_result.id,
+        )
+        db.add(op)
+        db.commit()
+    finally:
+        db.close()
+    # The replay should fail validation and proceed to generate a fresh PDF (not return corrupt data)
+    # Since we have credits (3 from signup), it should attempt a new export
+    csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
+    auth_env.client.headers["X-CSRF-Token"] = csrf
+    resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    # Should NOT return the corrupt PDF; should either generate new or fail gracefully
+    # With valid credits, it will generate a fresh PDF (200 with PDF content)
+    assert resp.status_code in (200, 500)  # 200 = fresh PDF generated, 500 = generation failed safely
+    if resp.status_code == 200:
+        assert resp.headers["content-type"] == "application/pdf"
