@@ -229,3 +229,110 @@ def test_pdf_generation_unit():
     pdf_bytes = generate_report_pdf(manifest, "test.log")
     assert pdf_bytes[:4] == b"%PDF"
     assert len(pdf_bytes) > 1000
+
+
+def test_report_view_expired(auth_env):
+    """Expired report returns 410."""
+    email, user_id = _signup_and_verify(auth_env)
+    from app import models
+    from app.db import SessionLocal
+    import hashlib
+    manifest = json.dumps({"filename": "old.log"})
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    try:
+        result = models.Result(
+            user_id=user_id, type="analysis", storage_manifest=manifest,
+            integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
+            byte_count=len(manifest.encode()),
+            ready_at=now - timedelta(days=8),
+            expires_at=now - timedelta(days=1),  # Expired
+        )
+        db.add(result)
+        db.commit()
+        rid = result.id
+    finally:
+        db.close()
+    _login(auth_env, email)
+    resp = auth_env.client.get(f"/reports/{rid}")
+    assert resp.status_code == 410
+
+
+def test_report_view_excludes_pdf_results(auth_env):
+    """Cannot view a PDF result via the report endpoint (type filter)."""
+    email, user_id = _signup_and_verify(auth_env)
+    from app import models
+    from app.db import SessionLocal
+    import hashlib
+    manifest = json.dumps({"filename": "doc.pdf", "pdf_base64": "abc"})
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    try:
+        result = models.Result(
+            user_id=user_id, type="pdf",  # PDF, not analysis
+            storage_manifest=manifest,
+            integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
+            byte_count=len(manifest.encode()),
+            ready_at=now, expires_at=now + timedelta(days=7),
+        )
+        db.add(result)
+        db.commit()
+        rid = result.id
+    finally:
+        db.close()
+    _login(auth_env, email)
+    resp = auth_env.client.get(f"/reports/{rid}")
+    assert resp.status_code == 404  # Not found (type filter)
+
+
+def test_pdf_export_insufficient_credits(auth_env):
+    """PDF export with 0 credits returns 402."""
+    email, user_id = _signup_and_verify(auth_env)
+    # Spend all credits first (signup gives 3, PDF costs 2)
+    # Create a result and export PDF twice to exhaust
+    rid = _create_result(auth_env, user_id)
+    _login(auth_env, email)
+    resp = auth_env.client.get(f"/reports/{rid}")
+    import re
+    m = re.search(r'name="csrf_token" value="([^"]+)"', resp.text)
+    csrf = m.group(1) if m else ""
+    # First export: 3 -> 1 credit
+    r1 = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert r1.status_code == 200
+    # Second export of different report would need 2, only have 1
+    rid2 = _create_result(auth_env, user_id, "second.log")
+    r2 = auth_env.client.post(f"/reports/{rid2}/pdf", data={"csrf_token": csrf})
+    assert r2.status_code == 402
+    assert "Insufficient credits" in r2.json()["error"]
+
+
+def test_pdf_export_requires_csrf(auth_env):
+    """PDF export without CSRF token returns 403."""
+    email, user_id = _signup_and_verify(auth_env)
+    rid = _create_result(auth_env, user_id)
+    _login(auth_env, email)
+    # Don't send CSRF token
+    old = auth_env.client.headers.pop("X-CSRF-Token", None)
+    try:
+        resp = auth_env.client.post(f"/reports/{rid}/pdf", data={})
+        assert resp.status_code == 403
+    finally:
+        if old:
+            auth_env.client.headers["X-CSRF-Token"] = old
+
+
+def test_reports_pagination(auth_env):
+    """Reports list paginates at 20 per page."""
+    email, user_id = _signup_and_verify(auth_env)
+    # Create 25 reports
+    for i in range(25):
+        _create_result(auth_env, user_id, f"log{i}.log")
+    _login(auth_env, email)
+    # Page 1 should have 20
+    r1 = auth_env.client.get("/reports?page=1")
+    assert r1.status_code == 200
+    assert "Page 1 of 2" in r1.text
+    # Page 2 should have 5
+    r2 = auth_env.client.get("/reports?page=2")
+    assert r2.status_code == 200
+    assert "Page 2 of 2" in r2.text
