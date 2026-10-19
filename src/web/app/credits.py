@@ -672,7 +672,7 @@ def store_pdf_result(db, user_id, operation_id, pdf_bytes: bytes, filename: str)
         operation_id=operation_id,
         type="pdf",
         storage_manifest=manifest,
-        integrity_digest=hash_input(pdf_bytes),
+        integrity_digest=hash_input(manifest.encode()),
         byte_count=len(pdf_bytes),
         ready_at=now,
         expires_at=now + timedelta(days=7),
