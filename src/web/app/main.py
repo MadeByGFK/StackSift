@@ -715,6 +715,7 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     import uuid as _uuid
     from fastapi.responses import RedirectResponse, JSONResponse
     from app import auth as auth_helpers
+    from app import credits as credits_helpers
     session = auth_helpers.get_session_from_cookie(db, request)
     if not session:
         return RedirectResponse("/login", status_code=303)
@@ -734,7 +735,7 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     ).first()
     if not result:
         return JSONResponse({"error": "Report not found"}, status_code=404)
-    if result.expires_at < datetime.now(timezone.utc):
+    if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
     try:
         data = json.loads(result.storage_manifest)
@@ -744,6 +745,8 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     data["csrf_token"] = _csrf
     data["report_id"] = str(result.id)
     data["is_historical"] = True
+    # Older manifests predate the elapsed field; the template requires it.
+    data.setdefault("elapsed", 0.0)
     return templates.TemplateResponse(request, "report.html", data)
 
 
@@ -782,7 +785,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     ).first()
     if not result:
         return JSONResponse({"error": "Report not found"}, status_code=404)
-    if result.expires_at < datetime.now(timezone.utc):
+    if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
 
     idempotency_key = f"pdf-{result_id}"
