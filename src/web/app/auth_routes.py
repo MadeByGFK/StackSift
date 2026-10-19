@@ -265,12 +265,14 @@ async def resend_verification(
     accepts a password. The previous client-side dummy-password approach
     (ResendOnly123!) could create accounts with a predictable password.
     """
-    ip = _client_ip(request)
-    auth_helpers.check_rate_limit("resend_verification", ip)
-
     email_norm = auth_helpers.normalize_email(email)
     if len(email_norm) > 255 or email_norm.count("@") != 1:
         return JSONResponse({"message": GENERIC_SIGNUP})
+
+    # Rate limits: per-email (prevents targeted harassment) + per-IP
+    # (prevents distributed abuse). GFD 2026-10-18: fix verify_resend key.
+    auth_helpers.check_rate_limit("verify_resend", email_norm)
+    auth_helpers.check_rate_limit("resend_ip", _client_ip(request))
 
     existing = db.query(User).filter(User.email == email_norm).first()
     # Only re-send for existing UNVERIFIED accounts. Never create, never
