@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Reports — StackSift</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/static/style.css?v=3">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+    <nav class="nav-links">
+      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/credits">Credits</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <section class="report-head">
+    <h2>My Reports</h2>
+    <div class="meta">Your analysis reports from the last 7 days.</div>
+  </section>
+
+  {% if reports %}
+  <div class="reports-list">
+    {% for report in reports %}
+    <div class="report-card">
+      <div class="report-info">
+        <div class="report-filename">{{ report.filename }}</div>
+        <div class="report-meta">
+          Analyzed {{ report.created_at.strftime('%Y-%m-%d %H:%M') }} ·
+          Expires {{ report.expires_at.strftime('%Y-%m-%d') }}
+        </div>
+      </div>
+      <div class="report-actions">
+        <a href="/reports/{{ report.id }}" class="btn-small">View</a>
+        <form method="post" action="/reports/{{ report.id }}/pdf" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="btn-small" title="Export as PDF (2 credits)">PDF (2 credits)</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p>No reports yet. <a href="/">Analyze a log file</a> to get started.</p>
+    <p class="meta">Reports are kept for 7 days after analysis.</p>
+  </div>
+  {% endif %}
+
+</div>
+{% include 'auth_form_script.html' %}
+</body>
+</html>
