@@ -55,6 +55,17 @@
     </div>
     {% endfor %}
   </div>
+  {% if total_pages > 1 %}
+  <div class="pagination" style="margin-top:1.5rem;text-align:center">
+    {% if page > 1 %}
+    <a href="/reports?page={{ page - 1 }}" class="btn-small">&larr; Previous</a>
+    {% endif %}
+    <span style="margin:0 1rem">Page {{ page }} of {{ total_pages }} ({{ total }} reports)</span>
+    {% if page < total_pages %}
+    <a href="/reports?page={{ page + 1 }}" class="btn-small">Next &rarr;</a>
+    {% endif %}
+  </div>
+  {% endif %}
   {% else %}
   <div class="empty-state">
     <p>No reports yet. <a href="/">Analyze a log file</a> to get started.</p>
