@@ -665,9 +665,6 @@ async def credits_balance(request: Request):
 async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     """List the current user's analysis reports (7-day retention). Paginated: 20 per page."""
     from fastapi.responses import RedirectResponse
-    import os as _os
-    if not _os.environ.get("DATABASE_URL"):
-        return RedirectResponse("/login", status_code=303)
     from app import auth as auth_helpers
     session = auth_helpers.get_session_from_cookie(db, request)
     if not session:
@@ -715,11 +712,8 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
 @app.get("/reports/{result_id}", response_class=HTMLResponse)
 async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     """View a specific past analysis report (ownership-checked, analysis only)."""
-    import os as _os
     import uuid as _uuid
     from fastapi.responses import RedirectResponse, JSONResponse
-    if not _os.environ.get("DATABASE_URL"):
-        return RedirectResponse("/login", status_code=303)
     from app import auth as auth_helpers
     session = auth_helpers.get_session_from_cookie(db, request)
     if not session:
@@ -756,13 +750,10 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
 @app.post("/reports/{result_id}/pdf")
 async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)):
     """Export a report as PDF. Costs 2 credits (COST_PDF)."""
-    import os as _os
     import uuid as _uuid
     import hmac
     import base64 as _b64
     from fastapi.responses import JSONResponse, Response
-    if not _os.environ.get("DATABASE_URL"):
-        return JSONResponse({"error": "PDF export unavailable"}, status_code=503)
     from app import auth as auth_helpers
     from app import credits as credits_helpers
     from app import models
