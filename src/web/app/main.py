@@ -653,3 +653,192 @@ async def credits_balance(request: Request):
         return JSONResponse(summary)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2B: Report history + PDF export
+# ---------------------------------------------------------------------------
+
+@app.get("/reports", response_class=HTMLResponse)
+async def reports_list(request: Request):
+    """List the current user's analysis reports (7-day retention)."""
+    import os as _os
+    from fastapi.responses import RedirectResponse
+    if not _os.environ.get("DATABASE_URL"):
+        return RedirectResponse("/login", status_code=303)
+    _user, _csrf = _get_current_user_optional(request)
+    if not _user:
+        return RedirectResponse("/login", status_code=303)
+    from app.db import SessionLocal
+    from app import models
+    from datetime import datetime, timezone
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        results = db.query(models.Result).filter(
+            models.Result.user_id == _user.id,
+            models.Result.type == "analysis",
+            models.Result.expires_at > now,
+            models.Result.deleted_at.is_(None),
+        ).order_by(models.Result.created_at.desc()).limit(50).all()
+        # Enrich with filename from manifest
+        reports = []
+        for r in results:
+            try:
+                manifest = json.loads(r.storage_manifest)
+                filename = manifest.get("filename", "Unknown file")
+            except (json.JSONDecodeError, TypeError):
+                filename = "Unknown file"
+            reports.append({
+                "id": str(r.id),
+                "filename": filename,
+                "created_at": r.created_at,
+                "expires_at": r.expires_at,
+            })
+        return templates.TemplateResponse(request, "reports.html", {
+            "reports": reports,
+            "current_user": _user,
+            "csrf_token": _csrf,
+        })
+    finally:
+        db.close()
+
+
+@app.get("/reports/{result_id}", response_class=HTMLResponse)
+async def report_view(request: Request, result_id: str):
+    """View a specific past analysis report (ownership-checked)."""
+    import os as _os
+    from fastapi.responses import RedirectResponse, JSONResponse
+    if not _os.environ.get("DATABASE_URL"):
+        return RedirectResponse("/login", status_code=303)
+    _user, _csrf = _get_current_user_optional(request)
+    if not _user:
+        return RedirectResponse("/login", status_code=303)
+    from app.db import SessionLocal
+    from app import models
+    from datetime import datetime, timezone
+    import uuid as _uuid
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+    db = SessionLocal()
+    try:
+        result = db.query(models.Result).filter(
+            models.Result.id == rid,
+            models.Result.user_id == _user.id,
+            models.Result.deleted_at.is_(None),
+        ).first()
+        if not result:
+            return JSONResponse({"error": "Report not found"}, status_code=404)
+        if result.expires_at < datetime.now(timezone.utc):
+            return JSONResponse({"error": "Report has expired"}, status_code=410)
+        try:
+            data = json.loads(result.storage_manifest)
+        except (json.JSONDecodeError, TypeError):
+            return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+        data["current_user"] = _user
+        data["csrf_token"] = _csrf
+        data["report_id"] = str(result.id)
+        data["is_historical"] = True
+        return templates.TemplateResponse(request, "report.html", data)
+    finally:
+        db.close()
+
+
+@app.post("/reports/{result_id}/pdf")
+async def report_export_pdf(request: Request, result_id: str):
+    """Export a report as PDF. Costs 2 credits (COST_PDF)."""
+    import os as _os
+    import uuid as _uuid
+    import hmac
+    from fastapi.responses import JSONResponse, Response
+    if not _os.environ.get("DATABASE_URL"):
+        return JSONResponse({"error": "PDF export unavailable"}, status_code=503)
+    from app.db import SessionLocal
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from datetime import datetime, timezone
+
+    db = SessionLocal()
+    try:
+        session = auth_helpers.get_session_from_cookie(db, request)
+        if not session:
+            return JSONResponse({"error": "Login required"}, status_code=401)
+        user = session.user
+
+        # CSRF check
+        form = await request.form()
+        csrf_token = form.get("csrf_token", "")
+        if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+            return JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
+
+        try:
+            rid = _uuid.UUID(result_id)
+        except ValueError:
+            return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+
+        result = db.query(models.Result).filter(
+            models.Result.id == rid,
+            models.Result.user_id == user.id,
+            models.Result.deleted_at.is_(None),
+        ).first()
+        if not result:
+            return JSONResponse({"error": "Report not found"}, status_code=404)
+        if result.expires_at < datetime.now(timezone.utc):
+            return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+        # Admit the paid PDF operation (2 credits, idempotent per report)
+        idempotency_key = f"pdf-{result_id}"
+        request_hash = result.integrity_digest
+        try:
+            op = credits_helpers.admit_paid_operation(
+                db,
+                user_id=user.id,
+                operation_type="pdf",
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                cost=credits_helpers.COST_PDF,
+                consent_id=None,  # PDF export doesn't need consent flow
+                worker_id=f"pdf-export-{_uuid.uuid4().hex[:8]}",
+            )
+            db.commit()
+        except credits_helpers.InsufficientCredits:
+            db.rollback()
+            return JSONResponse(
+                {"error": "Insufficient credits. PDF export costs 2 credits."},
+                status_code=402,
+            )
+        except credits_helpers.AdmissionError as e:
+            db.rollback()
+            return JSONResponse({"error": str(e)}, status_code=409)
+
+        # Generate the PDF
+        from app.pdf_export import generate_report_pdf
+        try:
+            manifest = json.loads(result.storage_manifest)
+            filename = manifest.get("filename", "report")
+        except (json.JSONDecodeError, TypeError):
+            filename = "report"
+        pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
+
+        # Store the PDF result and complete the operation
+        pdf_result = credits_helpers.store_pdf_result(
+            db, user.id, op.id, pdf_bytes, filename
+        )
+        credits_helpers.complete_operation(
+            db, op.id, op.worker_id, result_id=pdf_result.id,
+            lease_generation=op.lease_generation,
+        )
+        db.commit()
+
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'
+            },
+        )
+    finally:
+        db.close()
