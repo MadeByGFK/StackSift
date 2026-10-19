@@ -204,6 +204,7 @@ RATE_LIMITS = {
     "signup": (3, 3600),    # 3/hour per IP
     "forgot": (3, 3600),    # 3/hour per IP
     "verify_resend": (3, 3600),  # 3/hour per email
+    "resend_ip": (10, 3600),    # 10/hour per IP (defense in depth)
     "reset": (5, 3600),     # 5/hour per IP
 }
 
