@@ -738,8 +738,12 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
     try:
-        data = json.loads(result.storage_manifest)
-    except (json.JSONDecodeError, TypeError):
+        data = credits_helpers.result_payload(
+            result, user_id=_user.id,
+            operation_id=result.operation_id,
+            free_request_id=result.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
         return JSONResponse({"error": "Report data corrupted"}, status_code=500)
     data["current_user"] = _user
     data["csrf_token"] = _csrf
@@ -795,20 +799,31 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         models.Operation.type == "pdf",
         models.Operation.idempotency_key == idempotency_key,
     ).first()
-    if existing_op and existing_op.status == "completed" and existing_op.result_id:
-        pdf_result = db.get(models.Result, existing_op.result_id)
-        if pdf_result:
-            try:
-                manifest = json.loads(pdf_result.storage_manifest)
-                pdf_bytes = _b64.b64decode(manifest["pdf_base64"])
-                filename = manifest.get("filename", "report")
-                return Response(
-                    content=pdf_bytes,
-                    media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
-                )
-            except (KeyError, ValueError, json.JSONDecodeError):
-                pass
+    if existing_op:
+        if existing_op.status == "completed" and existing_op.result_id:
+            # Validate the saved PDF result before replaying (integrity, ownership, expiry)
+            pdf_result = db.get(models.Result, existing_op.result_id)
+            if pdf_result:
+                try:
+                    manifest = credits_helpers.result_payload(
+                        pdf_result, user_id=user.id, operation_id=existing_op.id,
+                    )
+                    pdf_bytes = _b64.b64decode(manifest["pdf_base64"])
+                    filename = manifest.get("filename", "report")
+                    return Response(
+                        content=pdf_bytes,
+                        media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+                    )
+                except (credits_helpers.AdmissionError, KeyError, ValueError):
+                    pass
+        elif existing_op.status == "reserved":
+            # Another request is already generating this PDF; don't hijack its operation
+            return JSONResponse(
+                {"error": "PDF export already in progress. Please wait and try again."},
+                status_code=409,
+            )
+        # For failed/expired operations, fall through to admit a fresh one
 
     consent = credits_helpers.create_consent(
         db, user_id=user.id, operation_type="pdf",
@@ -834,11 +849,13 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
 
     from app.pdf_export import generate_report_pdf
     try:
-        try:
-            manifest_data = json.loads(result.storage_manifest)
-            filename = manifest_data.get("filename", "report")
-        except (json.JSONDecodeError, TypeError):
-            filename = "report"
+        # Validate source analysis result integrity before generating PDF
+        manifest_data = credits_helpers.result_payload(
+            result, user_id=user.id,
+            operation_id=result.operation_id,
+            free_request_id=result.free_request_id,
+        )
+        filename = manifest_data.get("filename", "report")
         pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
     except Exception as e:
         try:
