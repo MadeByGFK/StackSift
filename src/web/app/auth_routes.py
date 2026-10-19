@@ -252,6 +252,40 @@ async def signup(
     return JSONResponse({"message": GENERIC_SIGNUP})
 
 
+@router.post("/auth/resend-verification")
+async def resend_verification(
+    request: Request,
+    background: BackgroundTasks,
+    email: str = Form(...),
+    db: DBSession = Depends(get_db),
+):
+    """Re-send verification email for an existing unverified account.
+
+    Security (GFD 2026-10-18): this endpoint NEVER creates accounts and NEVER
+    accepts a password. The previous client-side dummy-password approach
+    (ResendOnly123!) could create accounts with a predictable password.
+    """
+    email_norm = auth_helpers.normalize_email(email)
+    if len(email_norm) > 255 or email_norm.count("@") != 1:
+        return JSONResponse({"message": GENERIC_SIGNUP})
+
+    # Rate limits: per-email (prevents targeted harassment) + per-IP
+    # (prevents distributed abuse). GFD 2026-10-18: fix verify_resend key.
+    auth_helpers.check_rate_limit("verify_resend", email_norm)
+    auth_helpers.check_rate_limit("resend_ip", _client_ip(request))
+
+    existing = db.query(User).filter(User.email == email_norm).first()
+    # Only re-send for existing UNVERIFIED accounts. Never create, never
+    # reveal whether the account exists (generic response).
+    if existing and not existing.email_verified:
+        token = auth_helpers.generate_token()
+        db.add(EmailVerification(user_id=existing.id, token_hash=auth_helpers.hash_token(token),
+                                 expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
+        background.add_task(email_helpers.send_verification_email, existing.email, token)
+        db.commit()
+    return JSONResponse({"message": GENERIC_SIGNUP})
+
+
 @router.post("/auth/login")
 async def login(
     request: Request,

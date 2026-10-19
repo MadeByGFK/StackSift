@@ -88,14 +88,31 @@
           }, 1000);
         });
       }
-      document.getElementById('resend-btn').addEventListener('click', function() {
+      document.getElementById('resend-btn').addEventListener('click', async function() {
         const form = document.querySelector('form[data-auth-form]');
         const email = form.querySelector('#email').value;
+        const status = form.querySelector('[role="status"]');
         if (!email) { alert('Please enter your email address first.'); return; }
-        // Re-submit signup form to trigger a new verification email
-        // (backend re-sends for existing unverified accounts)
-        form.querySelector('#password').value = form.querySelector('#password').value || 'ResendOnly123!';
-        form.requestSubmit();
+        // Use the dedicated resend endpoint (no password, no account creation).
+        // Security: never submit the signup form with a dummy password.
+        const btn = document.getElementById('resend-btn');
+        btn.disabled = true;
+        try {
+          const csrf = form.querySelector('input[name="csrf_token"]').value;
+          const body = new URLSearchParams({ email: email, csrf_token: csrf });
+          const resp = await fetch('/auth/resend-verification', {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin',
+            body: body,
+          });
+          const result = await resp.json();
+          status.textContent = result.message || result.error || 'Verification email sent if the account exists.';
+        } catch (_) {
+          status.textContent = 'Unable to send. Please try again.';
+        } finally {
+          btn.disabled = false;
+        }
       });
       </script>
     </div>
