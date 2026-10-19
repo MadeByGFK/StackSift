@@ -48,6 +48,7 @@ def _create_result(auth_env, user_id, filename="test.log"):
         result = models.Result(
             user_id=user_id,
             type="analysis",
+            free_request_id=f"test-{uuid.uuid4().hex}",  # Satisfies ck_result_exactly_one_origin
             storage_manifest=manifest,
             integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
             byte_count=len(manifest.encode()),
@@ -141,6 +142,7 @@ def test_report_view_expired(auth_env):
     try:
         result = models.Result(
             user_id=user_id, type="analysis", storage_manifest=manifest,
+            free_request_id=f"test-exp-{uuid.uuid4().hex}",
             integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
             byte_count=len(manifest.encode()),
             ready_at=now - timedelta(days=8),
@@ -167,6 +169,7 @@ def test_report_view_excludes_pdf_results(auth_env):
     try:
         result = models.Result(
             user_id=user_id, type="pdf",
+            free_request_id=f"test-pdf-{uuid.uuid4().hex}",
             storage_manifest=manifest,
             integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
             byte_count=len(manifest.encode()),
