@@ -164,12 +164,68 @@ def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
     # Timeline
     timeline = data.get("timeline") or []
     if len(timeline) > 1:
+        # Keep the heading with the chart: if heading + subtitle + chart +
+        # legend would not fit on this page, start the section on a new one.
+        if pdf.get_y() + 66 > pdf.h - pdf.b_margin:
+            pdf.add_page()
         heading("Timeline")
         line("Warnings + errors per 5 min", size=10)
-        for bucket in timeline:
-            line(f"{bucket.get('label', '')}: {bucket.get('critical', 0)} critical, "
-                 f"{bucket.get('error', 0)} errors, {bucket.get('warn', 0)} warnings",
-                 size=10)
+        totals = [
+            (b.get("critical", 0) or 0) + (b.get("error", 0) or 0)
+            + (b.get("warn", 0) or 0)
+            for b in timeline
+        ]
+        peak = max(totals) if totals else 0
+        if peak > 0:
+            segments = (
+                ("critical", (185, 28, 28), "Critical"),
+                ("error", (234, 88, 12), "Error"),
+                ("warn", (245, 158, 11), "Warning"),
+            )
+            chart_h = 32
+            x0 = pdf.l_margin
+            chart_w = pdf.w - pdf.l_margin - pdf.r_margin
+            top = pdf.get_y() + 2
+            n = len(timeline)
+            slot = chart_w / n
+            bar_w = min(max(1.0, slot * 0.7), 14.0)
+            for i, bucket in enumerate(timeline):
+                x = x0 + i * slot + (slot - bar_w) / 2
+                y = top + chart_h
+                for key, color, _label in segments:
+                    count = bucket.get(key, 0) or 0
+                    if count:
+                        h = chart_h * count / peak
+                        y -= h
+                        pdf.set_fill_color(*color)
+                        pdf.rect(x, y, bar_w, h, style="F")
+            pdf.set_y(top + chart_h + 1)
+            # Legend
+            lx = x0
+            pdf.set_font("Helvetica", "", 9)
+            for _key, color, label in segments:
+                pdf.set_fill_color(*color)
+                pdf.rect(lx, pdf.get_y() + 1, 3, 3, style="F")
+                pdf.set_xy(lx + 4, pdf.get_y())
+                pdf.cell(18, 5, label)
+                lx += 24
+            pdf.set_y(pdf.get_y() + 6)
+            line(f"Totals: {sum(b.get('critical', 0) or 0 for b in timeline)} critical, "
+                 f"{sum(b.get('error', 0) or 0 for b in timeline)} errors, "
+                 f"{sum(b.get('warn', 0) or 0 for b in timeline)} warnings "
+                 f"across {n} buckets (peak bucket: {peak})", size=9)
+            if n <= 12:
+                for bucket in timeline:
+                    line(f"{bucket.get('label', '')}: "
+                         f"{bucket.get('critical', 0)} critical, "
+                         f"{bucket.get('error', 0)} errors, "
+                         f"{bucket.get('warn', 0)} warnings", size=10)
+        else:
+            for bucket in timeline:
+                line(f"{bucket.get('label', '')}: "
+                     f"{bucket.get('critical', 0)} critical, "
+                     f"{bucket.get('error', 0)} errors, "
+                     f"{bucket.get('warn', 0)} warnings", size=10)
 
     # All issues
     if sorted_issues:
