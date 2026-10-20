@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from test_account_migrations import migrated_engine  # noqa: F401  (fixture dependency of env)
 from test_phase2a_regressions import env  # noqa: F401  (fixture, same pattern as test_business_rule_fixes.py)
 from app.sample_data import SAMPLE_LOG
 
