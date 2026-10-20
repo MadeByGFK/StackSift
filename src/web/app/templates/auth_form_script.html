@@ -77,4 +77,67 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
     });
   }
 })();
+
+(function() {
+  const forms = document.querySelectorAll('form[action$="/pdf"]');
+  forms.forEach(form => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      let response;
+      try {
+        response = await fetch(form.action, {
+          method: 'POST', credentials: 'same-origin', body: new FormData(form),
+        });
+        if (response.ok) {
+          const blob = await response.blob();
+          const disposition = response.headers.get('content-disposition') || 'attachment; filename=report.pdf';
+          const filename = disposition.match(/filename="?([^"]+)"?/)[1];
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          window.URL.revokeObjectURL(url);
+        } else {
+          const result = await response.json();
+          const error = result.error || 'Export failed. Please try again.';
+          const old = document.getElementById('error-modal');
+          if (old) old.remove();
+          const modal = document.createElement('div');
+          modal.id = 'error-modal';
+          modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;';
+          const card = document.createElement('div');
+          card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
+          const msg = document.createElement('p');
+          msg.style.cssText = 'margin:0 0 1rem 0;';
+          msg.textContent = error;
+          card.appendChild(msg);
+          if (error.includes('credits')) {
+            const note = document.createElement('p');
+            note.style.cssText = 'margin:0 0 1rem 0;color:#9db1cc;font-size:0.9rem;';
+            note.textContent = 'PDF export costs 2 credits.';
+            card.appendChild(note);
+          }
+          const close = document.createElement('button');
+          close.style.cssText = 'width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;';
+          close.textContent = 'Close';
+          close.addEventListener('click', () => modal.remove());
+          card.appendChild(close);
+          modal.appendChild(card);
+          modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+          document.body.appendChild(modal);
+          document.addEventListener('keydown', function esc(e) {
+            if (e.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', esc); }
+          });
+        }
+      } catch (_) {
+        button.disabled = false;
+      }
+    });
+  });
+})();
 </script>
