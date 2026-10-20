@@ -13,11 +13,32 @@ from io import BytesIO
 NAVY = (30, 42, 74)
 GRAY = (100, 100, 100)
 BLACK = (0, 0, 0)
+# Preferred: the manifest already carries the health color token
+# (determine_health returns red/yellow/green/gray). Label mapping is a
+# fallback for legacy manifests that only have a label.
 HEALTH_COLORS = {
+    "red": (185, 28, 28),
+    "yellow": (217, 119, 6),
+    "green": (22, 163, 74),
+    "gray": (100, 100, 100),
+}
+HEALTH_LABEL_COLORS = {
     "Critical": (185, 28, 28),
     "Warning": (217, 119, 6),
     "Healthy": (22, 163, 74),
+    "Elevated Incident Activity": (185, 28, 28),
+    "Increased Error Activity": (217, 119, 6),
+    "No Escalation Detected": (22, 163, 74),
+    "No Significant Issues Detected": (22, 163, 74),
 }
+
+
+def _health_color(health: dict) -> tuple:
+    return (
+        HEALTH_COLORS.get((health.get("color") or "").lower())
+        or HEALTH_LABEL_COLORS.get(health.get("label", ""))
+        or BLACK
+    )
 MAX_ISSUES = 100
 
 
@@ -102,7 +123,7 @@ def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
         heading("Summary")
         label = health.get("label", "Unknown")
         pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(*HEALTH_COLORS.get(label, BLACK))
+        pdf.set_text_color(*_health_color(health))
         pdf.cell(0, 8, _s(f"Health: {label}"), new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(*BLACK)
         if data.get("first_seen") and data.get("last_seen"):
