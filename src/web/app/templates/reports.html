@@ -148,7 +148,7 @@
 
   {% if total_pages > 1 %}
   <nav class="pager" aria-label="Pagination">
-    <span class="label">Page <strong>{{ page }}</strong> of <strong>{{ total_pages }}</strong></span>
+    <span class="label">Page {{ page }} of {{ total_pages }}</span>
     <div class="btns">
       {% if page > 1 %}
       <a href="/reports?page={{ page - 1 }}" class="btn btn-ghost">← Previous</a>
