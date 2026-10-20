@@ -13,3 +13,4 @@ psycopg2-binary>=2.9
 # This eliminates Railway pip-cache staleness as a deployment risk.
 
 PyJWT[crypto]>=2.10,<3
+fpdf2>=2.7

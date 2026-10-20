@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from app.db import get_db
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -653,3 +654,247 @@ async def credits_balance(request: Request):
         return JSONResponse(summary)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Phase 2B: Report history + PDF export
+# ---------------------------------------------------------------------------
+
+@app.get("/reports", response_class=HTMLResponse)
+async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
+    """List the current user's analysis reports (7-day retention). Paginated: 20 per page."""
+    from fastapi.responses import RedirectResponse
+    from app import auth as auth_helpers
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    _user = session.user
+    _csrf = session.csrf_token
+    from app import models
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    per_page = 20
+    page = max(1, page)
+    offset = (page - 1) * per_page
+    base_q = db.query(models.Result).filter(
+        models.Result.user_id == _user.id,
+        models.Result.type == "analysis",
+        models.Result.expires_at > now,
+        models.Result.deleted_at.is_(None),
+    )
+    total = base_q.count()
+    results = base_q.order_by(models.Result.created_at.desc()).offset(offset).limit(per_page).all()
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    reports = []
+    for r in results:
+        try:
+            manifest = json.loads(r.storage_manifest)
+            filename = manifest.get("filename", "Unknown file")
+        except (json.JSONDecodeError, TypeError):
+            filename = "Unknown file"
+        reports.append({
+            "id": str(r.id),
+            "filename": filename,
+            "created_at": r.created_at,
+            "expires_at": r.expires_at,
+        })
+    return templates.TemplateResponse(request, "reports.html", {
+        "reports": reports,
+        "current_user": _user,
+        "csrf_token": _csrf,
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+    })
+
+
+@app.get("/reports/{result_id}", response_class=HTMLResponse)
+async def report_view(request: Request, result_id: str, db=Depends(get_db)):
+    """View a specific past analysis report (ownership-checked, analysis only)."""
+    import uuid as _uuid
+    from fastapi.responses import RedirectResponse, JSONResponse
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    _user = session.user
+    _csrf = session.csrf_token
+    from app import models
+    from datetime import datetime, timezone
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+    result = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == _user.id,
+        models.Result.type == "analysis",
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not result:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    try:
+        data = credits_helpers.result_payload(
+            result, user_id=_user.id,
+            operation_id=result.operation_id,
+            free_request_id=result.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+    data["current_user"] = _user
+    data["csrf_token"] = _csrf
+    data["report_id"] = str(result.id)
+    data["is_historical"] = True
+    # Older manifests predate the elapsed field; the template requires it.
+    data.setdefault("elapsed", 0.0)
+    return templates.TemplateResponse(request, "report.html", data)
+
+
+@app.post("/reports/{result_id}/pdf")
+async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)):
+    """Export a report as PDF. Costs 2 credits (COST_PDF)."""
+    import uuid as _uuid
+    import hmac
+    import base64 as _b64
+    from fastapi.responses import JSONResponse, Response
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from datetime import datetime, timezone
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+
+    form = await request.form()
+    csrf_token = form.get("csrf_token", "")
+    if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+        return JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
+
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+
+    result = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+        models.Result.type == "analysis",
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not result:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+    base_idempotency_key = f"pdf-{result_id}"
+    request_hash = result.integrity_digest
+    existing_op = db.query(models.Operation).filter(
+        models.Operation.user_id == user.id,
+        models.Operation.type == "pdf",
+        models.Operation.idempotency_key == base_idempotency_key,
+    ).first()
+    # For failed/expired operations, use a new idempotency key so the retry
+    # gets a fresh operation identity (the old credits were released).
+    # The unique constraint on (user_id, type, idempotency_key) ensures safety.
+    idempotency_key = base_idempotency_key
+    if existing_op and existing_op.status in ("failed", "expired"):
+        idempotency_key = f"{base_idempotency_key}-retry-{_uuid.uuid4().hex[:8]}"
+        existing_op = None  # Force fresh admission with new key
+    if existing_op:
+        if existing_op.status == "completed" and existing_op.result_id:
+            # Validate the saved PDF result before replaying (integrity, ownership, expiry)
+            pdf_result = db.get(models.Result, existing_op.result_id)
+            if pdf_result:
+                try:
+                    manifest = credits_helpers.result_payload(
+                        pdf_result, user_id=user.id, operation_id=existing_op.id,
+                    )
+                    pdf_bytes = _b64.b64decode(manifest["pdf_base64"])
+                    filename = manifest.get("filename", "report")
+                    return Response(
+                        content=pdf_bytes,
+                        media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+                    )
+                except (credits_helpers.AdmissionError, KeyError, ValueError):
+                    # Stored PDF is invalid or expired; don't attempt to reuse the
+                    # completed operation's idempotency key. Return a controlled error.
+                    return JSONResponse(
+                        {"error": "Previously generated PDF is no longer available. Please generate a new export."},
+                        status_code=410,
+                    )
+        elif existing_op.status == "reserved":
+            # Another request is already generating this PDF; don't hijack its operation
+            return JSONResponse(
+                {"error": "PDF export already in progress. Please wait and try again."},
+                status_code=409,
+            )
+        # For failed/expired operations, fall through to admit a fresh one
+
+    consent = credits_helpers.create_consent(
+        db, user_id=user.id, operation_type="pdf",
+        input_hash=request_hash, max_cost=credits_helpers.COST_PDF,
+    )
+    db.flush()
+
+    worker_id = f"pdf-export-{_uuid.uuid4().hex[:8]}"
+    try:
+        op = credits_helpers.admit_paid_operation(
+            db, user_id=user.id, operation_type="pdf",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            cost=credits_helpers.COST_PDF, consent_id=consent.id,
+            worker_id=worker_id,
+        )
+        db.commit()
+    except credits_helpers.InsufficientCredits:
+        db.rollback()
+        return JSONResponse({"error": "Insufficient credits. PDF export costs 2 credits."}, status_code=402)
+    except credits_helpers.AdmissionError as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+    from app.pdf_export import generate_report_pdf
+    try:
+        # Validate source analysis result integrity before generating PDF
+        manifest_data = credits_helpers.result_payload(
+            result, user_id=user.id,
+            operation_id=result.operation_id,
+            free_request_id=result.free_request_id,
+        )
+        filename = manifest_data.get("filename", "report")
+        pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
+    except Exception as e:
+        try:
+            credits_helpers.release_operation(db, op.id, worker_id, str(e)[:200])
+            db.commit()
+        except Exception:
+            db.rollback()
+        return JSONResponse({"error": "PDF generation failed"}, status_code=500)
+
+    try:
+        pdf_result = credits_helpers.store_pdf_result(db, user.id, op.id, pdf_bytes, filename)
+        credits_helpers.complete_operation(
+            db, op.id, worker_id, result_id=pdf_result.id,
+            lease_generation=op.lease_generation,
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        try:
+            credits_helpers.release_operation(db, op.id, worker_id, str(e)[:200])
+            db.commit()
+        except Exception:
+            pass
+        return JSONResponse({"error": "Failed to store PDF"}, status_code=500)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+    )

@@ -13,8 +13,8 @@
   <header class="top">
     <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
     <nav class="nav-links">
-      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
       {% if current_user %}
+        <a href="/reports">My Reports</a>
         <a href="/settings">Settings</a>
         <form method="post" action="/auth/logout" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -45,6 +45,14 @@
     <div>
       <span class="badge {{ health.color }}">{{ health.label }}</span>
     </div>
+    {% if current_user and report_id and not is_demo %}
+    <div class="report-actions" style="margin-top:1rem">
+      <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
+      </form>
+    </div>
+    {% endif %}
   </section>
 
   {% if complexity_truncated %}

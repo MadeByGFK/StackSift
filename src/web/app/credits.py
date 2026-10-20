@@ -648,6 +648,39 @@ def store_result(db, user_id, operation_id, data):
     return result
 
 
+
+def store_pdf_result(db, user_id, operation_id, pdf_bytes: bytes, filename: str):
+    """Store a generated PDF as a Result of type 'pdf'.
+
+    The PDF bytes are stored in the storage_manifest as base64.
+    Follows the same pattern as store_result.
+    """
+    import base64 as _b64
+    op, _, _ = _lock_operation(db, operation_id)
+    if op.status != "reserved":
+        raise AdmissionError("operation is no longer reserved")
+    if op.type != "pdf":
+        raise AdmissionError("operation is not a PDF export")
+    manifest = json.dumps({
+        "filename": filename,
+        "pdf_base64": _b64.b64encode(pdf_bytes).decode("ascii"),
+        "source": "pdf_export",
+    })
+    now = _utcnow()
+    result = models.Result(
+        user_id=user_id,
+        operation_id=operation_id,
+        type="pdf",
+        storage_manifest=manifest,
+        integrity_digest=hash_input(manifest.encode()),
+        byte_count=len(manifest.encode()),
+        ready_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    db.add(result)
+    db.flush()
+    return result
+
 def _settle_complete(db, op, grants, result):
     result_payload(result, user_id=op.user_id, operation_id=op.id)
     allocations = db.execute(select(models.OperationAllocation).where(
