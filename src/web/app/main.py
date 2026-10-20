@@ -257,7 +257,7 @@ async def demo(request: Request):
 @app.post("/analyze")
 async def analyze(
     request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     output: str = Form("html"),
     request_id: str = Form(""),
 ):
@@ -273,7 +273,7 @@ async def analyze(
             headers=headers or {},
         )
 
-    if not file.filename:
+    if not file or not file.filename:
         return error("Please choose a file first.")
 
     suffix = Path(file.filename).suffix.lower()
