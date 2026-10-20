@@ -112,16 +112,15 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;';
           const card = document.createElement('div');
           card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
+          const insufficient = /insufficient credits/i.test(error);
+          const title = document.createElement('div');
+          title.style.cssText = 'font-size:1.1rem;font-weight:600;margin:0 0 0.75rem 0;';
+          title.textContent = insufficient ? 'Insufficient Credits' : 'Export Failed';
+          card.appendChild(title);
           const msg = document.createElement('p');
-          msg.style.cssText = 'margin:0 0 1rem 0;';
-          msg.textContent = error;
+          msg.style.cssText = 'margin:0 0 1rem 0;color:#9db1cc;';
+          msg.textContent = insufficient ? 'PDF export costs 2 credits.' : error;
           card.appendChild(msg);
-          if (error.includes('credits')) {
-            const note = document.createElement('p');
-            note.style.cssText = 'margin:0 0 1rem 0;color:#9db1cc;font-size:0.9rem;';
-            note.textContent = 'PDF export costs 2 credits.';
-            card.appendChild(note);
-          }
           const close = document.createElement('button');
           close.style.cssText = 'width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;';
           close.textContent = 'Close';
