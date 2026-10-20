@@ -4,6 +4,10 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from test_account_migrations import migrated_engine  # noqa: F401  (fixture dependency of env)
+from test_phase2a_regressions import env  # noqa: F401  (fixture, same pattern as test_business_rule_fixes.py)
+from app.sample_data import SAMPLE_LOG
+
 
 def _signup_and_verify(auth_env, email=None):
     """Create a verified user via the real email-verification flow.
@@ -457,3 +461,34 @@ def test_pdf_export_retry_after_failure(auth_env):
         assert new_ops[0].idempotency_key.startswith(f"pdf-{rid}-retry-")
     finally:
         db.close()
+
+
+def test_fresh_analysis_result_shows_pdf_export_button(env):
+    """Regression: the page shown right after analyzing a log must offer PDF
+    export, not just the saved-report page. The export form must point at the
+    Result created by that analysis."""
+    from app import models
+
+    request_id = uuid.uuid4().hex
+    resp = env.client.post(
+        "/analyze",
+        files={"file": ("test.log", SAMPLE_LOG.encode())},
+        data={"request_id": request_id, "output": "html"},
+    )
+    assert resp.status_code == 200, resp.text[:300]
+    with env.sessions() as db:
+        result = db.query(models.Result).filter(
+            models.Result.user_id == env.uid).one()
+        rid = str(result.id)
+    assert f"/reports/{rid}/pdf" in resp.text
+    assert "Export PDF (2 credits)" in resp.text
+
+    # Replay of the same request (no re-analysis) shows the button too.
+    resp2 = env.client.post(
+        "/analyze",
+        files={"file": ("test.log", SAMPLE_LOG.encode())},
+        data={"request_id": request_id, "output": "html"},
+    )
+    assert resp2.status_code == 200, resp2.text[:300]
+    assert f"/reports/{rid}/pdf" in resp2.text
+    assert len(env.calls) == 1  # replay served the stored result, no re-run

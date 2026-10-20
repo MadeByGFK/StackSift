@@ -511,7 +511,7 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
     )
 
 
-def _analysis_response(request, status, data=None, message=None, *, output="html", filename="analysis.log"):
+def _analysis_response(request, status, data=None, message=None, *, output="html", filename="analysis.log", report_id=None):
     user, csrf = _get_current_user_optional(request)
     if data is None:
         return templates.TemplateResponse(request, "index.html", {
@@ -521,6 +521,8 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
         return PlainTextResponse(render_text_report(data), headers={
             "Content-Disposition": f'attachment; filename="{Path(filename).stem}-stacksift.txt"'})
     data = dict(data, current_user=user, csrf_token=csrf)
+    if report_id is not None:
+        data["report_id"] = report_id
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
@@ -548,7 +550,10 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             existing = A.lookup(db, user_id, anon, key, digest, _client_ip(request))
             if existing:
                 status, data, message = A.replay(db, existing, user_id)
-                return _analysis_response(request, status, data, message, output=output, filename=filename)
+                rid = None
+                if status == 200 and data is not None and user_id is not None and getattr(existing, "result_id", None):
+                    rid = str(existing.result_id)
+                return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
             if consent_id:
                 C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1)
                 pending = _load_paid_pending(str(consent_id))
@@ -569,7 +574,10 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             db.commit()
             if not created:
                 status, data, message = A.replay(db, item, user_id)
-                return _analysis_response(request, status, data, message, output=output, filename=filename)
+                rid = None
+                if status == 200 and data is not None and user_id is not None and getattr(item, "result_id", None):
+                    rid = str(item.result_id)
+                return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
         except C.InsufficientCredits:
             db.rollback()
             return _analysis_response(request, 402, message="Insufficient Power-Up credits.")
@@ -580,6 +588,7 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             db.rollback()
             logging.getLogger(__name__).exception("Analysis admission failed")
             return _analysis_response(request, 503, message="Could not start analysis. Please retry this request.")
+    result_id = None
     try:
         data = analyze_upload(filename, content)
         failure = data.get("message", "Analysis failed.") if isinstance(data, dict) and "error" in data else None
@@ -590,8 +599,11 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 else:
                     result = C.store_result(db, user_id, identity, data)
                     C.complete_operation(db, identity, worker, result.id)
+                    result_id = result.id
             else:
-                A.finish_free(db, identity, data, failure)
+                settled = A.finish_free(db, identity, data, failure)
+                if settled is not None:
+                    result_id = settled.id
             db.commit()
     except Exception:
         logging.getLogger(__name__).exception("Analysis execution or settlement failed")
@@ -610,7 +622,8 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
         if consent_id:
             _delete_paid_pending(str(consent_id))
     response = _analysis_response(request, 400 if failure else 200, None if failure else data,
-        failure, output=output, filename=filename)
+        failure, output=output, filename=filename,
+        report_id=str(result_id) if (result_id is not None and user_id is not None and not failure) else None)
     if cookie:
         response.set_cookie("__Host-stacksift_analysis", cookie, secure=True, httponly=True, samesite="lax", max_age=7*86400)
     response.headers["X-Analysis-Request-ID"] = key

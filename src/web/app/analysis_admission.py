@@ -109,6 +109,7 @@ def finish_free(db, key, data=None, failure=None):
         .execution_options(populate_existing=True)).scalar_one()
     if fr.status != 'in_progress':
         raise C.AdmissionError('request already settled')
+    result = None
     if failure:
         fr.status, fr.failure_code = 'failed', failure
         fr.execution_generation += 1
@@ -122,3 +123,4 @@ def finish_free(db, key, data=None, failure=None):
         db.flush()
         fr.status, fr.result_id = 'completed', result.id
     db.flush()
+    return result
