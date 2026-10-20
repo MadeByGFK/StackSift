@@ -5,16 +5,100 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>My Reports — StackSift</title>
 <meta name="robots" content="noindex">
-<link rel="stylesheet" href="/static/style.css?v=3">
+<style>
+  :root{
+    --bg:#0a1830; --panel:#10254a; --border:#274067; --text:#ffffff;
+    --muted:#9db1cc; --accent:#d4af37; --radius:10px;
+    --panel-hover:#132c56; --accent-soft:rgba(212,175,55,.12);
+    --ok:#4fbf8a; --warn:#e0a83a; --err:#e06363;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  a{color:inherit;text-decoration:none}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* Nav */
+  .nav{border-bottom:1px solid var(--border);background:rgba(10,24,48,.92);position:sticky;top:0;backdrop-filter:blur(6px);z-index:10}
+  .nav-inner{max-width:960px;margin:0 auto;padding:0 24px;height:64px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+  .logo{font-size:20px;font-weight:700;letter-spacing:-.02em}
+  .logo span{color:var(--accent)}
+  .nav-links{display:flex;align-items:center;gap:6px;font-size:14px}
+  .nav-links a{color:var(--muted);padding:8px 12px;border-radius:8px;transition:color .15s,background .15s}
+  .nav-links a:hover{color:var(--text);background:var(--panel)}
+  .nav-links a.active{color:var(--text)}
+  .nav-links a.active::after{content:"";display:block;height:2px;background:var(--accent);border-radius:2px;margin-top:4px}
+  .credits{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid var(--border);border-radius:999px;color:var(--accent);font-size:13px;font-weight:600;margin:0 6px}
+  .credits::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--accent)}
+
+  /* Page */
+  main{max-width:960px;margin:0 auto;padding:48px 24px 72px}
+  .page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:28px;padding-bottom:24px;border-bottom:1px solid var(--border)}
+  h1{font-size:30px;font-weight:700;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin-top:6px}
+  .count{color:var(--muted);font-size:13px;white-space:nowrap}
+  .count strong{color:var(--text);font-weight:600}
+
+  /* Cards */
+  .list{display:flex;flex-direction:column;gap:12px;list-style:none}
+  .card{display:flex;align-items:center;gap:18px;padding:20px 22px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);transition:border-color .15s,background .15s,transform .15s}
+  .card:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--border));background:var(--panel-hover)}
+  .icon{position:relative;flex:none;width:44px;height:44px;border-radius:8px;background:var(--bg);border:1px solid var(--border);display:grid;place-items:center;color:var(--muted)}
+  .icon svg{width:20px;height:20px}
+  .dot{position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--panel)}
+  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.err{background:var(--err)}
+  .info{flex:1;min-width:0}
+  .name{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;color:var(--muted);font-size:13px}
+  .sep{opacity:.5}
+  .expiry{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:rgba(157,177,204,.08);font-size:12px}
+  .expiry.soon{color:var(--warn);background:rgba(224,168,58,.1)}
+  .actions{display:flex;align-items:center;gap:8px;flex:none}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;padding:0 16px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:background .15s,color .15s,border-color .15s;font-family:inherit;white-space:nowrap}
+  .btn svg{width:15px;height:15px}
+  .btn-ghost{color:var(--text);border-color:var(--border);background:transparent}
+  .btn-ghost:hover{border-color:var(--muted);background:rgba(255,255,255,.03)}
+  .btn-primary{background:var(--accent);color:var(--bg)}
+  .btn-primary:hover{background:#e0bd4a}
+  .btn-primary .cost{font-weight:500;opacity:.75}
+
+  /* Pagination */
+  .pager{display:flex;align-items:center;justify-content:space-between;margin-top:28px}
+  .pager .label{color:var(--muted);font-size:14px}
+  .pager .label strong{color:var(--text)}
+  .pager .btns{display:flex;gap:8px}
+  .btn[disabled]{opacity:.4;cursor:not-allowed}
+
+  /* Empty */
+  .empty{text-align:center;padding:64px 24px;border:1px dashed var(--border);border-radius:var(--radius);background:color-mix(in srgb,var(--panel) 50%,transparent)}
+  .empty .icon{margin:0 auto 18px;width:56px;height:56px;color:var(--accent);background:var(--accent-soft);border-color:transparent}
+  .empty h2{font-size:18px;font-weight:600}
+  .empty p{color:var(--muted);font-size:14px;margin-top:6px}
+  .empty .btn{margin-top:22px}
+
+  @media (max-width:640px){
+    .nav-inner{padding:0 16px}
+    .nav-links a{padding:8px}
+    .nav-links .hide-sm{display:none}
+    main{padding:32px 16px 56px}
+    .page-head{flex-direction:column;align-items:flex-start}
+    h1{font-size:26px}
+    .card{flex-wrap:wrap;padding:18px}
+    .info{flex-basis:calc(100% - 62px)}
+    .actions{width:100%;padding-top:14px;border-top:1px solid var(--border)}
+    .actions .btn{flex:1}
+  }
+  .nav-logout{background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;padding:8px 12px;font-family:inherit;border-radius:8px;transition:color .15s,background .15s}
+  .nav-logout:hover{color:var(--text);background:var(--panel)}
+</style>
 </head>
 <body>
-<div class="wrap">
 
-  <header class="top">
-    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
+<header class="nav">
+  <div class="nav-inner">
+    <a href="/" class="logo">Stack<span>Sift</span></a>
     <nav class="nav-links">
       {% if current_user %}
-        <a href="/reports">My Reports</a>
+        <a href="/reports" class="active">My Reports</a>
         <a href="/settings">Settings</a>
         <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -22,57 +106,74 @@
         </form>
       {% else %}
         <a href="/credits">Credits</a>
-        <a href="/login" class="btn-login">Log in</a>
-        <a href="/signup" class="btn-signup">Sign up</a>
+        <a href="/login">Log in</a>
+        <a href="/signup">Sign up</a>
       {% endif %}
     </nav>
-  </header>
+  </div>
+</header>
 
-  <section class="report-head">
-    <h2>My Reports</h2>
-    <div class="meta">Your analysis reports from the last 7 days.</div>
-  </section>
+<main>
+  <div class="page-head">
+    <div>
+      <h1>My Reports</h1>
+      <p class="sub">Your analysis reports from the last 7 days.</p>
+    </div>
+    <p class="count"><strong>{{ total }}</strong> reports</p>
+  </div>
 
   {% if reports %}
-  <div class="reports-list">
+  <ul class="list">
     {% for report in reports %}
-    <div class="report-card">
-      <div class="report-info">
-        <div class="report-filename">{{ report.filename }}</div>
-        <div class="report-meta">
-          Analyzed {{ report.created_at.strftime('%Y-%m-%d %H:%M') }} ·
-          Expires {{ report.expires_at.strftime('%Y-%m-%d') }}
+    <li class="card">
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot" style="background:var(--muted)"></span></div>
+      <div class="info">
+        <div class="name">{{ report.filename }}</div>
+        <div class="meta">
+          <span>Analyzed {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
+          <span>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
+          <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}">Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
         </div>
       </div>
-      <div class="report-actions">
-        <a href="/reports/{{ report.id }}" class="btn-small">View</a>
+      <div class="actions">
+        <a href="/reports/{{ report.id }}" class="btn btn-ghost">View</a>
         <form method="post" action="/reports/{{ report.id }}/pdf" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="btn-small" title="Export as PDF (2 credits)">PDF (2 credits)</button>
+          <button type="submit" class="btn btn-primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>PDF <span class="cost">(2 credits)</span></button>
         </form>
       </div>
-    </div>
+    </li>
     {% endfor %}
-  </div>
+  </ul>
+
   {% if total_pages > 1 %}
-  <div class="pagination" style="margin-top:1.5rem;text-align:center">
-    {% if page > 1 %}
-    <a href="/reports?page={{ page - 1 }}" class="btn-small">&larr; Previous</a>
-    {% endif %}
-    <span style="margin:0 1rem">Page {{ page }} of {{ total_pages }} ({{ total }} reports)</span>
-    {% if page < total_pages %}
-    <a href="/reports?page={{ page + 1 }}" class="btn-small">Next &rarr;</a>
-    {% endif %}
-  </div>
+  <nav class="pager" aria-label="Pagination">
+    <span class="label">Page {{ page }} of {{ total_pages }}</span>
+    <div class="btns">
+      {% if page > 1 %}
+      <a href="/reports?page={{ page - 1 }}" class="btn btn-ghost">← Previous</a>
+      {% else %}
+      <button class="btn btn-ghost" disabled>← Previous</button>
+      {% endif %}
+      {% if page < total_pages %}
+      <a href="/reports?page={{ page + 1 }}" class="btn btn-ghost">Next →</a>
+      {% else %}
+      <button class="btn btn-ghost" disabled>Next →</button>
+      {% endif %}
+    </div>
+  </nav>
   {% endif %}
   {% else %}
-  <div class="empty-state">
-    <p>No reports yet. <a href="/">Analyze a log file</a> to get started.</p>
-    <p class="meta">Reports are kept for 7 days after analysis.</p>
+  <div class="empty">
+    <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M12 11v6M9 14h6"/></svg></div>
+    <h2>No reports yet. Analyze a log file to get started.</h2>
+    <p>Reports are kept for 7 days after analysis.</p>
+    <a href="/" class="btn btn-primary">Analyze a log file</a>
   </div>
   {% endif %}
 
-</div>
+</main>
+
 {% include 'auth_form_script.html' %}
 </body>
 </html>
