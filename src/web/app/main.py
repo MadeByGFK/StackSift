@@ -693,11 +693,13 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             filename = manifest.get("filename", "Unknown file")
         except (json.JSONDecodeError, TypeError):
             filename = "Unknown file"
+        from app.credits import _as_aware
         reports.append({
             "id": str(r.id),
             "filename": filename,
             "created_at": r.created_at,
             "expires_at": r.expires_at,
+            "days_left": max(0, (_as_aware(r.expires_at) - now).days),
         })
     return templates.TemplateResponse(request, "reports.html", {
         "reports": reports,
