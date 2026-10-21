@@ -1,4 +1,8 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;450;500;550;600;650;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
 :root {
+  --font-body: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-code: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --bg: #0a1830;
   --panel: #10254a;
   --border: #274067;
@@ -17,7 +21,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-family: var(--font-body);
   line-height: 1.55;
 }
 
@@ -101,10 +105,12 @@ button {
 code {
   background: #081426; border: 1px solid var(--border); border-radius: 6px;
   padding: 2px 6px; font-size: 13px; color: var(--text);
+  font-family: var(--font-code);
 }
 pre.format {
   background: #081426; border: 1px solid var(--border); border-radius: 8px;
   padding: 14px; font-size: 13px; overflow-x: auto; color: var(--text);
+  font-family: var(--font-code);
 }
 
 footer {
