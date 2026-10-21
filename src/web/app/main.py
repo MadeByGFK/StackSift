@@ -226,6 +226,30 @@ async def pricing_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/credits", status_code=301)
 
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+async def privacy(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request, "privacy.html", {"current_user": _user, "csrf_token": _csrf}
+    )
+
+
+@app.get("/terms", response_class=HTMLResponse, include_in_schema=False)
+async def terms(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request, "terms.html", {"current_user": _user, "csrf_token": _csrf}
+    )
+
+
+@app.get("/support", response_class=HTMLResponse, include_in_schema=False)
+async def support(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request, "support.html", {"current_user": _user, "csrf_token": _csrf}
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

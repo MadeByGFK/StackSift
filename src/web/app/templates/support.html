@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support — StackSift</title>
+<meta name="description" content="StackSift support: how to report bugs and get help.">
+<link rel="stylesheet" href="/static/style.css?v=4">
+<style>
+.doc { max-width: 720px; margin: 2.5rem auto; padding: 0 1rem; }
+.doc h1 { color: #fff; font-size: 2rem; margin: 0 0 0.5rem 0; }
+.doc .updated { color: #a0aec0; font-size: 0.85rem; margin: 0 0 2rem 0; }
+.doc h2 { color: #fff; font-size: 1.25rem; margin: 2rem 0 0.75rem 0; }
+.doc p, .doc li { color: #c8d2e0; font-size: 0.95rem; line-height: 1.7; }
+.doc ul { padding-left: 1.25rem; }
+.doc li { margin-bottom: 0.5rem; }
+.doc a { color: #ecc94b; }
+.doc-footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #2d3d6b; font-size: 0.85rem; color: #a0aec0; text-align: center; }
+.doc-footer a { color: #ecc94b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">stacksift<span>.</span></a></div>
+    <nav class="nav-links">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+      {% else %}
+        <a href="/credits">Credits</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <div class="doc">
+    <h1>Support</h1>
+    <p class="updated">How to get help with StackSift.</p>
+
+    <h2>Before reporting</h2>
+    <ul>
+      <li>Read the message on the page — expired reports (older than 7 days) and oversized uploads (over 10&nbsp;MB / 50,000 lines) explain most errors.</li>
+      <li>Retrying a failed analysis never costs you a credit: credits are deducted only after a successful operation.</li>
+    </ul>
+
+    <h2>Report a bug</h2>
+    <ul>
+      <li>Open an issue at <a href="https://github.com/MadeByGFK/StackSift/issues">github.com/MadeByGFK/StackSift/issues</a>.</li>
+      <li>Include: what you were doing, the exact error message, the file type (plain text, JSON-lines), and the browser or CLI version.</li>
+      <li>Please redact secrets yourself before sharing any log excerpt — automatic redaction is best effort and can miss things.</li>
+    </ul>
+
+    <h2>Billing</h2>
+    <ul>
+      <li>Credit purchases are not enabled yet — the <a href="/credits">credits page</a> describes how they will work at launch.</li>
+      <li>All credit sales will be final and non-refundable, subject to applicable legal obligations. If you are ever charged in error, open a GitHub issue with your account email and it will be reviewed manually.</li>
+    </ul>
+
+    <div class="doc-footer">
+      StackSift · a Goodfolk Digital project ·
+      <a href="/privacy">Privacy</a> ·
+      <a href="/terms">Terms</a> ·
+      <a href="/support">Support</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

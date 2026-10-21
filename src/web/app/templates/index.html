@@ -137,7 +137,7 @@ document.addEventListener('DOMContentLoaded', function() {
       <ul>
         <li>Uploads use <strong>temporary storage</strong> during processing.</li>
         <li>Recognized secret patterns are <strong>redacted</strong> before analysis; other sensitive data may appear in reports.</li>
-        <li>We currently keep no upload archive and don't use uploads for training. Operational request logs are recorded. (Durable results storage is planned for a future release.)</li>
+        <li>Analysis reports are <strong>stored for 7 days</strong> and then expire. We keep no upload archive and don't use uploads for training. Operational request logs are recorded.</li>
         <li>No account needed for analysis — optional accounts use a <strong>session cookie</strong> to stay signed in. File contents are not logged or retained after processing.</li>
       </ul>
     </div>
@@ -158,7 +158,10 @@ document.addEventListener('DOMContentLoaded', function() {
   </div>
 
   <footer>
-    StackSift · a <a href="https://goodfolkdigital.com" style="color:var(--accent)">Goodfolk Digital</a> project · Uploads are processed using temporary storage.
+    StackSift · a <a href="https://goodfolkdigital.com" style="color:var(--accent)">Goodfolk Digital</a> project ·
+    <a href="/privacy" style="color:var(--accent)">Privacy</a> ·
+    <a href="/terms" style="color:var(--accent)">Terms</a> ·
+    <a href="/support" style="color:var(--accent)">Support</a>
   </footer>
 
 </div>
