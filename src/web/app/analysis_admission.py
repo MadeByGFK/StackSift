@@ -116,7 +116,8 @@ def finish_free(db, key, data=None, failure=None):
     else:
         raw = json.dumps(data, default=str)
         result = M.Result(user_id=fr.user_id, anonymous_owner_hash=fr.anonymous_session_hash,
-            free_request_id=key, type='analysis', storage_manifest=raw,
+            free_request_id=key, type='analysis', severity=C.outcome_severity(data),
+            storage_manifest=raw,
             integrity_digest=C.hash_input(raw.encode()), byte_count=len(raw.encode()),
             ready_at=C._utcnow(), expires_at=C._utcnow()+timedelta(days=7))
         db.add(result)

@@ -298,6 +298,9 @@ class Result(Base):
     operation_id = Column(GUID(), ForeignKey("operations.id"), nullable=True, unique=True)
     free_request_id = Column(String(255), nullable=True, unique=True)
     type = Column(String(30), nullable=False)  # 'analysis' | 'pdf' | 'batch'
+    # Analysis outcome severity at store time: 'ok' | 'warnings' | 'errors'.
+    # NULL = stored before severity existed (renders as the neutral dot).
+    severity = Column(String(10), nullable=True)
     storage_manifest = Column(Text, nullable=False)  # JSON: where/how stored
     integrity_digest = Column(String(64), nullable=False)  # SHA-256 of artifact
     byte_count = Column(BigInteger, nullable=False)

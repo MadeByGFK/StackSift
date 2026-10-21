@@ -48,7 +48,7 @@
   .icon{position:relative;flex:none;width:44px;height:44px;border-radius:8px;background:var(--bg);border:1px solid var(--border);display:grid;place-items:center;color:var(--muted)}
   .icon svg{width:20px;height:20px}
   .dot{position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--panel)}
-  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.err{background:var(--err)}
+  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.err{background:var(--err)} .dot.neutral{background:var(--muted)}
   .info{flex:1;min-width:0}
   .name{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;color:var(--muted);font-size:13px}
@@ -129,7 +129,7 @@
   <ul class="list">
     {% for report in reports %}
     <li class="card">
-      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot" style="background:var(--muted)"></span></div>
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warn{% elif report.severity == 'errors' %} err{% else %} neutral{% endif %}"></span></div>
       <div class="info">
         <div class="name">{{ report.filename }}</div>
         <div class="meta">

@@ -710,6 +710,7 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
         reports.append({
             "id": str(r.id),
             "filename": filename,
+            "severity": r.severity,  # 'ok' | 'warnings' | 'errors' | None (pre-#49 rows)
             "created_at": r.created_at,
             "expires_at": r.expires_at,
             "days_left": max(0, (_as_aware(r.expires_at) - now).days),

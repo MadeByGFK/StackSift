@@ -43,12 +43,14 @@ def _login(auth_env, email, password="TestPass123!x"):
     return resp
 
 
-def _create_result(auth_env, user_id, filename="test.log"):
+def _create_result(auth_env, user_id, filename="test.log", severity=None):
     """Create a Result row using the test DB session.
 
     Builds the manifest with the real analysis service so the stored
     schema matches production exactly (the report template requires the
     full schema: level_counts, sorted_issues, timeline, ...).
+
+    severity=None models pre-#49 rows, which must degrade to the neutral dot.
     """
     from app import models
     from app.service import analyze_upload
@@ -70,6 +72,7 @@ def _create_result(auth_env, user_id, filename="test.log"):
         result = models.Result(
             user_id=user_id,
             type="analysis",
+            severity=severity,
             free_request_id=f"test-{uuid.uuid4().hex}",  # Satisfies ck_result_exactly_one_origin
             storage_manifest=manifest,
             integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
@@ -131,6 +134,25 @@ def test_reports_list_only_own_reports(auth_env):
     assert resp.status_code == 200
     assert "user1.log" in resp.text
     assert "user2.log" not in resp.text
+
+
+def test_reports_list_severity_dots(auth_env):
+    """Issue #49: cards render ok/warn/err dots; legacy NULL rows degrade to neutral."""
+    email, user_id = _signup_and_verify(auth_env)
+    _create_result(auth_env, user_id, "err.log", severity="errors")
+    _create_result(auth_env, user_id, "warn.log", severity="warnings")
+    _create_result(auth_env, user_id, "ok.log", severity="ok")
+    _create_result(auth_env, user_id, "legacy.log", severity=None)  # pre-#49 row
+    _login(auth_env, email)
+    resp = auth_env.client.get("/reports")
+    assert resp.status_code == 200
+    html = resp.text
+    for name in ("err.log", "warn.log", "ok.log", "legacy.log"):
+        assert name in html
+    assert 'class="dot err"' in html
+    assert 'class="dot warn"' in html
+    assert 'class="dot ok"' in html
+    assert 'class="dot neutral"' in html
 
 
 def test_report_view_ownership(auth_env):
