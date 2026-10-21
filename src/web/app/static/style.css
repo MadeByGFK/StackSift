@@ -25,6 +25,9 @@ body {
   line-height: 1.55;
 }
 
+/* Form controls do not inherit the body font in browsers; adopt the brand font explicitly. */
+button, input, select, textarea { font-family: var(--font-body); }
+
 .wrap { max-width: 860px; margin: 0 auto; padding: 0 20px; }
 
 header.top {
