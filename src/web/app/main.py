@@ -106,14 +106,15 @@ burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
 shared_limiter = PostgresRateLimiter(
     burst_max=2, burst_window=60, hourly_max=10, hourly_window=3600
 )
-# ISSUE-67: notify-me signups share the Postgres-backed enforcement so the
-# 10/hour/IP cap holds across processes, but under their own bucket key
-# ("n:" + IP — short prefix because rate_limit_buckets.trusted_ip is
-# String(45)) so signups never consume analysis quota. The burst window is
-# widened to the hourly window, so admit() enforces the hourly cap only —
-# the auth-side notify limit has no burst component.
-notify_limiter = PostgresRateLimiter(
-    burst_max=10, burst_window=3600, hourly_max=10, hourly_window=3600
+# ISSUE-68: checkout-session creation shares the Postgres-backed enforcement
+# so the 5/hour/IP cap holds across processes, under its own bucket key
+# ("c:" + IP — short prefix because rate_limit_buckets.trusted_ip is
+# String(45)) so checkout attempts never consume analysis quota. The burst
+# window is widened to the hourly window, so admit() enforces the hourly
+# cap only — checkout sessions are money-adjacent, so the cap is tighter
+# than the notify-me one this replaces.
+checkout_limiter = PostgresRateLimiter(
+    burst_max=5, burst_window=3600, hourly_max=5, hourly_window=3600
 )
 
 
@@ -224,25 +225,22 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/credits", response_class=HTMLResponse)
 async def credits(request: Request):
-    from app import auth as auth_helpers
-
     _user, _csrf = _get_current_user_optional(request)
-    set_cookie_token = None
-    if not _user:
-        # Anonymous visitors need a CSRF token for the notify-me form
-        # (issue #67). Mirrors the cookie pattern in auth_routes._render.
-        _csrf = request.cookies.get(auth_helpers.CSRF_COOKIE) or auth_helpers.generate_token()
-        if auth_helpers.CSRF_COOKIE not in request.cookies:
-            set_cookie_token = _csrf
-    response = templates.TemplateResponse(
-        request, "pricing.html", {"current_user": _user, "csrf_token": _csrf}
+    from app import stripe_billing
+
+    packs = stripe_billing.packs_for_display()
+    status = request.query_params.get("checkout", "")
+    return templates.TemplateResponse(
+        request,
+        "pricing.html",
+        {
+            "current_user": _user,
+            "csrf_token": _csrf,
+            "packs": packs,
+            "checkout_ready": any(p["ready"] for p in packs),
+            "checkout_status": status if status in ("success", "cancelled") else "",
+        },
     )
-    if set_cookie_token:
-        response.set_cookie(
-            auth_helpers.CSRF_COOKIE, set_cookie_token,
-            secure=True, httponly=True, samesite="lax", path="/",
-        )
-    return response
 
 
 @app.get("/pricing", include_in_schema=False)
@@ -251,27 +249,35 @@ async def pricing_redirect():
     return RedirectResponse(url="/credits", status_code=301)
 
 
-# ISSUE-67 notify-me bridge: REMOVE this endpoint when checkout ships (#68).
-# The collected addresses get exactly one launch email at that point; counts
-# from notify_signups are intent only, never demand evidence (GFK-013 §5.12).
-@app.post("/credits/notify")
-async def credits_notify(
+# ISSUE-68: Stripe Checkout entry point. Test mode only — the billing module
+# refuses live keys outright (live activation is a separate founder gate).
+# Anonymous users cannot buy: they get a 401 pointing at signup/login, and
+# the credits page only renders buy forms for signed-in users.
+@app.post("/credits/checkout")
+async def credits_checkout(
     request: Request,
-    email: str = Form(...),
+    pack_id: str = Form(...),
     csrf_token: str = Form(""),
     db=Depends(get_db),
 ):
     import hmac
+    import logging
+    import os as _os
     from fastapi import HTTPException
     from fastapi.responses import JSONResponse
-    from sqlalchemy.exc import IntegrityError
     from app import auth as auth_helpers
-    from app.models import NotifySignup
+    from app import stripe_billing
 
-    # CSRF: mirrors auth_routes.require_csrf — session token when logged in,
-    # CSRF cookie for anonymous visitors.
+    if not _os.environ.get("DATABASE_URL"):
+        raise HTTPException(503, "Credit purchases are unavailable right now.")
+
+    _user, _ = _get_current_user_optional(request)
+    if not _user:
+        return JSONResponse({"error": "Log in or sign up to buy credits."}, status_code=401)
+
+    # CSRF: session token, same pattern as the other authenticated POSTs.
     session = auth_helpers.get_session_from_cookie(db, request)
-    expected = session.csrf_token if session else request.cookies.get(auth_helpers.CSRF_COOKIE)
+    expected = session.csrf_token if session else None
     if not expected or not isinstance(csrf_token, str) or not hmac.compare_digest(csrf_token, expected):
         raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
 
@@ -283,32 +289,44 @@ async def credits_notify(
         try:
             rl_db = _db_session()
             try:
-                notify_limiter.admit(rl_db, f"n:{ip}")
+                checkout_limiter.admit(rl_db, f"c:{ip}")
             finally:
                 rl_db.close()
         except (BurstLimited, HourlyLimited):
-            # Identical windows/counts on notify_limiter: both mean the
-            # 10/hour cap for this IP is exhausted.
+            # Identical windows/counts on checkout_limiter: both mean the
+            # 5/hour cap for this IP is exhausted.
             raise HTTPException(429, "Too many attempts. Please try again later.")
         except Exception:
             raise HTTPException(503, "Rate limiting is temporarily unavailable. Please try again shortly.")
     else:
-        auth_helpers.check_rate_limit("notify", ip)
+        auth_helpers.check_rate_limit("checkout", ip)
 
-    email_norm = auth_helpers.normalize_email(email)
-    if len(email_norm) > 255 or email_norm.count("@") != 1 or any(c.isspace() for c in email_norm) or not all(email_norm.split("@")):
-        return JSONResponse({"error": "Enter a valid email address."}, status_code=400)
+    pack = stripe_billing.get_pack(pack_id)
+    if pack is None:
+        return JSONResponse({"error": "Unknown credit pack."}, status_code=400)
 
-    existing = db.query(NotifySignup).filter(NotifySignup.email == email_norm).first()
-    if not existing:
-        try:
-            db.add(NotifySignup(email=email_norm, source="credits"))
-            db.commit()
-        except IntegrityError:
-            # Race: another request captured this address first. Roll back and
-            # treat as success — the address is on the list either way.
-            db.rollback()
-    return JSONResponse({"message": "You're on the list — we'll email you once when credit purchases open."})
+    origin = str(request.base_url).rstrip("/")
+    success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/credits?checkout=success"
+    cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/credits?checkout=cancelled"
+    try:
+        checkout_url = stripe_billing.create_checkout_session(
+            user_id=_user.id,
+            pack_id=pack_id,
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+    except stripe_billing.LiveKeyRefused:
+        logging.getLogger(__name__).critical(
+            "STRIPE_SECRET_KEY is a live key; checkout refused")
+        raise HTTPException(500, "Credit purchases are misconfigured.")
+    except stripe_billing.CheckoutNotConfigured:
+        return JSONResponse(
+            {"error": "Credit purchases are not available yet. Please try again later."},
+            status_code=503,
+        )
+    except stripe_billing.CheckoutError:
+        raise HTTPException(503, "Credit purchases are temporarily unavailable. Please try again shortly.")
+    return JSONResponse({"checkout_url": checkout_url})
 
 @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy(request: Request):
@@ -619,12 +637,18 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
     )
 
 
-def _analysis_response(request, status, data=None, message=None, *, output="html", filename="analysis.log", report_id=None):
+def _analysis_response(request, status, data=None, message=None, *, output="html", filename="analysis.log", report_id=None, buy_credits=False):
+    """Render an analysis outcome.
+
+    buy_credits=True marks the insufficient-credits (402) entry point: the
+    page renders a "Buy credits" CTA linking to /credits (issue #68).
+    """
     user, csrf = _get_current_user_optional(request)
     if data is None:
         return templates.TemplateResponse(request, "index.html", {
             "error": message, "remaining": limiter.remaining(_client_ip(request)),
-            "current_user": user, "csrf_token": csrf}, status_code=status)
+            "current_user": user, "csrf_token": csrf,
+            "buy_credits": buy_credits}, status_code=status)
     if output == "txt":
         return PlainTextResponse(render_text_report(data), headers={
             "Content-Disposition": f'attachment; filename="{Path(filename).stem}-stacksift.txt"'})
@@ -688,7 +712,7 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
         except C.InsufficientCredits:
             db.rollback()
-            return _analysis_response(request, 402, message="Insufficient Power-Up credits.")
+            return _analysis_response(request, 402, message="Insufficient Power-Up credits.", buy_credits=True)
         except C.AdmissionError as exc:
             db.rollback()
             return _analysis_response(request, 409 if '409' in str(exc) else 429, message=str(exc))
@@ -978,7 +1002,8 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         db.commit()
     except credits_helpers.InsufficientCredits:
         db.rollback()
-        return JSONResponse({"error": "Insufficient credits. PDF export costs 2 credits."}, status_code=402)
+        return JSONResponse({"error": "Insufficient credits. PDF export costs 2 credits.",
+                             "purchase_url": "/credits"}, status_code=402)
     except credits_helpers.AdmissionError as e:
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=409)
@@ -1022,3 +1047,4 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
     )
+
