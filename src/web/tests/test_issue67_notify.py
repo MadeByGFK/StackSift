@@ -149,6 +149,44 @@ def test_notify_rate_limited(notify_env):
         assert db.query(NotifySignup).count() <= 10
 
 
+def test_notify_uses_shared_limiter_when_database_configured(notify_env, monkeypatch):
+    """With DATABASE_URL set, /credits/notify enforces through the shared
+    Postgres-backed limiter (PR #28): admissions are recorded in
+    rate_limit_hits under the notify bucket, and a bucket already at the
+    10/hour cap blocks further signups. The fixture's in-memory auth limiter
+    starts empty, so only the shared store can produce the 429.
+    """
+    from datetime import datetime, timezone
+
+    import app.main as main_mod
+    from app.models import RateLimitHit
+
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    monkeypatch.setattr(main_mod, "_db_session", lambda: notify_env.sessions())
+
+    # A first signup is admitted and recorded in the shared table.
+    assert _signup(notify_env, "shared@example.com").status_code == 200
+    with notify_env.sessions() as db:
+        hits = db.query(RateLimitHit).all()
+        assert len(hits) == 1
+        bucket = hits[0].trusted_ip
+        assert bucket.startswith("n:")
+        # Fill the rest of the hourly bucket directly in the shared store.
+        for _ in range(9):
+            db.add(
+                RateLimitHit(
+                    trusted_ip=bucket, hit_at=datetime.now(timezone.utc)
+                )
+            )
+        db.commit()
+
+    # The next signup exceeds the shared 10/hour cap -> 429.
+    resp = _signup(notify_env, "over@example.com")
+    assert resp.status_code == 429
+    with notify_env.sessions() as db:
+        assert db.query(RateLimitHit).count() == 10
+
+
 def test_credits_page_hides_notify_form_when_logged_in(notify_env, monkeypatch):
     import app.main as main_mod
 

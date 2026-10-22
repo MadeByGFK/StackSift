@@ -106,6 +106,15 @@ burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
 shared_limiter = PostgresRateLimiter(
     burst_max=2, burst_window=60, hourly_max=10, hourly_window=3600
 )
+# ISSUE-67: notify-me signups share the Postgres-backed enforcement so the
+# 10/hour/IP cap holds across processes, but under their own bucket key
+# ("n:" + IP — short prefix because rate_limit_buckets.trusted_ip is
+# String(45)) so signups never consume analysis quota. The burst window is
+# widened to the hourly window, so admit() enforces the hourly cap only —
+# the auth-side notify limit has no burst component.
+notify_limiter = PostgresRateLimiter(
+    burst_max=10, burst_window=3600, hourly_max=10, hourly_window=3600
+)
 
 
 def _use_shared_limiter() -> bool:
@@ -267,7 +276,24 @@ async def credits_notify(
         raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
 
     ip = _client_ip(request)
-    auth_helpers.check_rate_limit("notify", ip)
+    if _use_shared_limiter():
+        # Shared enforcement (same pattern as analysis admission): a fresh
+        # session, because admit() manages its own transaction; database
+        # failures fail closed with 503 rather than skipping the limit.
+        try:
+            rl_db = _db_session()
+            try:
+                notify_limiter.admit(rl_db, f"n:{ip}")
+            finally:
+                rl_db.close()
+        except (BurstLimited, HourlyLimited):
+            # Identical windows/counts on notify_limiter: both mean the
+            # 10/hour cap for this IP is exhausted.
+            raise HTTPException(429, "Too many attempts. Please try again later.")
+        except Exception:
+            raise HTTPException(503, "Rate limiting is temporarily unavailable. Please try again shortly.")
+    else:
+        auth_helpers.check_rate_limit("notify", ip)
 
     email_norm = auth_helpers.normalize_email(email)
     if len(email_norm) > 255 or email_norm.count("@") != 1 or any(c.isspace() for c in email_norm) or not all(email_norm.split("@")):
