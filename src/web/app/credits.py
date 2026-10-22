@@ -996,3 +996,159 @@ def get_balance_summary(db: Session, user_id: uuid.UUID) -> dict:
         "reserved": reserved,
         "restricted": restricted,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: purchase settlement (issue #69).
+#
+# A CreditPurchase is created 'pending' by POST /credits/checkout BEFORE the
+# Stripe session exists. The webhook settles it exactly once:
+#   settle_purchase() locks the purchase row, validates the event against the
+#   row + pack catalog, transitions pending -> completed, and grants through
+#   the standard GRANT path (grant_credits -> _append_ledger), wiring
+#   grant.purchase_id so #72 can reconcile Stripe payment <-> purchase <->
+#   grant <-> ledger entry to the cent.
+#
+# Idempotency layers (independent, all required):
+#   1. stripe_webhook_events PK on stripe_event_id — redelivered events
+#      collide before any side effect (handled in the route).
+#   2. Purchase row lock + status check — out-of-order / second events for
+#      an already-settled purchase grant nothing.
+#   3. uq_grant_user_source_key (user_id, 'purchase', purchase.id) — the DB
+#      refuses a second grant for the same purchase even under races.
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class SettlementError(Exception):
+    """Settlement cannot proceed; the purchase is marked failed, no grant."""
+
+
+def create_pending_purchase(
+    db: Session, user_id: uuid.UUID, pack_id: str
+) -> models.CreditPurchase:
+    """Record a purchase attempt as 'pending' before the Stripe call.
+
+    Called by POST /credits/checkout after the Stripe configuration
+    pre-check, so rows here mean a real session creation was attempted.
+    """
+    from app import stripe_billing
+
+    pack = stripe_billing.get_pack(pack_id)
+    if pack is None:
+        raise SettlementError(f"unknown pack: {pack_id}")
+    purchase = models.CreditPurchase(
+        user_id=user_id,
+        pack_id=pack_id,
+        credits=pack["credits"],
+        pricing_version=PRICING_VERSION,
+        status="pending",
+    )
+    db.add(purchase)
+    db.flush()  # assign the id so it can ride in the session metadata
+    return purchase
+
+
+def settle_purchase(
+    db: Session,
+    purchase: models.CreditPurchase,
+    *,
+    stripe_event_id: str,
+    stripe_session_id: str,
+    event_metadata: dict,
+    amount_cents: int,
+    currency: str,
+    payment_intent_id: str | None,
+) -> str:
+    """Settle one purchase exactly once. Returns the webhook outcome.
+
+    Returns 'processed' on a completed grant, 'duplicate' when the purchase
+    was already settled (no second grant), and raises SettlementError for
+    data mismatches (purchase marked 'failed', nothing granted).
+    """
+    from app import stripe_billing
+
+    # Lock the purchase row so concurrent deliveries serialize here.
+    locked = db.execute(
+        select(models.CreditPurchase)
+        .where(models.CreditPurchase.id == purchase.id)
+        .with_for_update()
+    ).scalar_one()
+    if locked.status != "pending":
+        logger.info(
+            "webhook %s: purchase %s already %s; granting nothing",
+            stripe_event_id, purchase.id, locked.status,
+        )
+        return "duplicate"
+
+    pack = stripe_billing.get_pack(locked.pack_id)
+
+    def _fail(note: str) -> str:
+        logger.error("webhook %s: purchase %s failed: %s",
+                     stripe_event_id, purchase.id, note)
+        locked.status = "failed"
+        locked.stripe_event_id = stripe_event_id
+        db.flush()
+        raise SettlementError(note)
+
+    if pack is None:
+        _fail(f"unknown pack_id {locked.pack_id!r}")
+    try:
+        meta_credits = int(event_metadata.get("credits", -1))
+    except (TypeError, ValueError):
+        meta_credits = -1
+    if event_metadata.get("pack_id") != locked.pack_id:
+        _fail("metadata pack_id does not match purchase")
+    if meta_credits != locked.credits or meta_credits != pack["credits"]:
+        _fail("metadata credits do not match purchase/catalog")
+    if str(event_metadata.get("user_id", "")) != str(locked.user_id):
+        _fail("metadata user_id does not match purchase")
+    try:
+        meta_version = int(event_metadata.get("pricing_version", -1))
+    except (TypeError, ValueError):
+        meta_version = -1
+    if meta_version != locked.pricing_version:
+        logger.warning(
+            "webhook %s: purchase %s pricing_version %s != recorded %s; "
+            "settling on the checkout-time snapshot",
+            stripe_event_id, purchase.id, meta_version, locked.pricing_version,
+        )
+    if not isinstance(amount_cents, int) or amount_cents <= 0:
+        _fail(f"invalid amount_total {amount_cents!r}")
+    if not currency:
+        _fail("missing currency")
+
+    # Backfill the session id when the checkout route could not record it
+    # (Stripe succeeded but the follow-up update failed).
+    if not locked.stripe_session_id:
+        locked.stripe_session_id = stripe_session_id
+        logger.warning(
+            "webhook %s: backfilled stripe_session_id for purchase %s",
+            stripe_event_id, purchase.id,
+        )
+    elif locked.stripe_session_id != stripe_session_id:
+        _fail("event session id does not match purchase session id")
+
+    grant = grant_credits(
+        db, locked.user_id, "purchase", str(locked.id), locked.credits
+    )
+    grant.purchase_id = locked.id
+
+    locked.status = "completed"
+    locked.amount_cents = amount_cents
+    locked.currency = currency
+    locked.stripe_payment_intent_id = payment_intent_id
+    locked.stripe_event_id = stripe_event_id
+    locked.completed_at = _utcnow()
+    db.flush()
+
+    logger.info(
+        "webhook %s: purchase %s completed — %d credits for %d %s",
+        stripe_event_id, purchase.id, locked.credits, amount_cents, currency,
+    )
+    return "processed"
