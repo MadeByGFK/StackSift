@@ -206,6 +206,7 @@ RATE_LIMITS = {
     "verify_resend": (3, 3600),  # 3/hour per email
     "resend_ip": (10, 3600),    # 10/hour per IP (defense in depth)
     "reset": (5, 3600),     # 5/hour per IP
+    "notify": (10, 3600),   # 10/hour per IP — notify-me capture (issue #67)
 }
 
 

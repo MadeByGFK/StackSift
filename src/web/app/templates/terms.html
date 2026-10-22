@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms — StackSift</title>
+<meta name="description" content="StackSift terms of service: free tier, credits, acceptable use.">
+<link rel="stylesheet" href="/static/style.css?v=4">
+<style>
+.doc { max-width: 720px; margin: 2.5rem auto; padding: 0 1rem; }
+.doc h1 { color: #fff; font-size: 2rem; margin: 0 0 0.5rem 0; }
+.doc .updated { color: #a0aec0; font-size: 0.85rem; margin: 0 0 2rem 0; }
+.doc h2 { color: #fff; font-size: 1.25rem; margin: 2rem 0 0.75rem 0; }
+.doc p, .doc li { color: #c8d2e0; font-size: 0.95rem; line-height: 1.7; }
+.doc ul { padding-left: 1.25rem; }
+.doc li { margin-bottom: 0.5rem; }
+.doc a { color: #ecc94b; }
+.doc-footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #2d3d6b; font-size: 0.85rem; color: #a0aec0; text-align: center; }
+.doc-footer a { color: #ecc94b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+      {% else %}
+        <a href="/credits">Credits</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <div class="doc">
+    <h1>Terms</h1>
+    <p class="updated">Plain-language terms. StackSift is a Goodfolk Digital project.</p>
+
+    <h2>The service</h2>
+    <ul>
+      <li>StackSift analyzes log files you upload and returns an incident summary: severity counts, recurring issues, a health verdict, and what to investigate first.</li>
+      <li>The free tier needs no account: 10 analyses per hour, 10&nbsp;MB / 50,000-line upload limit, report shown in the browser.</li>
+      <li>Accounts are optional and unlock premium capabilities. See <a href="/credits">Credits</a> for what credits cost and what they do.</li>
+    </ul>
+
+    <h2>Credits</h2>
+    <ul>
+      <li>Credits unlock premium capabilities (for example, PDF export costs 2 credits). Credits are deducted only after a successful operation — failed analyses cost nothing.</li>
+      <li>Credits never expire. Stored reports and PDFs expire 7 days after creation.</li>
+      <li><strong>All sales are final.</strong> Credit purchases are non-refundable, subject to applicable legal obligations.</li>
+    </ul>
+
+    <h2>Acceptable use</h2>
+    <ul>
+      <li>Only upload files you have the right to analyze. Don't try to evade rate limits, quotas, or access controls, and don't abuse the service.</li>
+      <li>We may throttle, suspend, or terminate accounts that abuse the service.</li>
+    </ul>
+
+    <h2>Your content, our handling</h2>
+    <ul>
+      <li>You keep all rights to the logs you upload. How we handle them is described in <a href="/privacy">Privacy</a>.</li>
+    </ul>
+
+    <h2>As-is service</h2>
+    <ul>
+      <li>StackSift is provided as-is, without warranties. We aim for reliable, accurate analysis but don't guarantee it — always use your own judgment on production incidents.</li>
+      <li>We may change or discontinue features; these terms may change, and we'll note updates here.</li>
+    </ul>
+
+    <div class="doc-footer">
+      StackSift · a Goodfolk Digital project ·
+      <a href="/privacy">Privacy</a> ·
+      <a href="/terms">Terms</a> ·
+      <a href="/support">Support</a>
+    </div>
+  </div>
+</div>
+{% include "nav_script.html" %}
+</body>
+</html>

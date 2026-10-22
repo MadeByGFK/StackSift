@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StackSift — Drop in a log file. Get an incident summary.</title>
 <meta name="description" content="StackSift turns noisy application logs into a quick, readable incident summary. Free, no signup required for analysis, uploads use temporary storage.">
-<link rel="stylesheet" href="/static/style.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=4">
 <style>
 .spinner {
   border: 4px solid #2d3d6b;
@@ -28,6 +28,9 @@
   margin: 2rem 0;
 }
 .privacy-notice h3 { margin: 0 0 0.5rem 0; color: #ffffff; font-size: 1.1rem; }
+/* ISSUE-68: insufficient-credits (402) entry point to the credits page. */
+.buy-credits-cta { display: inline-block; margin: 0 0 1.5rem; padding: 12px 32px; border-radius: 8px; font-weight: 700; background: #ecc94b; color: #1a1a2e; text-decoration: none; }
+.buy-credits-cta:hover { filter: brightness(1.1); }
 .privacy-notice p { margin: 0; font-size: 0.9rem; color: #a0aec0; line-height: 1.6; }
 </style>
 <script>
@@ -70,10 +73,11 @@ document.addEventListener('DOMContentLoaded', function() {
 <div class="wrap">
 
   <header class="top">
-    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
-    <nav class="nav-links">
-      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
       {% if current_user %}
+        <a href="/reports">My Reports</a>
         <a href="/settings">Settings</a>
         <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -93,17 +97,20 @@ document.addEventListener('DOMContentLoaded', function() {
   </section>
 
   {% if error %}
-  <div class="error">{{ error }}</div>
+  <div class="error" role="alert">{{ error }}</div>
+  {% if buy_credits %}
+  <p style="text-align:center;"><a href="/credits" class="buy-credits-cta">Buy credits</a></p>
+  {% endif %}
   {% endif %}
 
   <form id="upload-form" action="/analyze" method="post" enctype="multipart/form-data">
     <input type="hidden" name="request_id" value="{{ new_request_id() }}">
-    <div class="dropzone" id="dropzone">
-      <div class="big">Drag &amp; drop your log file here</div>
-      <div class="small">or click to browse — .log or .txt, up to 10 MB</div>
-      <div class="filename" id="filename"></div>
-      <input type="file" id="file-input" name="file" accept=".log,.txt,.text">
-    </div>
+    <input type="file" id="file-input" name="file" accept=".log,.txt,.text" class="visually-hidden">
+    <label class="dropzone" id="dropzone" for="file-input">
+      <span class="big">Drag &amp; drop your log file here</span>
+      <span class="small">or click to browse — .log or .txt, up to 10 MB</span>
+      <span class="filename" id="filename"></span>
+    </label>
     <div class="actions">
       <button type="submit" class="btn-primary" name="output" value="html">Analyze my logs</button>
       <button type="submit" class="btn-ghost" name="output" value="txt">Download .txt report</button>
@@ -137,7 +144,7 @@ document.addEventListener('DOMContentLoaded', function() {
       <ul>
         <li>Uploads use <strong>temporary storage</strong> during processing.</li>
         <li>Recognized secret patterns are <strong>redacted</strong> before analysis; other sensitive data may appear in reports.</li>
-        <li>We currently keep no upload archive and don't use uploads for training. Operational request logs are recorded. (Durable results storage is planned for a future release.)</li>
+        <li>Analysis reports are <strong>stored for 7 days</strong> and then expire. We keep no upload archive and don't use uploads for training. Operational request logs are recorded.</li>
         <li>No account needed for analysis — optional accounts use a <strong>session cookie</strong> to stay signed in. File contents are not logged or retained after processing.</li>
       </ul>
     </div>
@@ -158,7 +165,10 @@ document.addEventListener('DOMContentLoaded', function() {
   </div>
 
   <footer>
-    StackSift · a <a href="https://goodfolkdigital.com" style="color:var(--accent)">Goodfolk Digital</a> project · Uploads are processed using temporary storage.
+    StackSift · a <a href="https://goodfolkdigital.com" style="color:var(--accent)">Goodfolk Digital</a> project ·
+    <a href="/privacy" style="color:var(--accent)">Privacy</a> ·
+    <a href="/terms" style="color:var(--accent)">Terms</a> ·
+    <a href="/support" style="color:var(--accent)">Support</a>
   </footer>
 
 </div>
@@ -166,7 +176,9 @@ document.addEventListener('DOMContentLoaded', function() {
 const dz = document.getElementById('dropzone');
 const fi = document.getElementById('file-input');
 const fn = document.getElementById('filename');
-dz.addEventListener('click', () => fi.click());
+// The dropzone is a <label for="file-input">: clicking it opens the file
+// picker natively, and the input stays in the keyboard tab order, so no
+// synthetic click handler is needed here.
 fi.addEventListener('change', () => {
   fn.textContent = fi.files.length ? 'Selected: ' + fi.files[0].name : '';
 });
@@ -180,5 +192,7 @@ dz.addEventListener('drop', ev => {
 });
 </script>
 {% include "auth_form_script.html" %}
+{% include "nav_script.html" %}
 </body>
 </html>
+

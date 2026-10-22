@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — StackSift</title>
+<meta name="description" content="StackSift privacy: how uploads, reports, PDFs, logs, and account data are handled.">
+<link rel="stylesheet" href="/static/style.css?v=4">
+<style>
+.doc { max-width: 720px; margin: 2.5rem auto; padding: 0 1rem; }
+.doc h1 { color: #fff; font-size: 2rem; margin: 0 0 0.5rem 0; }
+.doc .updated { color: #a0aec0; font-size: 0.85rem; margin: 0 0 2rem 0; }
+.doc h2 { color: #fff; font-size: 1.25rem; margin: 2rem 0 0.75rem 0; }
+.doc p, .doc li { color: #c8d2e0; font-size: 0.95rem; line-height: 1.7; }
+.doc ul { padding-left: 1.25rem; }
+.doc li { margin-bottom: 0.5rem; }
+.doc a { color: #ecc94b; }
+.doc-footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #2d3d6b; font-size: 0.85rem; color: #a0aec0; text-align: center; }
+.doc-footer a { color: #ecc94b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+      {% else %}
+        <a href="/credits">Credits</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <div class="doc">
+    <h1>Privacy</h1>
+    <p class="updated">This page describes what StackSift actually stores, in plain language.</p>
+
+    <h2>Raw uploads (temporary)</h2>
+    <ul>
+      <li>Uploads are written to temporary files while they are received. We redact recognized secret patterns (API keys, tokens, and similar formats) before a separate temporary file is created for analysis.</li>
+      <li>Temporary files are deleted during normal request processing. If the server process stops abruptly, cleanup can be interrupted — this is not a secure-erasure guarantee.</li>
+      <li>Redaction is best effort: it can miss secrets. Review your log before uploading.</li>
+      <li>We keep no archive of uploaded files, and we do not use uploads to train models.</li>
+      <li>Uploads are limited to 10&nbsp;MB / 50,000 lines.</li>
+    </ul>
+
+    <h2>Analysis reports (stored 7 days)</h2>
+    <ul>
+      <li>The derived report — severity counts, recurring issues, the health verdict, and the malformed-line summary — is stored in our database for <strong>7 days</strong> after creation, then expires. Expired reports return an error instead of the report, and a background maintenance task marks them deleted.</li>
+      <li>Free analyses need no account; the stored report is tied to your anonymous session so only your browser can retrieve it. Paid analyses are tied to your account.</li>
+      <li>Signed-in users can see their reports on the <a href="/reports">My Reports</a> page for the same 7-day window.</li>
+    </ul>
+
+    <h2>PDF exports (stored 7 days)</h2>
+    <ul>
+      <li>PDFs are generated from stored reports and stored the same way: in our database, tied to your account, expiring 7 days after creation.</li>
+    </ul>
+
+    <h2>Account data</h2>
+    <ul>
+      <li>If you sign up, we store your email address, a password hash (email/password signups), or your OAuth identity (Google or GitHub signups), plus session records and a credit ledger.</li>
+      <li>If you join the credit-launch waitlist, we store your email address solely to notify you when credit purchases open. We do not sell or share it. We keep it until that notification is sent or the waitlist closes, and we will delete it on request — see <a href="/support">Support</a> for how to reach us.</li>
+      <li>You stay signed in with a session cookie (<code>__Host-stacksift_session</code>). Sessions can be revoked individually or all at once from Settings.</li>
+      <li>Credits you purchase never expire. Results and PDFs still expire after 7 days.</li>
+    </ul>
+
+    <h2>Operational request logs</h2>
+    <ul>
+      <li>Server logs record request metadata and errors so we can keep the service reliable. File contents are not written to the logs.</li>
+    </ul>
+
+    <h2>Anonymous vs. authenticated use</h2>
+    <ul>
+      <li><strong>Anonymous:</strong> free analysis with no account. No email and no session cookie beyond the analysis itself — unless you join the credit-launch waitlist (see Account data above); stored reports are retrievable only with your anonymous session.</li>
+      <li><strong>Authenticated:</strong> the above plus a 7-day report history, credit purchases, and account settings.</li>
+    </ul>
+
+    <h2>Questions</h2>
+    <p>See <a href="/support">Support</a> for how to reach us.</p>
+
+    <div class="doc-footer">
+      StackSift · a Goodfolk Digital project ·
+      <a href="/privacy">Privacy</a> ·
+      <a href="/terms">Terms</a> ·
+      <a href="/support">Support</a>
+    </div>
+  </div>
+</div>
+{% include "nav_script.html" %}
+</body>
+</html>

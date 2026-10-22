@@ -298,6 +298,9 @@ class Result(Base):
     operation_id = Column(GUID(), ForeignKey("operations.id"), nullable=True, unique=True)
     free_request_id = Column(String(255), nullable=True, unique=True)
     type = Column(String(30), nullable=False)  # 'analysis' | 'pdf' | 'batch'
+    # Analysis outcome severity at store time: 'ok' | 'warnings' | 'errors'.
+    # NULL = stored before severity existed (renders as the neutral dot).
+    severity = Column(String(10), nullable=True)
     storage_manifest = Column(Text, nullable=False)  # JSON: where/how stored
     integrity_digest = Column(String(64), nullable=False)  # SHA-256 of artifact
     byte_count = Column(BigInteger, nullable=False)
@@ -532,3 +535,22 @@ class RateLimitHit(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     trusted_ip = Column(String(45), nullable=False)
     hit_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class NotifySignup(Base):
+    """Notify-me capture for the credits launch (issue #67).
+
+    SHORT bridge, not a destination: this table exists only until checkout
+    ships (#68), at which point the capture form is removed and the collected
+    addresses get exactly one launch email. Counts from this table are
+    intent only — they are never demand evidence (GFK-013 §5.12). No
+    third-party list tool: addresses are stored here, in our own database,
+    with the source page recorded.
+    """
+
+    __tablename__ = "notify_signups"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    source = Column(String(50), nullable=False, default="credits")
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)

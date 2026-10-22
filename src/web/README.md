@@ -69,8 +69,12 @@ Optional accounts (email/password, Google, GitHub OAuth) use a session
 cookie (`__Host-stacksift_session` in `app/auth.py`) to keep you signed in.
 Anonymous analysis requires no account.
 
-This section describes current behavior. Durable results storage for
-account holders is planned for a future release.
+Analysis reports and PDF exports are stored in Postgres with a 7-day
+expiry (`Result.expires_at`); expired results are rejected (410) and a
+background maintenance task marks them deleted. Free analyses store
+reports tied to the anonymous session; paid analyses and PDFs are tied
+to the account, and account holders get a 7-day report history on
+`/reports`. Credits themselves never expire.
 
 Disabling spooling alone would put larger uploads in RAM without solving
 admission control. A memory-only guarantee requires bounded streaming input,

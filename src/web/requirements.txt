@@ -1,15 +1,27 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-jinja2>=3.1
-python-multipart>=0.0.9
-sqlalchemy>=2.0
-alembic>=1.13
-bcrypt>=4.1
-httpx>=0.27
-psycopg2-binary>=2.9
+# StackSift web runtime dependencies.
+#
+# Every dependency is pinned to an EXACT version (issue #45). The 2026-10-19
+# red-staging incident (PR #43) was caused by unpinned ranges silently
+# resolving to fastapi 0.150.0 / starlette 1.9.0, whose changed upload
+# handling broke the no-file error path with no code change on our side.
+#
+# This set was verified green: full local suite (348 passed, 53 skipped —
+# PostgreSQL legs skip locally by design) plus CI green on the pinned set.
+# See /DEPENDENCY_UPGRADES.md for the deliberate upgrade path.
+
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+jinja2==3.1.6
+python-multipart==0.0.32
+sqlalchemy==2.1.4
+alembic==1.20.0
+bcrypt==5.0.0
+httpx==0.28.1
+psycopg2-binary==2.9.13
 # NOTE: StackSift diagnostic library is fully vendored in app/vendor/
 # (see app/vendor/VENDORING.md). The pip-installed 'stacksift' package
 # is NOT required and MUST NOT be used for diagnostic functions.
 # This eliminates Railway pip-cache staleness as a deployment risk.
 
-PyJWT[crypto]>=2.10,<3
+PyJWT[crypto]==2.15.1
+fpdf2==2.8.9

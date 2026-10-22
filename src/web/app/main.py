@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from app.db import get_db
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -104,6 +105,16 @@ burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
 # in-memory limiters above whenever the database is configured.
 shared_limiter = PostgresRateLimiter(
     burst_max=2, burst_window=60, hourly_max=10, hourly_window=3600
+)
+# ISSUE-68: checkout-session creation shares the Postgres-backed enforcement
+# so the 5/hour/IP cap holds across processes, under its own bucket key
+# ("c:" + IP — short prefix because rate_limit_buckets.trusted_ip is
+# String(45)) so checkout attempts never consume analysis quota. The burst
+# window is widened to the hourly window, so admit() enforces the hourly
+# cap only — checkout sessions are money-adjacent, so the cap is tighter
+# than the notify-me one this replaces.
+checkout_limiter = PostgresRateLimiter(
+    burst_max=5, burst_window=3600, hourly_max=5, hourly_window=3600
 )
 
 
@@ -215,8 +226,20 @@ async def security_headers(request: Request, call_next):
 @app.get("/credits", response_class=HTMLResponse)
 async def credits(request: Request):
     _user, _csrf = _get_current_user_optional(request)
+    from app import stripe_billing
+
+    packs = stripe_billing.packs_for_display()
+    status = request.query_params.get("checkout", "")
     return templates.TemplateResponse(
-        request, "pricing.html", {"current_user": _user, "csrf_token": _csrf}
+        request,
+        "pricing.html",
+        {
+            "current_user": _user,
+            "csrf_token": _csrf,
+            "packs": packs,
+            "checkout_ready": any(p["ready"] for p in packs),
+            "checkout_status": status if status in ("success", "cancelled") else "",
+        },
     )
 
 
@@ -224,6 +247,110 @@ async def credits(request: Request):
 async def pricing_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/credits", status_code=301)
+
+
+# ISSUE-68: Stripe Checkout entry point. Test mode only — the billing module
+# refuses live keys outright (live activation is a separate founder gate).
+# Anonymous users cannot buy: they get a 401 pointing at signup/login, and
+# the credits page only renders buy forms for signed-in users.
+@app.post("/credits/checkout")
+async def credits_checkout(
+    request: Request,
+    pack_id: str = Form(...),
+    csrf_token: str = Form(""),
+    db=Depends(get_db),
+):
+    import hmac
+    import logging
+    import os as _os
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+    from app import auth as auth_helpers
+    from app import stripe_billing
+
+    if not _os.environ.get("DATABASE_URL"):
+        raise HTTPException(503, "Credit purchases are unavailable right now.")
+
+    _user, _ = _get_current_user_optional(request)
+    if not _user:
+        return JSONResponse({"error": "Log in or sign up to buy credits."}, status_code=401)
+
+    # CSRF: session token, same pattern as the other authenticated POSTs.
+    session = auth_helpers.get_session_from_cookie(db, request)
+    expected = session.csrf_token if session else None
+    if not expected or not isinstance(csrf_token, str) or not hmac.compare_digest(csrf_token, expected):
+        raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
+
+    ip = _client_ip(request)
+    if _use_shared_limiter():
+        # Shared enforcement (same pattern as analysis admission): a fresh
+        # session, because admit() manages its own transaction; database
+        # failures fail closed with 503 rather than skipping the limit.
+        try:
+            rl_db = _db_session()
+            try:
+                checkout_limiter.admit(rl_db, f"c:{ip}")
+            finally:
+                rl_db.close()
+        except (BurstLimited, HourlyLimited):
+            # Identical windows/counts on checkout_limiter: both mean the
+            # 5/hour cap for this IP is exhausted.
+            raise HTTPException(429, "Too many attempts. Please try again later.")
+        except Exception:
+            raise HTTPException(503, "Rate limiting is temporarily unavailable. Please try again shortly.")
+    else:
+        auth_helpers.check_rate_limit("checkout", ip)
+
+    pack = stripe_billing.get_pack(pack_id)
+    if pack is None:
+        return JSONResponse({"error": "Unknown credit pack."}, status_code=400)
+
+    origin = str(request.base_url).rstrip("/")
+    success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/credits?checkout=success"
+    cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/credits?checkout=cancelled"
+    try:
+        checkout_url = stripe_billing.create_checkout_session(
+            user_id=_user.id,
+            pack_id=pack_id,
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+    except stripe_billing.LiveKeyRefused:
+        logging.getLogger(__name__).critical(
+            "STRIPE_SECRET_KEY is a live key; checkout refused")
+        raise HTTPException(500, "Credit purchases are misconfigured.")
+    except stripe_billing.CheckoutNotConfigured:
+        return JSONResponse(
+            {"error": "Credit purchases are not available yet. Please try again later."},
+            status_code=503,
+        )
+    except stripe_billing.CheckoutError:
+        raise HTTPException(503, "Credit purchases are temporarily unavailable. Please try again shortly.")
+    return JSONResponse({"checkout_url": checkout_url})
+
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+async def privacy(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request, "privacy.html", {"current_user": _user, "csrf_token": _csrf}
+    )
+
+
+@app.get("/terms", response_class=HTMLResponse, include_in_schema=False)
+async def terms(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request, "terms.html", {"current_user": _user, "csrf_token": _csrf}
+    )
+
+
+@app.get("/support", response_class=HTMLResponse, include_in_schema=False)
+async def support(request: Request):
+    _user, _csrf = _get_current_user_optional(request)
+    return templates.TemplateResponse(
+        request, "support.html", {"current_user": _user, "csrf_token": _csrf}
+    )
+
 
 @app.get("/health")
 async def health():
@@ -256,7 +383,7 @@ async def demo(request: Request):
 @app.post("/analyze")
 async def analyze(
     request: Request,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     output: str = Form("html"),
     request_id: str = Form(""),
 ):
@@ -272,7 +399,7 @@ async def analyze(
             headers=headers or {},
         )
 
-    if not file.filename:
+    if not file or not file.filename:
         return error("Please choose a file first.")
 
     suffix = Path(file.filename).suffix.lower()
@@ -510,16 +637,24 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
     )
 
 
-def _analysis_response(request, status, data=None, message=None, *, output="html", filename="analysis.log"):
+def _analysis_response(request, status, data=None, message=None, *, output="html", filename="analysis.log", report_id=None, buy_credits=False):
+    """Render an analysis outcome.
+
+    buy_credits=True marks the insufficient-credits (402) entry point: the
+    page renders a "Buy credits" CTA linking to /credits (issue #68).
+    """
     user, csrf = _get_current_user_optional(request)
     if data is None:
         return templates.TemplateResponse(request, "index.html", {
             "error": message, "remaining": limiter.remaining(_client_ip(request)),
-            "current_user": user, "csrf_token": csrf}, status_code=status)
+            "current_user": user, "csrf_token": csrf,
+            "buy_credits": buy_credits}, status_code=status)
     if output == "txt":
         return PlainTextResponse(render_text_report(data), headers={
             "Content-Disposition": f'attachment; filename="{Path(filename).stem}-stacksift.txt"'})
     data = dict(data, current_user=user, csrf_token=csrf)
+    if report_id is not None:
+        data["report_id"] = report_id
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
@@ -547,7 +682,10 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             existing = A.lookup(db, user_id, anon, key, digest, _client_ip(request))
             if existing:
                 status, data, message = A.replay(db, existing, user_id)
-                return _analysis_response(request, status, data, message, output=output, filename=filename)
+                rid = None
+                if status == 200 and data is not None and user_id is not None and getattr(existing, "result_id", None):
+                    rid = str(existing.result_id)
+                return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
             if consent_id:
                 C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1)
                 pending = _load_paid_pending(str(consent_id))
@@ -568,10 +706,13 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             db.commit()
             if not created:
                 status, data, message = A.replay(db, item, user_id)
-                return _analysis_response(request, status, data, message, output=output, filename=filename)
+                rid = None
+                if status == 200 and data is not None and user_id is not None and getattr(item, "result_id", None):
+                    rid = str(item.result_id)
+                return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
         except C.InsufficientCredits:
             db.rollback()
-            return _analysis_response(request, 402, message="Insufficient Power-Up credits.")
+            return _analysis_response(request, 402, message="Insufficient Power-Up credits.", buy_credits=True)
         except C.AdmissionError as exc:
             db.rollback()
             return _analysis_response(request, 409 if '409' in str(exc) else 429, message=str(exc))
@@ -579,6 +720,7 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             db.rollback()
             logging.getLogger(__name__).exception("Analysis admission failed")
             return _analysis_response(request, 503, message="Could not start analysis. Please retry this request.")
+    result_id = None
     try:
         data = analyze_upload(filename, content)
         failure = data.get("message", "Analysis failed.") if isinstance(data, dict) and "error" in data else None
@@ -589,8 +731,11 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 else:
                     result = C.store_result(db, user_id, identity, data)
                     C.complete_operation(db, identity, worker, result.id)
+                    result_id = result.id
             else:
-                A.finish_free(db, identity, data, failure)
+                settled = A.finish_free(db, identity, data, failure)
+                if settled is not None:
+                    result_id = settled.id
             db.commit()
     except Exception:
         logging.getLogger(__name__).exception("Analysis execution or settlement failed")
@@ -609,7 +754,8 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
         if consent_id:
             _delete_paid_pending(str(consent_id))
     response = _analysis_response(request, 400 if failure else 200, None if failure else data,
-        failure, output=output, filename=filename)
+        failure, output=output, filename=filename,
+        report_id=str(result_id) if (result_id is not None and user_id is not None and not failure) else None)
     if cookie:
         response.set_cookie("__Host-stacksift_analysis", cookie, secure=True, httponly=True, samesite="lax", max_age=7*86400)
     response.headers["X-Analysis-Request-ID"] = key
@@ -653,3 +799,252 @@ async def credits_balance(request: Request):
         return JSONResponse(summary)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Phase 2B: Report history + PDF export
+# ---------------------------------------------------------------------------
+
+@app.get("/reports", response_class=HTMLResponse)
+async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
+    """List the current user's analysis reports (7-day retention). Paginated: 20 per page."""
+    from fastapi.responses import RedirectResponse
+    from app import auth as auth_helpers
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    _user = session.user
+    _csrf = session.csrf_token
+    from app import models
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    per_page = 20
+    page = max(1, page)
+    offset = (page - 1) * per_page
+    base_q = db.query(models.Result).filter(
+        models.Result.user_id == _user.id,
+        models.Result.type == "analysis",
+        models.Result.expires_at > now,
+        models.Result.deleted_at.is_(None),
+    )
+    total = base_q.count()
+    results = base_q.order_by(models.Result.created_at.desc()).offset(offset).limit(per_page).all()
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    reports = []
+    for r in results:
+        try:
+            manifest = json.loads(r.storage_manifest)
+            filename = manifest.get("filename", "Unknown file")
+        except (json.JSONDecodeError, TypeError):
+            filename = "Unknown file"
+        from app.credits import _as_aware
+        reports.append({
+            "id": str(r.id),
+            "filename": filename,
+            "severity": r.severity,  # 'ok' | 'warnings' | 'errors' | None (pre-#49 rows)
+            "created_at": r.created_at,
+            "expires_at": r.expires_at,
+            "days_left": max(0, (_as_aware(r.expires_at) - now).days),
+        })
+    return templates.TemplateResponse(request, "reports.html", {
+        "reports": reports,
+        "current_user": _user,
+        "csrf_token": _csrf,
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+    })
+
+
+@app.get("/reports/{result_id}", response_class=HTMLResponse)
+async def report_view(request: Request, result_id: str, db=Depends(get_db)):
+    """View a specific past analysis report (ownership-checked, analysis only)."""
+    import uuid as _uuid
+    from fastapi.responses import RedirectResponse, JSONResponse
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    _user = session.user
+    _csrf = session.csrf_token
+    from app import models
+    from datetime import datetime, timezone
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+    result = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == _user.id,
+        models.Result.type == "analysis",
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not result:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    try:
+        data = credits_helpers.result_payload(
+            result, user_id=_user.id,
+            operation_id=result.operation_id,
+            free_request_id=result.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+    data["current_user"] = _user
+    data["csrf_token"] = _csrf
+    data["report_id"] = str(result.id)
+    data["is_historical"] = True
+    # Older manifests predate the elapsed field; the template requires it.
+    data.setdefault("elapsed", 0.0)
+    return templates.TemplateResponse(request, "report.html", data)
+
+
+@app.post("/reports/{result_id}/pdf")
+async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)):
+    """Export a report as PDF. Costs 2 credits (COST_PDF)."""
+    import uuid as _uuid
+    import hmac
+    import base64 as _b64
+    from fastapi.responses import JSONResponse, Response
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from datetime import datetime, timezone
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+
+    form = await request.form()
+    csrf_token = form.get("csrf_token", "")
+    if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+        return JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
+
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+
+    result = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+        models.Result.type == "analysis",
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not result:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+    base_idempotency_key = f"pdf-{result_id}"
+    request_hash = result.integrity_digest
+    existing_op = db.query(models.Operation).filter(
+        models.Operation.user_id == user.id,
+        models.Operation.type == "pdf",
+        models.Operation.idempotency_key == base_idempotency_key,
+    ).first()
+    # For failed/expired operations, use a new idempotency key so the retry
+    # gets a fresh operation identity (the old credits were released).
+    # The unique constraint on (user_id, type, idempotency_key) ensures safety.
+    idempotency_key = base_idempotency_key
+    if existing_op and existing_op.status in ("failed", "expired"):
+        idempotency_key = f"{base_idempotency_key}-retry-{_uuid.uuid4().hex[:8]}"
+        existing_op = None  # Force fresh admission with new key
+    if existing_op:
+        if existing_op.status == "completed" and existing_op.result_id:
+            # Validate the saved PDF result before replaying (integrity, ownership, expiry)
+            pdf_result = db.get(models.Result, existing_op.result_id)
+            if pdf_result:
+                try:
+                    manifest = credits_helpers.result_payload(
+                        pdf_result, user_id=user.id, operation_id=existing_op.id,
+                    )
+                    pdf_bytes = _b64.b64decode(manifest["pdf_base64"])
+                    filename = manifest.get("filename", "report")
+                    return Response(
+                        content=pdf_bytes,
+                        media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+                    )
+                except (credits_helpers.AdmissionError, KeyError, ValueError):
+                    # Stored PDF is invalid or expired; don't attempt to reuse the
+                    # completed operation's idempotency key. Return a controlled error.
+                    return JSONResponse(
+                        {"error": "Previously generated PDF is no longer available. Please generate a new export."},
+                        status_code=410,
+                    )
+        elif existing_op.status == "reserved":
+            # Another request is already generating this PDF; don't hijack its operation
+            return JSONResponse(
+                {"error": "PDF export already in progress. Please wait and try again."},
+                status_code=409,
+            )
+        # For failed/expired operations, fall through to admit a fresh one
+
+    consent = credits_helpers.create_consent(
+        db, user_id=user.id, operation_type="pdf",
+        input_hash=request_hash, max_cost=credits_helpers.COST_PDF,
+    )
+    db.flush()
+
+    worker_id = f"pdf-export-{_uuid.uuid4().hex[:8]}"
+    try:
+        op = credits_helpers.admit_paid_operation(
+            db, user_id=user.id, operation_type="pdf",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            cost=credits_helpers.COST_PDF, consent_id=consent.id,
+            worker_id=worker_id,
+        )
+        db.commit()
+    except credits_helpers.InsufficientCredits:
+        db.rollback()
+        return JSONResponse({"error": "Insufficient credits. PDF export costs 2 credits.",
+                             "purchase_url": "/credits"}, status_code=402)
+    except credits_helpers.AdmissionError as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+    from app.pdf_export import generate_report_pdf
+    try:
+        # Validate source analysis result integrity before generating PDF
+        manifest_data = credits_helpers.result_payload(
+            result, user_id=user.id,
+            operation_id=result.operation_id,
+            free_request_id=result.free_request_id,
+        )
+        filename = manifest_data.get("filename", "report")
+        pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
+    except Exception as e:
+        try:
+            credits_helpers.release_operation(db, op.id, worker_id, str(e)[:200])
+            db.commit()
+        except Exception:
+            db.rollback()
+        return JSONResponse({"error": "PDF generation failed"}, status_code=500)
+
+    try:
+        pdf_result = credits_helpers.store_pdf_result(db, user.id, op.id, pdf_bytes, filename)
+        credits_helpers.complete_operation(
+            db, op.id, worker_id, result_id=pdf_result.id,
+            lease_generation=op.lease_generation,
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        try:
+            credits_helpers.release_operation(db, op.id, worker_id, str(e)[:200])
+            db.commit()
+        except Exception:
+            pass
+        return JSONResponse({"error": "Failed to store PDF"}, status_code=500)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+    )
+

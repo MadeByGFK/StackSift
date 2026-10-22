@@ -1,0 +1,39 @@
+<script>
+// Mobile nav toggle (issue #79). Vanilla JS, no dependencies; included on
+// every page that carries the site header. The button itself is CSS-hidden
+// above 768px, so desktop rendering is unchanged.
+(function () {
+  var toggle = document.querySelector('.nav-toggle');
+  var nav = document.getElementById('site-nav');
+  if (!toggle || !nav) return;
+  function setOpen(open) {
+    nav.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  toggle.addEventListener('click', function () {
+    setOpen(!nav.classList.contains('open'));
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && nav.classList.contains('open')) {
+      setOpen(false);
+      toggle.focus();
+    }
+  });
+  // Choosing a link closes the menu (navigation follows immediately).
+  nav.addEventListener('click', function (event) {
+    if (event.target.closest('a')) setOpen(false);
+  });
+  // The logout form lives inside the menu on mobile; close on submit too
+  // (its own handler performs the POST and redirect).
+  var logoutForm = nav.querySelector('form[action="/auth/logout"]');
+  if (logoutForm) {
+    logoutForm.addEventListener('submit', function () { setOpen(false); });
+  }
+  // Rotating/resizing to desktop always resets to the closed state; the
+  // desktop CSS shows the nav inline regardless.
+  var mq = window.matchMedia('(max-width: 768px)');
+  function resetIfDesktop(event) { if (!event.matches) setOpen(false); }
+  if (mq.addEventListener) mq.addEventListener('change', resetIfDesktop);
+  else if (mq.addListener) mq.addListener(resetIfDesktop);
+})();
+</script>

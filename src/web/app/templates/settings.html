@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settings — StackSift</title>
-<link rel="stylesheet" href="/static/style.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=4">
 <style>
 .settings-wrap { max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
 .settings-card { background: #1e2a4a; border: 1px solid #2d3d6b; border-radius: 12px; padding: 2rem; margin-bottom: 1.5rem; }
@@ -22,10 +22,11 @@
 <body>
 <div class="wrap">
   <header class="top">
-    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
-    <nav class="nav-links">
-      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
       {% if current_user %}
+        <a href="/reports">My Reports</a>
         <a href="/settings">Settings</a>
         <form method="post" action="/auth/logout" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -113,5 +114,6 @@ async function revokeAll() {
 }
 </script>
 {% include "auth_form_script.html" %}
+{% include "nav_script.html" %}
 </body>
 </html>

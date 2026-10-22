@@ -5,16 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StackSift report — {{ filename }}</title>
 <meta name="robots" content="noindex">
-<link rel="stylesheet" href="/static/style.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
 <div class="wrap">
 
   <header class="top">
-    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">Stack<span>Sift</span></a></div>
-    <nav class="nav-links">
-      <a href="https://github.com/MadeByGFK/StackSift">GitHub</a>
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
       {% if current_user %}
+        <a href="/reports">My Reports</a>
         <a href="/settings">Settings</a>
         <form method="post" action="/auth/logout" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -30,6 +31,7 @@
 
   {% if is_demo %}
   <div class="demo-banner">Sample report — this is what StackSift does with your logs. <a href="/">Analyze your own →</a></div>
+  <div class="demo-banner" style="margin-top:8px">Made for handoffs: the PDF export is built to attach to the incident ticket or pass along at shift change.</div>
   {% endif %}
 
   <section class="report-head">
@@ -45,6 +47,15 @@
     <div>
       <span class="badge {{ health.color }}">{{ health.label }}</span>
     </div>
+    {% if current_user and report_id and not is_demo %}
+    <div class="report-actions" style="margin-top:1rem">
+      <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
+      </form>
+      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Charged 2 credits only when the PDF is first generated &mdash; re-downloads are free. Attach it to the incident ticket or hand it off at shift change.</p>
+    </div>
+    {% endif %}
   </section>
 
   {% if complexity_truncated %}
@@ -177,5 +188,7 @@
   </footer>
 
 </div>
+{% include 'auth_form_script.html' %}
+{% include "nav_script.html" %}
 </body>
 </html>
