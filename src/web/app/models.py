@@ -535,3 +535,22 @@ class RateLimitHit(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     trusted_ip = Column(String(45), nullable=False)
     hit_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+class NotifySignup(Base):
+    """Notify-me capture for the credits launch (issue #67).
+
+    SHORT bridge, not a destination: this table exists only until checkout
+    ships (#68), at which point the capture form is removed and the collected
+    addresses get exactly one launch email. Counts from this table are
+    intent only — they are never demand evidence (GFK-013 §5.12). No
+    third-party list tool: addresses are stored here, in our own database,
+    with the source page recorded.
+    """
+
+    __tablename__ = "notify_signups"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    source = Column(String(50), nullable=False, default="credits")
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
