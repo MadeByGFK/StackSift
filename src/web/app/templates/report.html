@@ -30,6 +30,7 @@
 
   {% if is_demo %}
   <div class="demo-banner">Sample report — this is what StackSift does with your logs. <a href="/">Analyze your own →</a></div>
+  <div class="demo-banner" style="margin-top:8px">Made for handoffs: the PDF export is built to attach to the incident ticket or pass along at shift change.</div>
   {% endif %}
 
   <section class="report-head">
@@ -51,6 +52,7 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn-small">Export PDF (2 credits)</button>
       </form>
+      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Charged 2 credits only when the PDF is first generated &mdash; re-downloads are free. Attach it to the incident ticket or hand it off at shift change.</p>
     </div>
     {% endif %}
   </section>
