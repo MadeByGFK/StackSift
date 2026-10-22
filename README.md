@@ -128,9 +128,11 @@ unsupported lines are counted separately rather than silently dropped.
   to disk before redaction, and abrupt termination can interrupt cleanup —
   this is not a secure-erasure guarantee. Redaction is best effort and can
   miss secrets.
-- We keep no upload archive and do not use uploads for training. (This
-  describes current behavior — durable results storage for account holders
-  is planned for a future release.) Operational request logs are recorded.
+- We keep no upload archive and do not use uploads for training. Analysis
+  reports and PDF exports are stored for 7 days and then expire; account
+  holders get a 7-day report history on My Reports — see the
+  [privacy model](src/web/README.md#privacy-model). Operational request
+  logs are recorded.
 - Analysis works anonymously — no account required for the free tier.
   Optional accounts (email/password, Google, GitHub) use a session cookie
   to keep you signed in.
