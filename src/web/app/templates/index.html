@@ -93,17 +93,17 @@ document.addEventListener('DOMContentLoaded', function() {
   </section>
 
   {% if error %}
-  <div class="error">{{ error }}</div>
+  <div class="error" role="alert">{{ error }}</div>
   {% endif %}
 
   <form id="upload-form" action="/analyze" method="post" enctype="multipart/form-data">
     <input type="hidden" name="request_id" value="{{ new_request_id() }}">
-    <div class="dropzone" id="dropzone">
-      <div class="big">Drag &amp; drop your log file here</div>
-      <div class="small">or click to browse — .log or .txt, up to 10 MB</div>
-      <div class="filename" id="filename"></div>
-      <input type="file" id="file-input" name="file" accept=".log,.txt,.text">
-    </div>
+    <input type="file" id="file-input" name="file" accept=".log,.txt,.text" class="visually-hidden">
+    <label class="dropzone" id="dropzone" for="file-input">
+      <span class="big">Drag &amp; drop your log file here</span>
+      <span class="small">or click to browse — .log or .txt, up to 10 MB</span>
+      <span class="filename" id="filename"></span>
+    </label>
     <div class="actions">
       <button type="submit" class="btn-primary" name="output" value="html">Analyze my logs</button>
       <button type="submit" class="btn-ghost" name="output" value="txt">Download .txt report</button>
@@ -169,7 +169,9 @@ document.addEventListener('DOMContentLoaded', function() {
 const dz = document.getElementById('dropzone');
 const fi = document.getElementById('file-input');
 const fn = document.getElementById('filename');
-dz.addEventListener('click', () => fi.click());
+// The dropzone is a <label for="file-input">: clicking it opens the file
+// picker natively, and the input stays in the keyboard tab order, so no
+// synthetic click handler is needed here.
 fi.addEventListener('change', () => {
   fn.textContent = fi.files.length ? 'Selected: ' + fi.files[0].name : '';
 });
