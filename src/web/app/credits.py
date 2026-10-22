@@ -633,6 +633,33 @@ def result_payload(result, *, user_id, operation_id=None, free_request_id=None, 
     return data
 
 
+def outcome_severity(data):
+    """Classify an analysis payload's outcome severity for report-card display.
+
+    Returns 'errors' when any analyzed lines were ERROR/CRITICAL, 'warnings'
+    when warnings were the worst seen, else 'ok'. INFO/UNKNOWN-only logs are
+    'ok': UNKNOWN is not evidence of a problem. Payloads without level
+    counts (never stored for successful analyses) are 'ok'.
+
+    Reads the web payload shape (``data["results"]["level_counts"]``) and
+    the flat CLI shape (``data["level_counts"]``); keys are case-insensitive.
+    """
+    level_counts = {}
+    if isinstance(data, dict):
+        lc = data.get("level_counts")
+        if not isinstance(lc, dict):
+            results = data.get("results")
+            if isinstance(results, dict):
+                lc = results.get("level_counts")
+        if isinstance(lc, dict):
+            level_counts = {str(k).upper(): (v or 0) for k, v in lc.items()}
+    if any(int(level_counts.get(k, 0)) > 0 for k in ("ERROR", "CRITICAL")):
+        return "errors"
+    if int(level_counts.get("WARN", 0)) > 0:
+        return "warnings"
+    return "ok"
+
+
 def store_result(db, user_id, operation_id, data):
     # Obtain domain locks BEFORE inserting the result's operation FK.
     op, _, _ = _lock_operation(db, operation_id)
@@ -641,6 +668,7 @@ def store_result(db, user_id, operation_id, data):
     raw = json.dumps({k: v for k, v in data.items() if k not in ("current_user", "csrf_token")}, default=str)
     now = _utcnow()
     result = models.Result(user_id=user_id, operation_id=operation_id, type="analysis",
+        severity=outcome_severity(data),
         storage_manifest=raw, integrity_digest=hash_input(raw.encode()), byte_count=len(raw.encode()),
         ready_at=now, expires_at=now + timedelta(days=7))
     db.add(result)

@@ -351,6 +351,64 @@ def test_t28_free_request_identity(db, user):
     assert existing.fingerprint == fp
 
 
+# --- Issue #49: severity persisted on results -----------------------------
+
+def _severity_payload(levels):
+    return {"results": {"level_counts": levels}, "filename": "sev.log"}
+
+
+def test_outcome_severity_mapping():
+    """Worst-of mapping: errors > warnings > ok; INFO/UNKNOWN-only is ok."""
+    assert C.outcome_severity(_severity_payload({"ERROR": 1, "INFO": 5})) == "errors"
+    assert C.outcome_severity(_severity_payload({"CRITICAL": 2, "WARN": 3})) == "errors"
+    assert C.outcome_severity(_severity_payload({"WARN": 4, "INFO": 9})) == "warnings"
+    assert C.outcome_severity(_severity_payload({"INFO": 9, "UNKNOWN": 2})) == "ok"
+    assert C.outcome_severity(_severity_payload({})) == "ok"
+
+
+def test_outcome_severity_shapes():
+    """Flat CLI shape and case-insensitive keys also work."""
+    assert C.outcome_severity({"level_counts": {"error": 1}}) == "errors"
+    assert C.outcome_severity({"level_counts": {"warn": 1}}) == "warnings"
+    # Payloads without level counts carry no errors/warnings -> ok.
+    assert C.outcome_severity({}) == "ok"
+    assert C.outcome_severity(None) == "ok"
+
+
+def test_store_result_persists_severity(db, user):
+    """Paid path: store_result records the analysis outcome severity."""
+    C.grant_credits(db, user, "admin", "sev", 10)
+    db.commit()
+    op1 = _admit(db, user, "sev-k1", "sev-h1", 1)
+    r1 = C.store_result(db, user, op1.id, _severity_payload({"ERROR": 2, "INFO": 1}))
+    assert r1.severity == "errors"
+    C.complete_operation(db, op1.id, "w1", result_id=r1.id)
+
+    op2 = _admit(db, user, "sev-k2", "sev-h2", 1)
+    r2 = C.store_result(db, user, op2.id, _severity_payload({"WARN": 1}))
+    assert r2.severity == "warnings"
+    C.complete_operation(db, op2.id, "w1", result_id=r2.id)
+
+    op3 = _admit(db, user, "sev-k3", "sev-h3", 1)
+    r3 = C.store_result(db, user, op3.id, _severity_payload({"INFO": 3}))
+    assert r3.severity == "ok"
+    db.commit()
+
+
+def test_finish_free_persists_severity(db, user):
+    """Free path: finish_free records the analysis outcome severity."""
+    from app import analysis_admission as A
+    key = "free-sev-1"
+    db.add(models.FreeRequest(
+        request_id=key, user_id=user, fingerprint="fp",
+        status="in_progress", deadline=datetime.now(timezone.utc) + timedelta(minutes=5)))
+    db.commit()
+    result = A.finish_free(db, key, _severity_payload({"WARN": 2, "INFO": 4}))
+    db.commit()
+    assert result is not None
+    assert result.severity == "warnings"
+
+
 # --- T34: Snapshot concurrency -----------------------------------------------
 
 def test_t34_invariant_snapshot_consistent(db, user):
