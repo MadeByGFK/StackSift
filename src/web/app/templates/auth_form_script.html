@@ -4,8 +4,16 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
     event.preventDefault();
     const output = form.querySelector('[role="status"]');
     const button = form.querySelector('button[type="submit"]');
+    // Issue #80: the notify-me form (credits page) opts into richer submit
+    // feedback via data-notify-feedback — its status element gets an
+    // unmissable success/error state and the email input clears on success.
+    // Forms without the attribute (login/signup/forgot/...) are untouched.
+    const notifyFeedback = form.hasAttribute('data-notify-feedback');
     button.disabled = true;
-    if (output) output.textContent = '';
+    if (output) {
+      output.textContent = '';
+      if (notifyFeedback) output.classList.remove('notify-success', 'notify-error');
+    }
     try {
       const response = await fetch(form.action, {
       headers: { "X-Requested-With": "XMLHttpRequest" },
@@ -13,9 +21,23 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
       });
       const result = await response.json();
       if (output) output.textContent = result.error || (typeof result.detail === 'string' ? result.detail : '') || result.message || 'Unable to complete this request. Please try again.';
+      if (notifyFeedback && output) {
+        output.classList.toggle('notify-success', response.ok);
+        output.classList.toggle('notify-error', !response.ok);
+        if (response.ok) {
+          // The address is captured; an empty box plus the success banner
+          // makes the outcome obvious. On error the typed address stays
+          // in place so it can be corrected and resent.
+          const emailInput = form.querySelector('input[type="email"]');
+          if (emailInput) emailInput.value = '';
+        }
+      }
       if (response.ok && form.dataset.successUrl) location.assign(form.dataset.successUrl);
     } catch (_) {
-      if (output) output.textContent = 'Unable to connect. Please try again.';
+      if (output) {
+        output.textContent = 'Unable to connect. Please try again.';
+        if (notifyFeedback) output.classList.add('notify-error');
+      }
     } finally {
       button.disabled = false;
     }

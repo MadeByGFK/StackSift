@@ -55,6 +55,11 @@
 .notify-capture button.cta { padding: 12px 28px; border-radius: 8px; font-weight: 600; background: var(--accent); color: #1a1a2e; border: none; cursor: pointer; font-size: 1rem; }
 .notify-capture button.cta:hover { filter: brightness(1.1); }
 .notify-capture [role="status"] { width: 100%; margin: 12px 0 0; min-height: 1.2em; font-size: 0.95rem; }
+/* ISSUE-80: unmissable submit feedback. The shared form handler adds one of
+   these classes to the status element for the notify form only (success
+   also clears the email input); plain small text was too easy to miss. */
+.notify-capture [role="status"].notify-success { background: rgba(63,185,80,.15); border: 1px solid var(--green); border-radius: 8px; padding: 10px 16px; font-size: 1.05rem; font-weight: 700; color: var(--green); }
+.notify-capture [role="status"].notify-error { background: rgba(248,81,73,.12); border: 1px solid #f85149; border-radius: 8px; padding: 10px 16px; font-size: 1rem; font-weight: 600; color: #ff7b72; }
 .usage { margin: 32px 0; }
 .usage h2 { font-size: 1.4rem; margin: 0 0 4px; text-align: center; }
 .usage > p { text-align: center; color: var(--muted); font-size: 0.95rem; margin: 0 0 16px; }
@@ -185,7 +190,7 @@
   <section class="notify-capture" aria-labelledby="notify-heading">
     <h2 id="notify-heading">Credit purchases are coming soon</h2>
     <p>Leave your email and we&rsquo;ll send you <strong>one email</strong> when credit packs go on sale. No launch date promised &mdash; just the one launch email, no spam.</p>
-    <form method="post" action="/credits/notify" data-auth-form>
+    <form method="post" action="/credits/notify" data-auth-form data-notify-feedback>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="visually-hidden" for="notify-email">Email address</label>
       <input id="notify-email" name="email" type="email" required maxlength="255" autocomplete="email" placeholder="you@example.com">
