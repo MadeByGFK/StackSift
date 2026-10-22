@@ -33,6 +33,9 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
         }
       }
       if (response.ok && form.dataset.successUrl) location.assign(form.dataset.successUrl);
+      // ISSUE-68: the credits-page buy forms (data-checkout-form) receive the
+      // Stripe Checkout URL as JSON and hand the browser to Stripe.
+      if (form.hasAttribute('data-checkout-form') && response.ok && result.checkout_url) location.assign(result.checkout_url);
     } catch (_) {
       if (output) {
         output.textContent = 'Unable to connect. Please try again.';
@@ -105,7 +108,7 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
       '<div style="border:1px solid #ecc94b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Growth</strong> <span style="background:#ecc94b;color:#1a1a1a;font-size:0.7rem;padding:0.15rem 0.5rem;border-radius:10px;">POPULAR</span><br><span style="color:#a0aec0;font-size:0.85rem;">25 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$10</div></div>' +
       '<div style="border:1px solid #2d3d6b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Power</strong><br><span style="color:#a0aec0;font-size:0.85rem;">75 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$25</div></div>' +
       '</div>' +
-      '<p style="color:#a0aec0;font-size:0.85rem;text-align:center;margin:1.5rem 0 0 0;">Purchasing coming soon. <a href="/credits" style="color:#ecc94b;">View details</a></p>' +
+      '<a href="/credits" style="display:block;text-align:center;margin:1.5rem 0 0 0;padding:0.7rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;text-decoration:none;">Buy credits</a>' +
       '<button id="credit-modal-close" style="width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;">Close</button>';
     overlay.appendChild(card);
     document.body.appendChild(overlay);
@@ -159,6 +162,15 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           msg.style.cssText = 'margin:0 0 1rem 0;color:#9db1cc;';
           msg.textContent = insufficient ? 'PDF export costs 2 credits.' : error;
           card.appendChild(msg);
+          if (insufficient) {
+            // ISSUE-68: insufficient-credits entry point — the credits page
+            // hosts the per-pack buy forms.
+            const buy = document.createElement('a');
+            buy.href = '/credits';
+            buy.textContent = 'Buy credits';
+            buy.style.cssText = 'display:block;text-align:center;width:100%;margin-top:1rem;padding:0.6rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;text-decoration:none;box-sizing:border-box;';
+            card.appendChild(buy);
+          }
           const close = document.createElement('button');
           close.style.cssText = 'width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;';
           close.textContent = 'Close';
@@ -178,3 +190,4 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
   });
 })();
 </script>
+

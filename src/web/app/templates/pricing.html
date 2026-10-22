@@ -46,20 +46,16 @@
 .signup-cta .cta { display: inline-block; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; background: var(--accent); color: #1a1a2e; }
 .signup-cta .cta:hover { filter: brightness(1.1); }
 .signup-cta p { color: var(--muted); font-size: 0.9rem; margin-top: 10px; }
-/* ISSUE-67 notify-me bridge: remove this block (and its CSS) when checkout ships (#68). */
-.notify-capture { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin: 8px 0 32px; text-align: center; }
-.notify-capture h2 { margin: 0 0 8px; font-size: 1.4rem; }
-.notify-capture p { color: var(--muted); font-size: 0.95rem; max-width: 540px; margin: 0 auto 16px; }
-.notify-capture form { display: flex; gap: 8px; justify-content: center; align-items: center; flex-wrap: wrap; }
-.notify-capture input[type="email"] { padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: inherit; font-size: 1rem; min-width: 260px; }
-.notify-capture button.cta { padding: 12px 28px; border-radius: 8px; font-weight: 600; background: var(--accent); color: #1a1a2e; border: none; cursor: pointer; font-size: 1rem; }
-.notify-capture button.cta:hover { filter: brightness(1.1); }
-.notify-capture [role="status"] { width: 100%; margin: 12px 0 0; min-height: 1.2em; font-size: 0.95rem; }
-/* ISSUE-80: unmissable submit feedback. The shared form handler adds one of
-   these classes to the status element for the notify form only (success
-   also clears the email input); plain small text was too easy to miss. */
-.notify-capture [role="status"].notify-success { background: rgba(63,185,80,.15); border: 1px solid var(--green); border-radius: 8px; padding: 10px 16px; font-size: 1.05rem; font-weight: 700; color: var(--green); }
-.notify-capture [role="status"].notify-error { background: rgba(248,81,73,.12); border: 1px solid #f85149; border-radius: 8px; padding: 10px 16px; font-size: 1rem; font-weight: 600; color: #ff7b72; }
+/* ISSUE-68: buy-form styles for the per-pack checkout forms. */
+.pack-buy-form { margin: 0; }
+.pack-buy { display: inline-block; padding: 12px 32px; border-radius: 8px; font-weight: 700; background: var(--accent); color: #1a1a2e; border: none; cursor: pointer; font-size: 1rem; }
+.pack-buy:hover { filter: brightness(1.1); }
+.pack-buy:disabled { opacity: 0.6; cursor: wait; }
+.pack-status { margin: 10px 0 0; min-height: 1.2em; font-size: 0.85rem; color: var(--muted); }
+.pack-signup { display: inline-block; font-size: 0.85rem; font-weight: 600; color: var(--accent); text-decoration: none; border: 1px solid var(--border); border-radius: 20px; padding: 8px 20px; }
+.pack-signup:hover { border-color: var(--accent); }
+.checkout-banner { max-width: 640px; margin: 24px auto 0; padding: 14px 20px; border-radius: 10px; text-align: center; font-size: 0.95rem; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+.checkout-banner.success { border-color: var(--green); background: rgba(63,185,80,.12); }
 .usage { margin: 32px 0; }
 .usage h2 { font-size: 1.4rem; margin: 0 0 4px; text-align: center; }
 .usage > p { text-align: center; color: var(--muted); font-size: 0.95rem; margin: 0 0 16px; }
@@ -108,6 +104,12 @@
     <p>Free log analysis, no signup required. Credit packs for when you need premium capabilities.</p>
   </section>
 
+  {% if checkout_status == "success" %}
+  <div class="checkout-banner success" role="status">Payment complete — your credits are on their way and will appear in your balance shortly.</div>
+  {% elif checkout_status == "cancelled" %}
+  <div class="checkout-banner" role="status">Checkout cancelled — no charge was made.</div>
+  {% endif %}
+
   <section class="free-banner">
     <div class="free-main">
       <h2>Free</h2>
@@ -125,81 +127,48 @@
 
   <div class="section-head">
     <h2>Credit packs</h2>
-    <p>One-time purchases — no subscription, no auto-renewal. Here&rsquo;s how credits will work at launch; premium is coming soon.</p>
+    <p>One-time purchases — no subscription, no auto-renewal. You need an account to buy; signing up gets you 3 free credits.</p>
   </div>
 
-  <div class="pack-grid">
-    <div class="pack">
-      <h3>Starter</h3>
-      <div class="pack-price">$5</div>
-      <div class="pack-credits">10 credits</div>
-      <div class="pack-econ">$0.50 per credit &middot; ~5 PDF exports</div>
-      <div class="pack-value subtle">Perfect for trying premium</div>
+  <div class="pack-grid" id="packs">
+    {% for pack in packs %}
+    <div class="pack{% if pack.highlight %} highlight{% endif %}">
+      {% if pack.badge %}<div class="pack-badge">{{ pack.badge }}</div>{% endif %}
+      <h3>{{ pack.name }}</h3>
+      <div class="pack-price">{{ pack.price_label }}</div>
+      <div class="pack-credits">{{ pack.credits }} credits</div>
+      <div class="pack-econ">{{ pack.econ }}</div>
+      <div class="pack-value{% if not pack.highlight %} subtle{% endif %}">{{ pack.tagline }}</div>
       <ul>
         <li>Everything in Free</li>
         <li>PDF export</li>
         <li>Results kept for 7 days</li>
         <li>More coming soon</li>
       </ul>
+      {% if current_user and pack.ready %}
+      <form method="post" action="/credits/checkout" data-auth-form data-checkout-form class="pack-buy-form">
+        <input type="hidden" name="pack_id" value="{{ pack.id }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="pack-buy">Buy {{ pack.price_label }}</button>
+        <p role="status" aria-live="polite" class="pack-status"></p>
+      </form>
+      {% elif current_user %}
       <span class="pack-soon">Coming soon</span>
+      {% else %}
+      <a href="/signup" class="pack-signup">Sign up to buy</a>
+      {% endif %}
     </div>
-
-    <div class="pack highlight">
-      <h3>Growth</h3>
-      <div class="pack-price">$10</div>
-      <div class="pack-credits">25 credits</div>
-      <div class="pack-econ">$0.40 per credit &middot; ~12 PDF exports</div>
-      <div class="pack-value">25% more credits per dollar</div>
-      <ul>
-        <li>Everything in Free</li>
-        <li>PDF export</li>
-        <li>Results kept for 7 days</li>
-        <li>More coming soon</li>
-      </ul>
-      <span class="pack-soon">Coming soon</span>
-    </div>
-
-    <div class="pack highlight">
-      <div class="pack-badge">Best Value</div>
-      <h3>Power</h3>
-      <div class="pack-price">$25</div>
-      <div class="pack-credits">75 credits</div>
-      <div class="pack-econ">$0.33 per credit &middot; ~37 PDF exports</div>
-      <div class="pack-value">50% more credits per dollar</div>
-      <ul>
-        <li>Everything in Free</li>
-        <li>PDF export</li>
-        <li>Results kept for 7 days</li>
-        <li>More coming soon</li>
-      </ul>
-      <span class="pack-soon">Coming soon</span>
-    </div>
+    {% endfor %}
   </div>
 
   <div class="signup-cta">
     {% if current_user %}
-      <a href="/settings" class="cta">You&rsquo;re signed up &mdash; we&rsquo;ll notify you at launch</a>
+      <a href="/settings" class="cta">Manage your account</a>
     {% else %}
       <a href="/signup" class="cta">Sign up &mdash; get 3 free credits</a>
     {% endif %}
     <p>Everyone who signs up gets 3 free credits once they verify their email.</p>
   </div>
-
-  <!-- ISSUE-67 notify-me bridge: REMOVE this block when checkout ships (#68). -->
-  {% if not current_user %}
-  <section class="notify-capture" aria-labelledby="notify-heading">
-    <h2 id="notify-heading">Credit purchases are coming soon</h2>
-    <p>Leave your email and we&rsquo;ll send you <strong>one email</strong> when credit packs go on sale. No launch date promised &mdash; just the one launch email, no spam.</p>
-    <form method="post" action="/credits/notify" data-auth-form data-notify-feedback>
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="visually-hidden" for="notify-email">Email address</label>
-      <input id="notify-email" name="email" type="email" required maxlength="255" autocomplete="email" placeholder="you@example.com">
-      <button type="submit" class="cta">Notify me</button>
-      <p role="status" aria-live="polite"></p>
-    </form>
-  </section>
-  {% endif %}
-  <!-- /ISSUE-67 -->
 
   <section class="policies">
     <div class="policy">
@@ -249,3 +218,4 @@
 {% include "nav_script.html" %}
 </body>
 </html>
+
