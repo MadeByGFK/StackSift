@@ -106,6 +106,15 @@ burst_limiter = RateLimiter(max_requests=2, window_seconds=60)
 shared_limiter = PostgresRateLimiter(
     burst_max=2, burst_window=60, hourly_max=10, hourly_window=3600
 )
+# ISSUE-67: notify-me signups share the Postgres-backed enforcement so the
+# 10/hour/IP cap holds across processes, but under their own bucket key
+# ("n:" + IP — short prefix because rate_limit_buckets.trusted_ip is
+# String(45)) so signups never consume analysis quota. The burst window is
+# widened to the hourly window, so admit() enforces the hourly cap only —
+# the auth-side notify limit has no burst component.
+notify_limiter = PostgresRateLimiter(
+    burst_max=10, burst_window=3600, hourly_max=10, hourly_window=3600
+)
 
 
 def _use_shared_limiter() -> bool:
@@ -215,16 +224,91 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/credits", response_class=HTMLResponse)
 async def credits(request: Request):
+    from app import auth as auth_helpers
+
     _user, _csrf = _get_current_user_optional(request)
-    return templates.TemplateResponse(
+    set_cookie_token = None
+    if not _user:
+        # Anonymous visitors need a CSRF token for the notify-me form
+        # (issue #67). Mirrors the cookie pattern in auth_routes._render.
+        _csrf = request.cookies.get(auth_helpers.CSRF_COOKIE) or auth_helpers.generate_token()
+        if auth_helpers.CSRF_COOKIE not in request.cookies:
+            set_cookie_token = _csrf
+    response = templates.TemplateResponse(
         request, "pricing.html", {"current_user": _user, "csrf_token": _csrf}
     )
+    if set_cookie_token:
+        response.set_cookie(
+            auth_helpers.CSRF_COOKIE, set_cookie_token,
+            secure=True, httponly=True, samesite="lax", path="/",
+        )
+    return response
 
 
 @app.get("/pricing", include_in_schema=False)
 async def pricing_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/credits", status_code=301)
+
+
+# ISSUE-67 notify-me bridge: REMOVE this endpoint when checkout ships (#68).
+# The collected addresses get exactly one launch email at that point; counts
+# from notify_signups are intent only, never demand evidence (GFK-013 §5.12).
+@app.post("/credits/notify")
+async def credits_notify(
+    request: Request,
+    email: str = Form(...),
+    csrf_token: str = Form(""),
+    db=Depends(get_db),
+):
+    import hmac
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+    from sqlalchemy.exc import IntegrityError
+    from app import auth as auth_helpers
+    from app.models import NotifySignup
+
+    # CSRF: mirrors auth_routes.require_csrf — session token when logged in,
+    # CSRF cookie for anonymous visitors.
+    session = auth_helpers.get_session_from_cookie(db, request)
+    expected = session.csrf_token if session else request.cookies.get(auth_helpers.CSRF_COOKIE)
+    if not expected or not isinstance(csrf_token, str) or not hmac.compare_digest(csrf_token, expected):
+        raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
+
+    ip = _client_ip(request)
+    if _use_shared_limiter():
+        # Shared enforcement (same pattern as analysis admission): a fresh
+        # session, because admit() manages its own transaction; database
+        # failures fail closed with 503 rather than skipping the limit.
+        try:
+            rl_db = _db_session()
+            try:
+                notify_limiter.admit(rl_db, f"n:{ip}")
+            finally:
+                rl_db.close()
+        except (BurstLimited, HourlyLimited):
+            # Identical windows/counts on notify_limiter: both mean the
+            # 10/hour cap for this IP is exhausted.
+            raise HTTPException(429, "Too many attempts. Please try again later.")
+        except Exception:
+            raise HTTPException(503, "Rate limiting is temporarily unavailable. Please try again shortly.")
+    else:
+        auth_helpers.check_rate_limit("notify", ip)
+
+    email_norm = auth_helpers.normalize_email(email)
+    if len(email_norm) > 255 or email_norm.count("@") != 1 or any(c.isspace() for c in email_norm) or not all(email_norm.split("@")):
+        return JSONResponse({"error": "Enter a valid email address."}, status_code=400)
+
+    existing = db.query(NotifySignup).filter(NotifySignup.email == email_norm).first()
+    if not existing:
+        try:
+            db.add(NotifySignup(email=email_norm, source="credits"))
+            db.commit()
+        except IntegrityError:
+            # Race: another request captured this address first. Roll back and
+            # treat as success — the address is on the list either way.
+            db.rollback()
+    return JSONResponse({"message": "You're on the list — we'll email you once when credit purchases open."})
 
 @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy(request: Request):
