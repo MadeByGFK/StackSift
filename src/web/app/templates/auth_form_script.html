@@ -42,8 +42,24 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
       badge.style.cssText = 'background:#2d3d6b;border:1px solid #4a5d8f;color:#fff;border-radius:20px;padding:0.35rem 0.8rem;font-size:0.85rem;cursor:pointer;margin-right:0.5rem;';
       badge.title = 'View credit packs';
       badge.addEventListener('click', showCreditModal);
-      // Insert before logout form
-      logoutForm.parentNode.insertBefore(badge, logoutForm);
+      // Placement (issue #79): on desktop the badge sits in the nav row,
+      // before the logout form, as before. On mobile (<=768px) the nav is
+      // collapsed into the hamburger menu, so the badge moves into the
+      // header bar itself, just before the toggle button — it must stay
+      // visible without opening the menu. The node is moved, not cloned,
+      // so the click-to-open-modal handler survives.
+      function placeBadge() {
+        const toggle = document.querySelector('.nav-toggle');
+        if (window.matchMedia('(max-width: 768px)').matches && toggle) {
+          toggle.parentNode.insertBefore(badge, toggle);
+        } else {
+          logoutForm.parentNode.insertBefore(badge, logoutForm);
+        }
+      }
+      placeBadge();
+      const badgeMq = window.matchMedia('(max-width: 768px)');
+      if (badgeMq.addEventListener) badgeMq.addEventListener('change', placeBadge);
+      else if (badgeMq.addListener) badgeMq.addListener(placeBadge);
     })
     .catch(() => {});
 

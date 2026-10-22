@@ -92,6 +92,15 @@
   }
   .nav-logout{background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;padding:8px 12px;font-family:inherit;border-radius:8px;transition:color .15s,background .15s}
   .nav-logout:hover{color:var(--text);background:var(--panel)}
+  .nav-toggle{display:none;background:none;border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer;padding:8px;line-height:0}
+  @media (max-width:768px){
+    .nav-inner{flex-wrap:wrap;height:auto;min-height:64px;padding-top:10px;padding-bottom:10px}
+    .nav-toggle{display:inline-flex;align-items:center;justify-content:center;margin-left:auto}
+    .nav .nav-links{display:none;flex-direction:column;align-items:stretch;gap:4px;width:100%;padding:8px 0 4px}
+    .nav .nav-links.open{display:flex}
+    .nav .nav-links form{display:block !important}
+    .nav .nav-links .nav-logout{width:100%;text-align:left}
+  }
 </style>
 </head>
 <body>
@@ -99,7 +108,8 @@
 <header class="nav">
   <div class="nav-inner">
     <a href="/" class="logo">stacksift<span>.</span></a>
-    <nav class="nav-links">
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
       {% if current_user %}
         <a href="/reports" class="active">My Reports</a>
         <a href="/settings">Settings</a>
@@ -178,5 +188,6 @@
 </main>
 
 {% include 'auth_form_script.html' %}
+{% include 'nav_script.html' %}
 </body>
 </html>

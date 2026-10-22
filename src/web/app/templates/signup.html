@@ -29,8 +29,9 @@
 <body>
 <div class="wrap">
   <header class="top">
-    <div class="logo"><a href="/" style="text-decoration:none;color:inherit">stacksift<span>.</span></a></div>
-    <nav class="nav-links">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
       {% if current_user %}
         <a href="/reports">My Reports</a>
         <a href="/settings">Settings</a>
@@ -120,5 +121,6 @@
   </div>
 </div>
 {% include "auth_form_script.html" %}
+{% include "nav_script.html" %}
 </body>
 </html>

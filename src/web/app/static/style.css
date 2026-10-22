@@ -34,10 +34,26 @@ header.top {
   display: flex; align-items: center; justify-content: space-between;
   padding: 18px 0; border-bottom: 1px solid var(--border);
 }
-.logo { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+/* Canonical wordmark (issue #79): matches reports.html exactly — 20px/700,
+   tight tracking, accent period. The anchor itself carries .logo; the nav
+   link rule below is scoped to .nav-links so it can never shrink it. */
+.logo { font-size: 20px; font-weight: 700; letter-spacing: -.02em; color: var(--text); text-decoration: none; }
 .logo span { color: var(--accent); }
-.top a { color: var(--muted); text-decoration: none; font-size: 14px; }
-.top a:hover { color: var(--text); }
+.top .nav-links a { color: var(--muted); text-decoration: none; font-size: 14px; }
+.top .nav-links a:hover { color: var(--text); }
+/* Mobile nav toggle (issue #79): hidden above 768px; below it the nav
+   collapses into a menu opened by this button. */
+.nav-toggle { display: none; background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--text); cursor: pointer; padding: 8px; line-height: 0; }
+@media (max-width: 768px) {
+  header.top { flex-wrap: wrap; }
+  .nav-toggle { display: inline-flex; align-items: center; justify-content: center; margin-left: auto; }
+  .top .nav-links { display: none; flex-direction: column; align-items: stretch; gap: 4px; width: 100%; padding: 12px 0 4px; }
+  .top .nav-links.open { display: flex; }
+  .top .nav-links a { padding: 10px 8px; }
+  .top .nav-links form { display: block !important; }
+  .top .nav-links .nav-logout { width: 100%; text-align: left; padding: 10px 8px; }
+  .top .nav-links .user-email { max-width: 100%; padding: 10px 8px; }
+}
 /* Auth navigation */
 .nav-links { display: flex; align-items: center; gap: 18px; }
 .nav-links a { color: var(--muted); text-decoration: none; font-size: 14px; }
