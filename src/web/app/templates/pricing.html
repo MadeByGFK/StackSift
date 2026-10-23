@@ -56,6 +56,9 @@
 .pack-signup:hover { border-color: var(--accent); }
 .checkout-banner { max-width: 640px; margin: 24px auto 0; padding: 14px 20px; border-radius: 10px; text-align: center; font-size: 0.95rem; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
 .checkout-banner.success { border-color: var(--green); background: rgba(63,185,80,.12); }
+/* ISSUE-71: ledger-derived balance strip for signed-in users. */
+.balance-strip { max-width: 640px; margin: 24px auto 0; padding: 14px 20px; border-radius: 10px; text-align: center; font-size: 1rem; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+.balance-strip strong { color: var(--accent); font-size: 1.2rem; }
 .usage { margin: 32px 0; }
 .usage h2 { font-size: 1.4rem; margin: 0 0 4px; text-align: center; }
 .usage > p { text-align: center; color: var(--muted); font-size: 0.95rem; margin: 0 0 16px; }
@@ -108,6 +111,43 @@
   <div class="checkout-banner success" role="status">Payment complete — your credits are on their way and will appear in your balance shortly.</div>
   {% elif checkout_status == "cancelled" %}
   <div class="checkout-banner" role="status">Payment didn't go through — no charge was made and no credits were added. You can try again below.</div>
+  {% endif %}
+
+  {# ISSUE-71: signed-in users see their ledger-derived balance here, so the
+     post-purchase balance is visible without hunting for it. On a successful
+     return from Stripe the strip self-updates when settlement lands — the
+     user never has to hit refresh. #}
+  {% if current_user and balance_summary is not none %}
+  <div class="balance-strip" role="status">
+    Your balance: <strong id="credit-balance" data-initial="{{ balance_summary.balance }}">{{ balance_summary.balance }}</strong> credits
+  </div>
+  {% endif %}
+  {% if checkout_status == "success" and current_user and balance_summary is not none %}
+  <script>
+  (function () {
+    var el = document.getElementById("credit-balance");
+    if (!el) return;
+    var start = parseInt(el.getAttribute("data-initial") || "0", 10);
+    var banner = document.querySelector(".checkout-banner.success");
+    var tries = 0, max = 24;  /* ~60s at 2.5s intervals */
+    function tick() {
+      tries++;
+      fetch("/credits/balance", {credentials: "same-origin", headers: {"Accept": "application/json"}})
+        .then(function (r) { if (!r.ok) throw new Error("balance unavailable"); return r.json(); })
+        .then(function (d) {
+          if (typeof d.balance === "number" && d.balance > start) {
+            el.textContent = d.balance;
+            if (banner) banner.textContent =
+              "Payment complete — " + (d.balance - start) + " credits added to your balance.";
+            return; /* settled: stop polling */
+          }
+          if (tries < max) setTimeout(tick, 2500);
+        })
+        .catch(function () { if (tries < max) setTimeout(tick, 2500); });
+    }
+    setTimeout(tick, 2500);
+  })();
+  </script>
   {% endif %}
 
   <section class="free-banner">

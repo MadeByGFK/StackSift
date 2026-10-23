@@ -46,6 +46,27 @@
       <p>Email {% if user.email_verified %}✓ verified{% else %}— not verified{% endif %}</p>
     </div>
     <div class="settings-card">
+      <h2>Credits</h2>
+      <p>Your current balance: <strong style="color:#fff">{{ balance_summary.balance }} credits</strong></p>
+      <p><a href="/credits" class="btn-small" style="text-decoration:none;display:inline-block">Buy credits</a></p>
+    </div>
+    <div class="settings-card" id="purchase-history">
+      <h2>Purchase history</h2>
+      <p>One-time credit pack purchases on this account.</p>
+      {% if purchases %}
+      {% for p in purchases %}
+      <div class="session-row">
+        <div>
+          <div class="session-info">{{ pack_names.get(p.pack_id, p.pack_id) }} — {{ p.credits }} credits</div>
+          <div class="session-meta">{{ p.completed_at.strftime('%Y-%m-%d %H:%M UTC') if p.completed_at else '' }}</div>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <p>No credit purchases yet.</p>
+      {% endif %}
+    </div>
+    <div class="settings-card">
       <h2>Connected accounts</h2>
       <p>Link Google or GitHub to sign in with one click.</p>
       <div class="oauth-row">

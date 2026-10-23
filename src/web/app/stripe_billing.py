@@ -214,6 +214,7 @@ def create_checkout_session(
     purchase_id,
     success_url: str,
     cancel_url: str,
+    receipt_email: str | None = None,
 ) -> tuple[str, str]:
     """Create a Stripe Checkout Session for a pack.
 
@@ -221,6 +222,11 @@ def create_checkout_session(
     quantity 1. The session carries the user, pack, and purchase identity in
     metadata + client_reference_id so settlement (issue #69) can grant
     deterministically via metadata[purchase_id].
+
+    ``receipt_email`` (issue #71): the purchasing user's account email. When
+    set, it is passed as ``payment_intent_data[receipt_email]`` so Stripe
+    emails the payment receipt to the buyer. No PII beyond the account email
+    the user already gave us reaches Stripe.
     """
     pack = PACKS.get(pack_id)
     if pack is None:
@@ -247,6 +253,9 @@ def create_checkout_session(
         "metadata[credits]": str(pack["credits"]),
         "metadata[pricing_version]": str(credits_helpers.PRICING_VERSION),
     }
+    if receipt_email:
+        # Issue #71: Stripe sends the payment receipt to this address.
+        data["payment_intent_data[receipt_email]"] = receipt_email
     try:
         resp = httpx.post(
             f"{STRIPE_API_BASE}/checkout/sessions",
