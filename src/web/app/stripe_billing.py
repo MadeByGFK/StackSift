@@ -37,6 +37,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import time
 
 import httpx
@@ -170,6 +171,38 @@ def _webhook_secret() -> str:
     return secret
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _stripe_error_detail(resp) -> str:
+    """Summarize a Stripe API error body for the server logs.
+
+    Extracts the structured ``error`` fields Stripe documents (type, code,
+    param, message) so a failed checkout self-diagnoses from the app logs —
+    the 2026-10-23 staging E2E hit a bare HTTP 400 with no hint in our logs
+    and required dashboard spelunking. The raw body is NEVER logged: it can
+    carry account detail. Email-looking values are redacted from the message.
+    Returns a short fallback string when the body is not a JSON error object.
+    """
+    try:
+        body = resp.json()
+    except Exception:
+        return "unparseable-body"
+    err = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(err, dict):
+        return "unparseable-body"
+    parts = []
+    for key in ("type", "code", "param"):
+        value = err.get(key)
+        if value:
+            parts.append(f"{key}={value}")
+    message = err.get("message")
+    if message:
+        message = _EMAIL_RE.sub("[redacted-email]", str(message))
+        parts.append(f"message={message}")
+    return " ".join(parts) or "empty-error"
+
+
 def verify_stripe_signature(
     payload: bytes,
     header: str | None,
@@ -275,8 +308,11 @@ def create_checkout_session(
         logger.error("Stripe checkout request failed (%s)", type(exc).__name__)
         raise CheckoutError("Stripe request failed") from exc
     if resp.status_code != 200:
-        # Log the status only — Stripe error bodies can carry account detail.
-        logger.error("Stripe checkout returned HTTP %s", resp.status_code)
+        # Log the structured Stripe error (type/code/param/message), never
+        # the raw body — it can carry account detail. The user-facing error
+        # stays generic; the detail is for the server logs only.
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe checkout returned HTTP %s (%s)", resp.status_code, detail)
         raise CheckoutError("Stripe request failed")
     body = resp.json()
     url = body.get("url")
