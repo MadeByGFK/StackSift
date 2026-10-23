@@ -147,6 +147,22 @@ async def verify_email(request: Request, token: str = Form(...), db: DBSession =
         db.rollback()
         import logging
         logging.getLogger(__name__).exception("signup reward grant failed")
+    # Issue #62: funnel milestone — email verified. Standalone session: this
+    # route's own transaction is not otherwise committed here. Best-effort:
+    # never breaks verification.
+    try:
+        from app import funnel as funnel_helpers
+        from app.auth import hash_token as _hash_token
+        from app.models import EmailVerification as _EmailVerification
+        row = db.query(_EmailVerification).filter(
+            _EmailVerification.token_hash == _hash_token(token)).first()
+        if row is not None:
+            funnel_helpers.emit_standalone(funnel_helpers.EMAIL_VERIFIED,
+                                           user_id=row.user_id,
+                                           once_per_identity=True)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("funnel email_verified emission failed")
     return JSONResponse({"message": "Email verified. You can now log in."})
 
 

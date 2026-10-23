@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import models
+from app import funnel, models
 
 
 def _utcnow() -> datetime:
@@ -184,6 +184,13 @@ def grant_credits(
         reason="grant",
         grant_splits=[(grant.id, quantity)],
     )
+    # Issue #62: purchase success is observed at the grant choke point, so the
+    # event fires automatically once Phase 3 settlement (#69) grants with
+    # source="purchase". Telemetry is best-effort via emit() and never breaks
+    # the money path.
+    if source == "purchase":
+        funnel.emit(db, funnel.PURCHASE_SUCCESS, user_id=user_id,
+                    meta={"credits": quantity})
     return grant
 
 
@@ -724,6 +731,10 @@ def _settle_complete(db, op, grants, result):
     permit = db.execute(select(models.Permit).where(models.Permit.operation_id == op.id)).scalar_one()
     _release_capacity(db, permit, op.user_id)
     db.flush()
+    # Issue #62: credit spend is observed at consumption (allocations flip to
+    # consumed). Best-effort; never breaks settlement.
+    funnel.emit(db, funnel.CREDIT_SPEND, user_id=op.user_id,
+                meta={"credits": op.cost, "op_type": op.type})
     return op
 
 

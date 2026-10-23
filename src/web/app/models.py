@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import TypeDecorator
@@ -556,6 +556,30 @@ class NotifySignup(Base):
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
+class FunnelEvent(Base):
+    """Activation and purchase funnel events (issue #62).
+
+    Privacy contract: rows join by user_id (authenticated) or anon_id (a
+    random pre-account session id) only. Log text, tokens, filenames, IPs,
+    and contact PII are never recorded — app.funnel.record() enforces this
+    on the meta payload. Counts are intent only, never demand evidence
+    (GFK-013 §5.12).
+    """
+
+    __tablename__ = "funnel_events"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    anon_id = Column(String(64), nullable=True)
+    event = Column(String(32), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    meta = Column(JSON, nullable=True)
+
+    __table_args__ = (
+        sa.Index("ix_funnel_events_user_event", "user_id", "event"),
+        sa.Index("ix_funnel_events_anon_event", "anon_id", "event"),
+        sa.Index("ix_funnel_events_occurred", "occurred_at"),
+    )
 # ---------------------------------------------------------------------------
 # Phase 3: Stripe purchases — settlement tables (issue #69).
 #
