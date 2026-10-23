@@ -44,6 +44,8 @@ def run_once(*, reconcile=False):
         C.recover_expired_operations(db)
         recover_free_requests(db)
         cleanup_results(db)
+        # Issue #70: abandoned checkouts must not sit pending forever.
+        C.expire_stale_pending_purchases(db)
         if reconcile:
             accounts = db.scalars(select(M.CreditAccount.user_id)).all()
             db.rollback()

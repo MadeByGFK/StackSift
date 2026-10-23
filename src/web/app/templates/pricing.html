@@ -107,7 +107,7 @@
   {% if checkout_status == "success" %}
   <div class="checkout-banner success" role="status">Payment complete — your credits are on their way and will appear in your balance shortly.</div>
   {% elif checkout_status == "cancelled" %}
-  <div class="checkout-banner" role="status">Checkout cancelled — no charge was made.</div>
+  <div class="checkout-banner" role="status">Payment didn't go through — no charge was made and no credits were added. You can try again below.</div>
   {% endif %}
 
   <section class="free-banner">
