@@ -267,7 +267,9 @@ def test_checkout_route_emits_purchase_start(route_env, monkeypatch):
         status_code = 200
 
         def json(self):
-            return {"url": "https://checkout.stripe.com/pay/cs_test_123"}
+            # The merged checkout path (#84) requires the session id as well
+            # as the URL — it records pending purchases before the call.
+            return {"id": "cs_test_123", "url": "https://checkout.stripe.com/pay/cs_test_123"}
 
     monkeypatch.setattr(stripe_billing.httpx, "post",
                         lambda url, data=None, auth=None, headers=None, timeout=None: (
