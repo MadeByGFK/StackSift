@@ -17,15 +17,24 @@ checkout attempt fails closed with 503 — the page works before the sandbox
 products exist.
 
 Calls go to the Stripe REST API directly (httpx is already a pinned
-dependency) so no new package is required. Settlement (webhook -> grant) is
-issue #69; the metadata below is the contract it will settle on:
+dependency) so no new package is required. Webhook signature verification
+is HMAC-SHA256 over the raw body (hashlib/hmac only) — no new package.
 
+Settlement contract (issue #69): the session carries
+
+    metadata[purchase_id]   local CreditPurchase id (authoritative join key)
     metadata[user_id], metadata[pack_id], metadata[credits],
     metadata[pricing_version], client_reference_id = user_id
+
+The webhook looks the purchase up by metadata[purchase_id] and backfills
+stripe_session_id from the event; metadata[user_id]/credits must agree with
+the purchase row or settlement fails closed.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 import time
@@ -87,6 +96,10 @@ class LiveKeyRefused(CheckoutError):
     """A live secret key was presented; this build never uses live mode."""
 
 
+class WebhookNotConfigured(CheckoutError):
+    """STRIPE_WEBHOOK_SECRET is not set — webhooks fail closed."""
+
+
 def get_pack(pack_id: str) -> dict | None:
     """Return the pack definition, or None for an unknown pack id."""
     return PACKS.get(pack_id)
@@ -141,18 +154,73 @@ def _secret_key() -> str:
     return key
 
 
+def _webhook_secret() -> str:
+    """Return the Stripe webhook signing secret.
+
+    Raises WebhookNotConfigured when unset, LiveKeyRefused when a live
+    secret key is configured (this build never settles live payments;
+    live activation is a separate founder gate).
+    """
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    if not secret:
+        raise WebhookNotConfigured("STRIPE_WEBHOOK_SECRET is not set")
+    key = os.environ.get("STRIPE_SECRET_KEY", "")
+    if key.startswith("sk_live_"):
+        raise LiveKeyRefused("live Stripe keys are never used by this build")
+    return secret
+
+
+def verify_stripe_signature(
+    payload: bytes,
+    header: str | None,
+    secret: str,
+    tolerance: int = 300,
+) -> bool:
+    """Verify a Stripe webhook signature (Stripe-Signature header).
+
+    Stripe signs ``f"{timestamp}.{payload}"`` with HMAC-SHA256 and sends
+    ``t=<ts>,v1=<sig>[,v1=<sig>...]``. Any v1 may match (key rotation);
+    the timestamp must be within ``tolerance`` seconds of now. Anything
+    unsigned, malformed, stale, or mismatched returns False — the caller
+    answers 400 and touches no database rows.
+    """
+    if not header or not secret:
+        return False
+    try:
+        parts: dict[str, list[str]] = {}
+        for item in header.split(","):
+            name, _, value = item.partition("=")
+            name, value = name.strip(), value.strip()
+            if name and value:
+                parts.setdefault(name, []).append(value)
+        timestamps = parts.get("t", [])
+        signatures = parts.get("v1", [])
+        if not timestamps or not signatures:
+            return False
+        ts = int(timestamps[0])
+    except (ValueError, IndexError):
+        return False
+    if abs(time.time() - ts) > tolerance:
+        return False
+    signed = str(ts).encode("ascii") + b"." + payload
+    expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, sig) for sig in signatures)
+
+
 def create_checkout_session(
     *,
     user_id,
     pack_id: str,
+    purchase_id,
     success_url: str,
     cancel_url: str,
-) -> str:
-    """Create a Stripe Checkout Session for a pack. Returns the session URL.
+) -> tuple[str, str]:
+    """Create a Stripe Checkout Session for a pack.
 
-    One-time payment (mode=payment), quantity 1. The session carries the
-    user and pack identity in metadata + client_reference_id so settlement
-    (issue #69) can grant deterministically.
+    Returns ``(session_url, session_id)``. One-time payment (mode=payment),
+    quantity 1. The session carries the user, pack, and purchase identity in
+    metadata + client_reference_id so settlement (issue #69) can grant
+    deterministically via metadata[purchase_id].
     """
     pack = PACKS.get(pack_id)
     if pack is None:
@@ -173,6 +241,7 @@ def create_checkout_session(
         "success_url": success_url,
         "cancel_url": cancel_url,
         "client_reference_id": str(user_id),
+        "metadata[purchase_id]": str(purchase_id),
         "metadata[user_id]": str(user_id),
         "metadata[pack_id]": pack_id,
         "metadata[credits]": str(pack["credits"]),
@@ -193,7 +262,9 @@ def create_checkout_session(
         # Log the status only — Stripe error bodies can carry account detail.
         logger.error("Stripe checkout returned HTTP %s", resp.status_code)
         raise CheckoutError("Stripe request failed")
-    url = resp.json().get("url")
-    if not url:
-        raise CheckoutError("Stripe returned no checkout URL")
-    return url
+    body = resp.json()
+    url = body.get("url")
+    session_id = body.get("id")
+    if not url or not session_id:
+        raise CheckoutError("Stripe returned an incomplete checkout session")
+    return url, session_id
