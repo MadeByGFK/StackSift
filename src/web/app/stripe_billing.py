@@ -256,6 +256,13 @@ def create_checkout_session(
     if receipt_email:
         # Issue #71: Stripe sends the payment receipt to this address.
         data["payment_intent_data[receipt_email]"] = receipt_email
+    # Issue #72: join keys on the payment intent so refund/dispute charges
+    # (which carry PI metadata, not session metadata) attribute to a pack.
+    data["payment_intent_data[metadata][purchase_id]"] = str(purchase_id)
+    data["payment_intent_data[metadata][pack_id]"] = pack_id
+    data["payment_intent_data[metadata][pricing_version]"] = str(
+        credits_helpers.PRICING_VERSION
+    )
     try:
         resp = httpx.post(
             f"{STRIPE_API_BASE}/checkout/sessions",

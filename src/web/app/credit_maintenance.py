@@ -51,6 +51,13 @@ def run_once(*, reconcile=False):
             db.rollback()
             for user_id in accounts:
                 C.reconcile_account(db, user_id)
+        # Issue #72: daily Stripe-to-ledger reconciliation. Guarded so a
+        # job failure never breaks the maintenance loop.
+        try:
+            from app import payment_reconcile as PR
+            PR.run_payment_reconciliation_if_due(db)
+        except Exception:
+            logging.getLogger(__name__).exception("Payment reconciliation failed")
 
 
 if __name__ == '__main__':
