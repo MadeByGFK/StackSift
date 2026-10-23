@@ -326,6 +326,11 @@ async def credits_checkout(
         )
     except stripe_billing.CheckoutError:
         raise HTTPException(503, "Credit purchases are temporarily unavailable. Please try again shortly.")
+    # Issue #62: purchase start — a Checkout session was created for this user.
+    # Standalone session: this route is otherwise read-only and never commits.
+    from app import funnel as funnel_helpers
+    funnel_helpers.emit_standalone(funnel_helpers.PURCHASE_START, user_id=_user.id,
+                                   meta={"pack_id": pack_id})
     return JSONResponse({"checkout_url": checkout_url})
 
 @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
@@ -736,6 +741,15 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 settled = A.finish_free(db, identity, data, failure)
                 if settled is not None:
                     result_id = settled.id
+            if not failure and result_id is not None:
+                # Issue #62: first successful own-log analysis. The /demo route
+                # never reaches this path, so everything here is a user upload.
+                # Identity is the user, or the anonymous session hash for
+                # pre-account visitors (privacy-appropriate: no PII).
+                from app import funnel as funnel_helpers
+                funnel_helpers.emit(db, funnel_helpers.ANALYSIS_FIRST,
+                                    user_id=user_id, anon_id=anon,
+                                    once_per_identity=True)
             db.commit()
     except Exception:
         logging.getLogger(__name__).exception("Analysis execution or settlement failed")
@@ -939,6 +953,13 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         return JSONResponse({"error": "Report not found"}, status_code=404)
     if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+    # Issue #62: export intent — an authenticated user with a real, unexpired
+    # report asked for a PDF export. Standalone session: intent counts whether
+    # or not credits suffice, and the 402 path rolls the request transaction
+    # back.
+    from app import funnel as funnel_helpers
+    funnel_helpers.emit_standalone(funnel_helpers.EXPORT_INTENT, user_id=user.id)
 
     base_idempotency_key = f"pdf-{result_id}"
     request_hash = result.integrity_digest
