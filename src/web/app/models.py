@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import TypeDecorator
@@ -656,5 +656,63 @@ class StripeWebhookEvent(Base):
         CheckConstraint(
             "outcome IN ('processed','duplicate','ignored','failed')",
             name="ck_webhook_event_outcome_valid",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: daily Stripe-to-ledger reconciliation (issue #72).
+# ---------------------------------------------------------------------------
+
+
+class PaymentReconciliation(Base):
+    """One reconciliation record per UTC calendar day (issue #72).
+
+    Compares Stripe completed payments against ledger credit grants per day
+    and per pack, to the cent. status is one of
+    'clean' | 'mismatch' | 'error' | 'skipped'.
+
+    - clean: Stripe and ledger agree on every pack; recorded as evidence.
+    - mismatch: at least one pack differs or a record on one side has no
+      counterpart on the other; ``differences`` names the specific records
+      and a founder-visible alert is raised (``alert_pending`` until the
+      alert email is delivered).
+    - error: the job itself failed (Stripe unreachable, DB error); the day
+      is retried on the next cycle, never silently dropped.
+    - skipped: Stripe checkout is not configured, so no payments could
+      exist; honest recording rather than a fabricated clean day.
+
+    Refunds and disputes count as negative entries on the Stripe side even
+    when the ledger holds no matching reversal yet — they are economics,
+    and an unmatched one is exactly the anomaly the founder must see
+    (GFK-013 §6).
+    """
+
+    __tablename__ = "payment_reconciliations"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    recon_date = Column(Date, nullable=False, unique=True)  # UTC calendar day
+    status = Column(String(20), nullable=False)
+    stripe_gross_cents = Column(Integer, nullable=False, default=0)
+    stripe_refund_cents = Column(Integer, nullable=False, default=0)
+    stripe_dispute_cents = Column(Integer, nullable=False, default=0)
+    ledger_gross_cents = Column(Integer, nullable=False, default=0)
+    ledger_refund_cents = Column(Integer, nullable=False, default=0)
+    # pack_id -> {stripe_gross_cents, stripe_refund_cents,
+    #             stripe_dispute_cents, ledger_gross_cents,
+    #             ledger_refund_cents, stripe_net_cents,
+    #             ledger_net_cents, diff_cents}
+    per_pack = Column(JSON, nullable=True)
+    # List of {kind, detail...} for every record that does not pair up.
+    differences = Column(JSON, nullable=True)
+    alert_sent = Column(Boolean, nullable=False, default=False)
+    alert_pending = Column(Boolean, nullable=False, default=False)
+    error_note = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('clean','mismatch','error','skipped')",
+            name="ck_recon_status_valid",
         ),
     )
