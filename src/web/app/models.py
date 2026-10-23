@@ -175,7 +175,7 @@ class CreditGrant(Base):
     issued = Column(Integer, nullable=False)
     remaining = Column(Integer, nullable=False)
     reserved = Column(Integer, nullable=False, default=0)
-    purchase_id = Column(GUID(), nullable=True)  # Phase 3 FK; nullable until then
+    purchase_id = Column(GUID(), ForeignKey("credit_purchases.id"), nullable=True)
     revocation_queued_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -579,4 +579,82 @@ class FunnelEvent(Base):
         sa.Index("ix_funnel_events_user_event", "user_id", "event"),
         sa.Index("ix_funnel_events_anon_event", "anon_id", "event"),
         sa.Index("ix_funnel_events_occurred", "occurred_at"),
+    )
+# ---------------------------------------------------------------------------
+# Phase 3: Stripe purchases — settlement tables (issue #69).
+#
+# Money lives on CreditPurchase (amount_cents, currency, Stripe payment
+# intent); credits live on CreditGrant (linked via purchase_id) and the
+# append-only CreditLedger (event_key f"grant:{grant.id}"). Reconciliation
+# (#72) joins: Stripe payment <-> credit_purchases <-> credit_grants
+# (purchase_id) <-> credit_ledger (event_key).
+# ---------------------------------------------------------------------------
+
+
+class CreditPurchase(Base):
+    """One credit-pack purchase attempt.
+
+    Created as 'pending' by POST /credits/checkout BEFORE the Stripe session
+    is created, so a crash between Stripe and our DB cannot produce a paid
+    session with no local record. The webhook (issue #69) transitions
+    pending -> completed exactly once; rows stuck in 'pending' are abandoned
+    checkouts for reconciliation (#72) to expire.
+    """
+
+    __tablename__ = "credit_purchases"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    # Stripe Checkout Session id; NULL until the session is created (or when
+    # session creation failed after the pending row was written).
+    stripe_session_id = Column(String(255), unique=True, nullable=True)
+    stripe_payment_intent_id = Column(String(255), nullable=True)
+    pack_id = Column(String(20), nullable=False)
+    credits = Column(Integer, nullable=False)  # snapshot of the pack at checkout
+    # Money side, authoritative from Stripe at completion; NULL while pending.
+    amount_cents = Column(Integer, nullable=True)
+    currency = Column(String(10), nullable=True)
+    pricing_version = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    # 'pending' | 'completed' | 'failed'
+    stripe_event_id = Column(String(255), nullable=True)  # completing event
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("credits > 0", name="ck_purchase_credits_positive"),
+        CheckConstraint(
+            "status IN ('pending','completed','failed')",
+            name="ck_purchase_status_valid",
+        ),
+        CheckConstraint(
+            "(status != 'completed') OR (amount_cents IS NOT NULL AND amount_cents > 0)",
+            name="ck_purchase_completed_has_amount",
+        ),
+    )
+
+
+class StripeWebhookEvent(Base):
+    """Append-only log of Stripe webhook deliveries.
+
+    The primary key IS the idempotency guard: a redelivered event collides
+    on stripe_event_id and is answered 200 'duplicate' without touching
+    money. outcome is one of 'processed' | 'duplicate' | 'ignored' | 'failed'.
+    """
+
+    __tablename__ = "stripe_webhook_events"
+
+    stripe_event_id = Column(String(255), primary_key=True)
+    event_type = Column(String(60), nullable=False)
+    purchase_id = Column(GUID(), ForeignKey("credit_purchases.id"), nullable=True)
+    outcome = Column(String(20), nullable=False)
+    note = Column(String(255), nullable=True)
+    received_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('processed','duplicate','ignored','failed')",
+            name="ck_webhook_event_outcome_valid",
+        ),
     )
