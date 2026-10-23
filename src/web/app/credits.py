@@ -1163,3 +1163,68 @@ def settle_purchase(
         stripe_event_id, purchase.id, locked.credits, amount_cents, currency,
     )
     return "processed"
+
+
+def fail_purchase(
+    db: Session,
+    purchase: models.CreditPurchase,
+    *,
+    reason: str,
+    stripe_event_id: str | None = None,
+) -> bool:
+    """Mark a pending purchase as failed without granting anything.
+
+    Used for terminal failure signals (issue #70): an expired Checkout
+    session, a failed async payment method, or the stale-pending cleanup.
+    Returns True when the purchase transitioned pending -> failed, False
+    when it was already terminal — a late failure event for a settled
+    purchase changes nothing and grants nothing.
+
+    Deliberately NOT called for ``payment_intent.payment_failed``: inside a
+    Checkout session the customer can retry with another card, so the
+    purchase stays pending until the session expires or completes.
+    """
+    locked = db.execute(
+        select(models.CreditPurchase)
+        .where(models.CreditPurchase.id == purchase.id)
+        .with_for_update()
+    ).scalar_one()
+    if locked.status != "pending":
+        logger.info(
+            "purchase %s already %s; failure signal (%s) changes nothing",
+            purchase.id, locked.status, reason,
+        )
+        return False
+    locked.status = "failed"
+    if stripe_event_id:
+        locked.stripe_event_id = stripe_event_id
+    db.flush()
+    logger.info("purchase %s marked failed: %s", purchase.id, reason)
+    return True
+
+
+def expire_stale_pending_purchases(db: Session, *, older_than_hours: int = 24) -> int:
+    """Expire abandoned pending purchases (issue #70).
+
+    A purchase still pending past the cutoff is an abandoned checkout that
+    will never settle — its Stripe session has expired (or was never
+    created) and no completion event can arrive for it. Marking them failed
+    keeps no row stuck pending forever and gives reconciliation (#72) a
+    closed set of terminal states. Called from the credit-maintenance loop
+    (~every minute), so the effective lag past the cutoff is negligible.
+    """
+    cutoff = _utcnow() - timedelta(hours=older_than_hours)
+    stale = db.execute(
+        select(models.CreditPurchase)
+        .where(
+            models.CreditPurchase.status == "pending",
+            models.CreditPurchase.created_at < cutoff,
+        )
+        .with_for_update()
+    ).scalars().all()
+    for purchase in stale:
+        purchase.status = "failed"
+        db.flush()
+    if stale:
+        logger.info("expired %d stale pending purchase(s)", len(stale))
+    return len(stale)

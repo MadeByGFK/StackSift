@@ -407,34 +407,92 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
         log.info("webhook %s: redelivered event; granting nothing", event_id)
         return JSONResponse({"status": "duplicate"})
 
-    if event_type != "checkout.session.completed":
+    if event_type != "checkout.session.completed" and event_type not in (
+        "checkout.session.expired",
+        "checkout.session.async_payment_failed",
+        "payment_intent.payment_failed",
+    ):
         db.commit()
         log.info("webhook %s: ignoring event type %s", event_id, event_type)
         return JSONResponse({"status": "ignored"})
 
-    session_obj = event.get("data", {}).get("object", {}) or {}
-    metadata = session_obj.get("metadata", {}) or {}
-    purchase = None
-    purchase_ref = metadata.get("purchase_id")
-    if purchase_ref:
-        try:
-            purchase = db.get(_models.CreditPurchase, purchase_ref)
-        except Exception:
-            # Malformed purchase_id in verified metadata: data corruption,
-            # not an attack — treat as unknown, never 500 (Stripe retries
-            # non-2xx into a loop).
-            log.warning("webhook %s: malformed metadata purchase_id %r",
-                        event_id, purchase_ref)
-            purchase = None
-    if purchase is None and session_obj.get("id"):
-        # Fallback join for sessions created before metadata[purchase_id]
-        # existed; the session id is backfilled onto the purchase at
-        # settlement.
-        from sqlalchemy import select as _select
-        purchase = db.execute(
-            _select(_models.CreditPurchase).where(
-                _models.CreditPurchase.stripe_session_id == session_obj["id"])
-        ).scalar_one_or_none()
+    stripe_obj = event.get("data", {}).get("object", {}) or {}
+    obj_metadata = stripe_obj.get("metadata", {}) or {}
+
+    def _find_purchase():
+        purchase = None
+        purchase_ref = obj_metadata.get("purchase_id")
+        if purchase_ref:
+            try:
+                purchase = db.get(_models.CreditPurchase, purchase_ref)
+            except Exception:
+                # Malformed purchase_id in verified metadata: data corruption,
+                # not an attack — treat as unknown, never 500 (Stripe retries
+                # non-2xx into a loop).
+                log.warning("webhook %s: malformed metadata purchase_id %r",
+                            event_id, purchase_ref)
+                purchase = None
+        if purchase is None and stripe_obj.get("id"):
+            # Fallback join for sessions created before metadata[purchase_id]
+            # existed; the session id is backfilled onto the purchase at
+            # settlement.
+            from sqlalchemy import select as _select
+            purchase = db.execute(
+                _select(_models.CreditPurchase).where(
+                    _models.CreditPurchase.stripe_session_id == stripe_obj["id"])
+            ).scalar_one_or_none()
+        return purchase
+
+    # ISSUE-70: terminal failure signals. An expired session (or a failed
+    # async payment method) can never complete, so the pending purchase is
+    # failed outright — no credits, no ledger grant, nothing stuck pending.
+    # A failed card payment is NOT terminal: inside a Checkout session the
+    # customer sees Stripe's decline message and can retry with another card,
+    # so the purchase stays pending and a later completion still settles.
+    if event_type in ("checkout.session.expired",
+                      "checkout.session.async_payment_failed"):
+        purchase = _find_purchase()
+        if purchase is None:
+            webhook_event.outcome = "ignored"
+            webhook_event.note = "unknown purchase"
+            db.commit()
+            log.warning("webhook %s: no purchase for %s %s; ignoring",
+                        event_id, event_type, stripe_obj.get("id"))
+            return JSONResponse({"status": "ignored"})
+        webhook_event.purchase_id = purchase.id
+        reason = ("checkout session expired" if event_type == "checkout.session.expired"
+                  else "async payment failed")
+        transitioned = credits_helpers.fail_purchase(
+            db, purchase, reason=reason, stripe_event_id=event_id)
+        webhook_event.outcome = "processed"
+        webhook_event.note = f"purchase {reason}" + ("" if transitioned else " (already terminal)")
+        db.commit()
+        return JSONResponse({"status": "processed"})
+
+    if event_type == "payment_intent.payment_failed":
+        purchase = _find_purchase()
+        if purchase is None:
+            webhook_event.outcome = "ignored"
+            webhook_event.note = "unknown purchase"
+            db.commit()
+            log.warning("webhook %s: no purchase for payment intent %s; ignoring",
+                        event_id, stripe_obj.get("id"))
+            return JSONResponse({"status": "ignored"})
+        webhook_event.purchase_id = purchase.id
+        # Declined card: grant nothing. The purchase deliberately stays
+        # pending — the customer retries inside the still-open Checkout
+        # session; only expiry (above) or the stale-pending cleanup may
+        # terminally fail it.
+        webhook_event.outcome = "processed"
+        webhook_event.note = "card declined; purchase left pending for in-session retry"
+        db.commit()
+        log.info("webhook %s: purchase %s card declined; still %s, granting nothing",
+                 event_id, purchase.id, purchase.status)
+        return JSONResponse({"status": "processed"})
+
+    session_obj = stripe_obj
+    metadata = obj_metadata
+    purchase = _find_purchase()
     if purchase is None:
         webhook_event.outcome = "ignored"
         webhook_event.note = "unknown purchase"
