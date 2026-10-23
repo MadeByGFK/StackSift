@@ -230,6 +230,19 @@ async def credits(request: Request):
 
     packs = stripe_billing.packs_for_display()
     status = request.query_params.get("checkout", "")
+    # ISSUE-71: the credits page shows the ledger-derived balance (never a
+    # display-only number) so the post-purchase balance is visible without
+    # the user hunting for it or hitting refresh.
+    balance_summary = None
+    if _user is not None:
+        from app.db import SessionLocal
+        from app import credits as credits_helpers
+
+        db = SessionLocal()
+        try:
+            balance_summary = credits_helpers.get_balance_summary(db, _user.id)
+        finally:
+            db.close()
     return templates.TemplateResponse(
         request,
         "pricing.html",
@@ -239,6 +252,7 @@ async def credits(request: Request):
             "packs": packs,
             "checkout_ready": any(p["ready"] for p in packs),
             "checkout_status": status if status in ("success", "cancelled") else "",
+            "balance_summary": balance_summary,
         },
     )
 
@@ -329,6 +343,8 @@ async def credits_checkout(
                 purchase_id=purchase.id,
                 success_url=success_url,
                 cancel_url=cancel_url,
+                # ISSUE-71: Stripe emails the payment receipt to the buyer.
+                receipt_email=_user.email,
             )
         except Exception:
             # Stripe never saw a session (or we never got its id): the

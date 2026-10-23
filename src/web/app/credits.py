@@ -1009,6 +1009,30 @@ def get_balance_summary(db: Session, user_id: uuid.UUID) -> dict:
     }
 
 
+def list_completed_purchases(
+    db: Session, user_id: uuid.UUID
+) -> list[models.CreditPurchase]:
+    """Completed purchases for the account purchase-history view (issue #71).
+
+    Completed rows only — pending and failed attempts are reconciliation
+    internals, not history — newest first. The caller renders pack, date, and
+    credits granted; no card, Stripe, or account detail ever leaves this
+    query for the template.
+    """
+    return (
+        db.execute(
+            select(models.CreditPurchase)
+            .where(
+                models.CreditPurchase.user_id == user_id,
+                models.CreditPurchase.status == "completed",
+            )
+            .order_by(models.CreditPurchase.completed_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 3: purchase settlement (issue #69).
 #

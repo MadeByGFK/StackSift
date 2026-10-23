@@ -190,6 +190,15 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
         .all()
     )
     linked_providers = {row[0] for row in oauth_links}
+    # ISSUE-71: the account view shows the ledger-derived balance and the
+    # purchase history (pack, date, credits granted) — no display-only
+    # numbers, no card or Stripe detail.
+    from app import credits as credits_helpers
+    from app import stripe_billing as stripe_billing_helpers
+
+    balance_summary = credits_helpers.get_balance_summary(db, user.id)
+    purchases = credits_helpers.list_completed_purchases(db, user.id)
+    pack_names = {pid: p["name"] for pid, p in stripe_billing_helpers.PACKS.items()}
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -200,6 +209,9 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "current_session_id": str(session.id) if session else None,
             "csrf_token": session.csrf_token if session else "",
             "linked_providers": linked_providers,
+            "balance_summary": balance_summary,
+            "purchases": purchases,
+            "pack_names": pack_names,
         },
     )
 
