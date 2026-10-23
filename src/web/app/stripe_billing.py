@@ -247,7 +247,6 @@ def create_checkout_session(
     purchase_id,
     success_url: str,
     cancel_url: str,
-    receipt_email: str | None = None,
 ) -> tuple[str, str]:
     """Create a Stripe Checkout Session for a pack.
 
@@ -256,10 +255,13 @@ def create_checkout_session(
     metadata + client_reference_id so settlement (issue #69) can grant
     deterministically via metadata[purchase_id].
 
-    ``receipt_email`` (issue #71): the purchasing user's account email. When
-    set, it is passed as ``payment_intent_data[receipt_email]`` so Stripe
-    emails the payment receipt to the buyer. No PII beyond the account email
-    the user already gave us reaches Stripe.
+    Receipts (issue #71): Stripe sends the payment receipt itself — on
+    Managed Payments accounts (enabled by default) Stripe always emails a
+    receipt per the account's receipt settings. The app must NOT pass
+    ``payment_intent_data[receipt_email]``: Managed Payments rejects it
+    (verified on staging 2026-10-23: ``invalid_request_error: Unsupported
+    parameter: payment_intent_data.receipt_email``), which failed every
+    checkout session creation with HTTP 400.
     """
     pack = PACKS.get(pack_id)
     if pack is None:
@@ -286,9 +288,6 @@ def create_checkout_session(
         "metadata[credits]": str(pack["credits"]),
         "metadata[pricing_version]": str(credits_helpers.PRICING_VERSION),
     }
-    if receipt_email:
-        # Issue #71: Stripe sends the payment receipt to this address.
-        data["payment_intent_data[receipt_email]"] = receipt_email
     # Issue #72: join keys on the payment intent so refund/dispute charges
     # (which carry PI metadata, not session metadata) attribute to a pack.
     data["payment_intent_data[metadata][purchase_id]"] = str(purchase_id)

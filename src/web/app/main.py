@@ -343,8 +343,6 @@ async def credits_checkout(
                 purchase_id=purchase.id,
                 success_url=success_url,
                 cancel_url=cancel_url,
-                # ISSUE-71: Stripe emails the payment receipt to the buyer.
-                receipt_email=_user.email,
             )
         except Exception:
             # Stripe never saw a session (or we never got its id): the

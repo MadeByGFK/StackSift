@@ -1,7 +1,9 @@
 """Receipts and post-purchase balance display (issue #71).
 
-- The Checkout Session creation sends ``payment_intent_data[receipt_email]``
-  with the buyer's account email, so Stripe emails the payment receipt.
+- The Checkout Session creation must NOT send
+  ``payment_intent_data[receipt_email]``: Managed Payments accounts reject
+  that parameter (HTTP 400) and Stripe sends the payment receipt itself
+  per the account's receipt settings.
 - After settlement, /credits and /settings render the ledger-derived
   balance (no display-only numbers) and the success return self-updates
   the balance via polling instead of asking the user to hit refresh.
@@ -185,7 +187,7 @@ def _settle_purchase(receipts_env, user_id, pack_id="starter"):
 
 # --- receipt email -----------------------------------------------------------
 
-def test_receipt_email_sent_with_checkout(receipts_env, monkeypatch):
+def test_receipt_email_not_sent_with_checkout(receipts_env, monkeypatch):
     from app import stripe_billing
 
     email = "buyer71@example.com"
@@ -196,8 +198,10 @@ def test_receipt_email_sent_with_checkout(receipts_env, monkeypatch):
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
     assert resp.status_code == 200, resp.text
     data = captured[-1]["data"]
-    # Issue #71: Stripe emails the payment receipt to the buyer's account email.
-    assert data["payment_intent_data[receipt_email]"] == email
+    # Issue #71 fix: receipt_email must never be sent — Managed Payments
+    # rejects payment_intent_data[receipt_email] (HTTP 400) and Stripe
+    # emails the receipt itself per the account's receipt settings.
+    assert "payment_intent_data[receipt_email]" not in data
 
 
 def test_receipt_email_omitted_when_not_provided(receipts_env, monkeypatch):
