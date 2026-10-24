@@ -441,16 +441,36 @@ async def me(request: Request, db: DBSession = Depends(get_db)):
 
 @router.get("/auth/balance")
 async def balance(request: Request, db: DBSession = Depends(get_db)):
-    """Return credit balance for the logged-in user (for nav display)."""
+    """Return credit balance for the logged-in user (for nav display).
+
+    ISSUE-68 (in-modal quick buy): a logged-in response also carries the
+    session CSRF token — the same token the page forms use — and per-pack
+    checkout readiness, so the nav credit-badge modal can post the
+    selected pack straight to /credits/checkout instead of sending the
+    user to the credits page. Anonymous callers get neither field.
+    """
     session = auth_helpers.get_session_from_cookie(db, request)
     if not session:
         return JSONResponse({"balance": None})
     try:
         from app import credits as credits_helpers
         summary = credits_helpers.get_balance_summary(db, session.user_id)
-        return JSONResponse({"balance": summary["balance"]})
+        balance_value = summary["balance"]
     except Exception:
         return JSONResponse({"balance": None})
+    from app import stripe_billing as stripe_billing_helpers
+
+    readiness = {
+        pack["id"]: pack["ready"]
+        for pack in stripe_billing_helpers.packs_for_display()
+    }
+    return JSONResponse(
+        {
+            "balance": balance_value,
+            "csrf_token": session.csrf_token,
+            "packs": readiness,
+        }
+    )
 
 @router.get("/auth/sessions")
 async def list_sessions(request: Request, db: DBSession = Depends(get_db)):
