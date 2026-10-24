@@ -419,10 +419,10 @@ def test_checkout_session_carries_pi_metadata(monkeypatch):
     sb.create_checkout_session(
         user_id="user-1", pack_id="starter", purchase_id="purchase-1",
         success_url="https://x/s", cancel_url="https://x/c",
-        receipt_email="buyer@example.com",
     )
     assert posted["payment_intent_data[metadata][purchase_id]"] == "purchase-1"
     assert posted["payment_intent_data[metadata][pack_id]"] == "starter"
     assert posted["payment_intent_data[metadata][pricing_version]"] == "1"
-    # The #71 receipt wiring is untouched.
-    assert posted["payment_intent_data[receipt_email]"] == "buyer@example.com"
+    # Issue #71 fix: receipt_email is never sent — Managed Payments
+    # rejects payment_intent_data[receipt_email]; Stripe sends receipts.
+    assert "payment_intent_data[receipt_email]" not in posted
