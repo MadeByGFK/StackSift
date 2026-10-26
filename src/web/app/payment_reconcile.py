@@ -457,12 +457,27 @@ def reconcile_missing_days(db, *, stripe_get=None, today: date | None = None
 
     Starts at the earliest day with a completed purchase (bounded to
     LOOKBACK_DAYS back) when no reconciliation exists yet.
+
+    Error days are revisited, not skipped: the scan starts at the
+    earliest 'error' row when one exists. The previous watermark
+    (latest recorded day + 1) silently abandoned an error day once any
+    later day was recorded — e.g. the 2026-10-24 run errored on Stripe
+    and was never retried because later days already had rows.
+    reconcile_day itself is idempotent for final rows, so rescanning
+    from the earliest error day costs only a DB read per settled day.
     """
     today = today or _utcnow().date()
+    earliest_error = db.execute(
+        select(func.min(M.PaymentReconciliation.recon_date)).where(
+            M.PaymentReconciliation.status == "error"
+        )
+    ).scalar()
     last = db.execute(
         select(func.max(M.PaymentReconciliation.recon_date))
     ).scalar()
-    if last is not None:
+    if earliest_error is not None:
+        start_day = earliest_error
+    elif last is not None:
         start_day = last + timedelta(days=1)
     else:
         earliest = db.execute(
