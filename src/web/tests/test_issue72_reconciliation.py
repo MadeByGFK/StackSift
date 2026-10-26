@@ -324,6 +324,77 @@ def test_skipped_when_checkout_not_configured(recon_env, monkeypatch):
         assert "not configured" in (run.error_note or "")
 
 
+def test_error_day_failing_twice_keeps_single_row(recon_env):
+    """Review finding on PR #95: deleting the error row upfront, then
+    rolling back on a second failure, resurrected it — and re-inserting
+    violated recon_date's uniqueness. A still-failing day must update
+    its error row in place, never raise, never duplicate."""
+    from app import models, payment_reconcile as pr
+    day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        def boom(kind, day):
+            raise pr.ReconcileError("stripe down")
+        run1 = pr.reconcile_day(db, day, stripe_get=boom)
+        assert run1.status == "error"
+        run2 = pr.reconcile_day(db, day, stripe_get=boom)
+        assert run2.status == "error"
+        assert "stripe down" in (run2.error_note or "")
+        rows = db.execute(
+            select(models.PaymentReconciliation).where(
+                models.PaymentReconciliation.recon_date == day)
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].id == run1.id
+
+
+def test_missing_days_job_survives_still_failing_error_day(recon_env):
+    """Job level of the same finding: an error day that keeps failing
+    must not abort the scan — later days still reconcile and the
+    alert-pending retry still runs."""
+    from app import models, payment_reconcile as pr
+    err_day = date(2026, 10, 20)
+    later_day = date(2026, 10, 21)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, later_day, session_id="cs_surv_1")
+
+        def boom(kind, day):
+            raise pr.ReconcileError("stripe down")
+        # The error row already exists from an earlier tick (as in the
+        # real Oct 24 case); the job must retry it, not start after it.
+        assert pr.reconcile_day(db, err_day, stripe_get=boom).status == "error"
+
+        def get(kind, day):
+            if day == err_day:
+                raise pr.ReconcileError("stripe down")
+            return {
+                "sessions": [_session("cs_surv_1")] if day == later_day else [],
+                "charges": [],
+                "wide_sessions": [],
+            }[kind]
+        runs = pr.reconcile_missing_days(db, stripe_get=get,
+                                         today=date(2026, 10, 23))
+        assert [str(r.recon_date) for r in runs] == \
+            ["2026-10-20", "2026-10-21", "2026-10-22"]
+        assert runs[0].status == "error"
+        assert runs[1].status == "clean"  # later day reconciled despite it
+        err_rows = db.execute(
+            select(models.PaymentReconciliation).where(
+                models.PaymentReconciliation.recon_date == err_day)
+        ).scalars().all()
+        assert len(err_rows) == 1
+        # And a second job tick with the same outage still completes.
+        runs2 = pr.reconcile_missing_days(db, stripe_get=get,
+                                          today=date(2026, 10, 23))
+        assert runs2[0].status == "error"
+        assert runs2[1].status == "clean"
+        err_rows2 = db.execute(
+            select(models.PaymentReconciliation).where(
+                models.PaymentReconciliation.recon_date == err_day)
+        ).scalars().all()
+        assert len(err_rows2) == 1
+
+
 def test_error_day_is_retried(recon_env):
     from app import payment_reconcile as pr
     day = date(2026, 10, 20)
@@ -341,6 +412,79 @@ def test_error_day_is_retried(recon_env):
         assert run2.status == "clean"
         from app.models import PaymentReconciliation
         rows = db.execute(select(PaymentReconciliation)).scalars().all()
+        assert len(rows) == 1
+
+
+def test_missing_days_job_retries_error_day_after_later_days(recon_env):
+    """Regression: the job's watermark was latest-recorded-day + 1, so an
+    error day was abandoned once a later day had a row (the 2026-10-24
+    run errored on Stripe and never re-ran). The job must rescan from
+    the earliest error day; settled days are returned untouched."""
+    from app import models, payment_reconcile as pr
+    err_day = date(2026, 10, 20)
+    later_day = date(2026, 10, 21)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, err_day, session_id="cs_err_1")
+        _purchase(db, uid, later_day, session_id="cs_lat_1")
+
+        def boom(kind, day):
+            raise pr.ReconcileError("midnight stripe 400")
+        assert pr.reconcile_day(db, err_day, stripe_get=boom).status == "error"
+        # The loop advanced past the error day and settled the next one.
+        assert pr.reconcile_day(db, later_day, stripe_get=_fake(
+            sessions=[_session("cs_lat_1")])).status == "clean"
+
+        runs = pr.reconcile_missing_days(
+            db,
+            stripe_get=lambda kind, day: {
+                "sessions": [_session("cs_err_1")] if day == err_day else
+                ([_session("cs_lat_1")] if day == later_day else []),
+                "charges": [],
+                "wide_sessions": [],
+            }[kind],
+            today=date(2026, 10, 23),
+        )
+        assert [str(r.recon_date) for r in runs] == \
+            ["2026-10-20", "2026-10-21", "2026-10-22"]
+        assert runs[0].status == "clean"  # the error day, retried
+        assert runs[1].status == "clean"  # settled day, untouched
+        rows = db.execute(
+            select(models.PaymentReconciliation).where(
+                models.PaymentReconciliation.recon_date == err_day)
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].status == "clean"
+
+
+def test_missing_days_job_retries_error_day_as_latest_row(recon_env):
+    """Same watermark bug, no later days: an error row as the latest
+    recorded day must still be retried by the next job run."""
+    from app import models, payment_reconcile as pr
+    err_day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, err_day, session_id="cs_err2_1")
+
+        def boom(kind, day):
+            raise pr.ReconcileError("stripe down")
+        assert pr.reconcile_day(db, err_day, stripe_get=boom).status == "error"
+        runs = pr.reconcile_missing_days(
+            db,
+            stripe_get=lambda kind, day: {
+                "sessions": [_session("cs_err2_1")] if day == err_day else [],
+                "charges": [],
+                "wide_sessions": [],
+            }[kind],
+            today=date(2026, 10, 22),
+        )
+        assert [str(r.recon_date) for r in runs] == ["2026-10-20", "2026-10-21"]
+        assert runs[0].status == "clean"
+        assert runs[1].status == "clean"  # empty day after the retried one
+        rows = db.execute(
+            select(models.PaymentReconciliation).where(
+                models.PaymentReconciliation.recon_date == err_day)
+        ).scalars().all()
         assert len(rows) == 1
 
 
