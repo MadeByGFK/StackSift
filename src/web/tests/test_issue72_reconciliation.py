@@ -570,3 +570,76 @@ def test_checkout_session_carries_pi_metadata(monkeypatch):
     # Issue #71 fix: receipt_email is never sent — Managed Payments
     # rejects payment_intent_data[receipt_email]; Stripe sends receipts.
     assert "payment_intent_data[receipt_email]" not in posted
+
+
+def test_stripe_session_list_sends_no_payment_status_param(monkeypatch):
+    """Issue #72 follow-up: payment_status is a Checkout Session response
+    field, NOT a list parameter for GET /v1/checkout/sessions — Stripe
+    rejects it with 400. fetch_day_sessions must send only valid list
+    parameters; the paid+complete filter stays client-side (line 116)."""
+    from app import payment_reconcile as pr
+    import httpx
+    captured = []
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [
+                _session("cs_paid", "starter"),
+                {"id": "cs_unpaid", "amount_total": 500, "currency": "usd",
+                 "payment_status": "unpaid", "status": "complete",
+                 "metadata": {"pack_id": "starter"}, "payment_intent": "pi_9"},
+                {"id": "cs_open", "amount_total": 500, "currency": "usd",
+                 "payment_status": "paid", "status": "open",
+                 "metadata": {"pack_id": "starter"}, "payment_intent": "pi_8"},
+            ], "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        captured.append((url, dict(params or {})))
+        return FakeResp()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    sessions = pr.fetch_day_sessions("sk_test_cycle_fixture", date(2026, 10, 24))
+    assert [s["id"] for s in sessions] == ["cs_paid"]
+    assert len(captured) == 1
+    url, params = captured[0]
+    assert url.endswith("/checkout/sessions")
+    assert "payment_status" not in params
+    assert params["limit"] == 100
+    assert "created[gte]" in params and "created[lte]" in params
+
+
+def test_wide_session_list_sends_no_payment_status_param(recon_env, monkeypatch):
+    """Issue #72 follow-up: the refund-attribution wide fetch in
+    reconcile_day sends the same invalid parameter. Drive reconcile_day
+    with stripe_get=None and a faked httpx.get so both session list
+    calls (day + wide) are captured; neither may carry payment_status."""
+    from app import payment_reconcile as pr
+    import httpx
+    captured = []
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return {"data": self._data, "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        captured.append((url, dict(params or {})))
+        if url.endswith("/charges"):
+            return FakeResp([_charge("ch_1", 500, refunded=500,
+                                      pack_meta="starter")])
+        return FakeResp([])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with recon_env.sessions() as db:
+        pr.reconcile_day(db, date(2026, 10, 24), stripe_get=None)
+    session_calls = [p for u, p in captured if u.endswith("/checkout/sessions")]
+    # Day fetch + wide refund-attribution fetch.
+    assert len(session_calls) == 2
+    for params in session_calls:
+        assert "payment_status" not in params
