@@ -372,7 +372,15 @@ def _send_mismatch_alert(day: date, result: dict) -> bool:
 
 
 def reconcile_day(db, day: date, *, stripe_get=None) -> M.PaymentReconciliation:
-    """Reconcile one UTC day; idempotent (final rows are never re-run)."""
+    """Reconcile one UTC day; idempotent (final rows are never re-run).
+
+    An existing 'error' row is replaced on success and updated in place
+    on failure. It must NOT be deleted upfront: on a failure the handler
+    rolls back, which would resurrect the deleted row, and re-inserting
+    it then violates recon_date's uniqueness — aborting the whole job
+    scan (later days, alert-pending retry) on every tick of an outage
+    once error days are retried by the job.
+    """
     existing = db.execute(
         select(M.PaymentReconciliation).where(
             M.PaymentReconciliation.recon_date == day
@@ -380,11 +388,10 @@ def reconcile_day(db, day: date, *, stripe_get=None) -> M.PaymentReconciliation:
     ).scalar_one_or_none()
     if existing is not None and existing.status in ("clean", "mismatch", "skipped"):
         return existing
-    if existing is not None:
-        db.delete(existing)
-        db.flush()
-
     if not sb.checkout_configured():
+        if existing is not None:
+            db.delete(existing)
+            db.flush()
         run = M.PaymentReconciliation(
             recon_date=day, status="skipped",
             error_note="Stripe checkout not configured; no payments could exist",
@@ -418,13 +425,28 @@ def reconcile_day(db, day: date, *, stripe_get=None) -> M.PaymentReconciliation:
         result = compute_reconciliation(db, day, sessions, charges, wide)
     except ReconcileError as exc:
         db.rollback()
-        run = M.PaymentReconciliation(
-            recon_date=day, status="error", error_note=str(exc)[:500])
-        db.add(run)
+        # Re-fetch after the rollback: the pre-existing error row (if any)
+        # is still there; update it in place rather than inserting a
+        # second row for the same day (recon_date is unique).
+        row = db.execute(
+            select(M.PaymentReconciliation).where(
+                M.PaymentReconciliation.recon_date == day
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = M.PaymentReconciliation(
+                recon_date=day, status="error", error_note=str(exc)[:500])
+            db.add(row)
+        else:
+            row.status = "error"
+            row.error_note = str(exc)[:500]
         db.commit()
-        return run
+        return row
 
     status = "clean" if not result["differences"] else "mismatch"
+    if existing is not None:
+        db.delete(existing)
+        db.flush()
     run = M.PaymentReconciliation(
         recon_date=day,
         status=status,
