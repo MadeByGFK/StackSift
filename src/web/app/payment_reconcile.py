@@ -105,10 +105,12 @@ def _stripe_list(key: str, path: str, start_ts: int, end_ts: int,
 def fetch_day_sessions(key: str, day: date) -> list[dict]:
     """Paid Checkout Sessions created on the UTC day."""
     start, end = day_bounds(day)
+    # NOTE: payment_status is a Checkout Session response field, not a
+    # list parameter for GET /v1/checkout/sessions — sending it makes
+    # Stripe return 400. Paid+complete filtering stays client-side below.
     sessions = _stripe_list(
         key, "/checkout/sessions",
         int(start.timestamp()), int(end.timestamp()),
-        extra={"payment_status": "paid"},
     )
     # Client-side guard: only completed, paid sessions count as gross.
     return [
@@ -420,7 +422,6 @@ def reconcile_day(db, day: date, *, stripe_get=None) -> M.PaymentReconciliation:
                     int(datetime(back.year, back.month, back.day,
                                  tzinfo=timezone.utc).timestamp()),
                     int(day_bounds(day)[0].timestamp()) - 1,
-                    extra={"payment_status": "paid"},
                 )
         result = compute_reconciliation(db, day, sessions, charges, wide)
     except ReconcileError as exc:
