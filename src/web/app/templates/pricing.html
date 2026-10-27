@@ -107,7 +107,9 @@
     <p>Free log analysis, no signup required. Credit packs for when you need premium capabilities.</p>
   </section>
 
-  {% if checkout_status == "success" %}
+  {% if checkout_status == "success" and latest_purchase and latest_purchase.status == "completed" %}
+  <div class="checkout-banner success" role="status">Payment complete — {{ latest_purchase.credits }} credits added to your balance.</div>
+  {% elif checkout_status == "success" %}
   <div class="checkout-banner success" role="status">Payment complete — your credits are on their way and will appear in your balance shortly.</div>
   {% elif checkout_status == "cancelled" %}
   <div class="checkout-banner" role="status">Payment didn't go through — no charge was made and no credits were added. You can try again below.</div>
@@ -122,7 +124,7 @@
     Your balance: <strong id="credit-balance" data-initial="{{ balance_summary.balance }}">{{ balance_summary.balance }}</strong> credits
   </div>
   {% endif %}
-  {% if checkout_status == "success" and current_user and balance_summary is not none %}
+  {% if checkout_status == "success" and current_user and balance_summary is not none and not (latest_purchase and latest_purchase.status == "completed") %}
   <script>
   (function () {
     var el = document.getElementById("credit-balance");

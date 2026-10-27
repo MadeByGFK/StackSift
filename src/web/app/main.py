@@ -234,13 +234,21 @@ async def credits(request: Request):
     # display-only number) so the post-purchase balance is visible without
     # the user hunting for it or hitting refresh.
     balance_summary = None
+    latest_purchase = None
     if _user is not None:
         from app.db import SessionLocal
         from app import credits as credits_helpers
+        from app.models import CreditPurchase
 
         db = SessionLocal()
         try:
             balance_summary = credits_helpers.get_balance_summary(db, _user.id)
+            latest_purchase = (
+                db.query(CreditPurchase)
+                .filter(CreditPurchase.user_id == _user.id)
+                .order_by(CreditPurchase.created_at.desc())
+                .first()
+            )
         finally:
             db.close()
     return templates.TemplateResponse(
@@ -253,6 +261,7 @@ async def credits(request: Request):
             "checkout_ready": any(p["ready"] for p in packs),
             "checkout_status": status if status in ("success", "cancelled") else "",
             "balance_summary": balance_summary,
+            "latest_purchase": latest_purchase,
         },
     )
 
