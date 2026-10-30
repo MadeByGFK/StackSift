@@ -1,5 +1,9 @@
 <script>
-for (const form of document.querySelectorAll('form[data-auth-form]')) {
+// ISSUE-68: the submit wiring lives in a named function so a form created
+// after page load — the credit-badge modal's quick-buy form — gets exactly
+// the same handling (incl. the data-checkout-form redirect below) as the
+// forms rendered into the page.
+function wireAuthForm(form) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const output = form.querySelector('[role="status"]');
@@ -46,6 +50,9 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
     }
   });
 }
+for (const form of document.querySelectorAll('form[data-auth-form]')) {
+  wireAuthForm(form);
+}
 
 // Credit balance badge in nav (logged-in users only)
 (function() {
@@ -55,10 +62,24 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
   const nav = logoutForm.closest('nav');
   if (!nav || document.getElementById('credit-badge')) return;
 
+  // ISSUE-68 (in-modal quick buy): for logged-in users the balance payload
+  // also carries the session CSRF token and per-pack checkout readiness;
+  // showCreditModal uses them to post the selected pack straight to
+  // /credits/checkout. When they are absent (or no pack is ready) the
+  // modal keeps its coming-soon state — production parity, where Stripe
+  // is not configured.
+  let checkoutState = { csrfToken: null, packReady: {} };
+
   fetch('/auth/balance', {credentials: 'same-origin'})
     .then(r => r.json())
     .then(data => {
       if (data.balance === null || data.balance === undefined) return;
+      if (typeof data.csrf_token === 'string' && data.csrf_token) {
+        checkoutState.csrfToken = data.csrf_token;
+      }
+      if (data.packs && typeof data.packs === 'object') {
+        checkoutState.packReady = data.packs;
+      }
       // Create badge
       const badge = document.createElement('button');
       badge.id = 'credit-badge';
@@ -88,6 +109,34 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
     })
     .catch(() => {});
 
+  // Pack catalog for the modal — mirrors stripe_billing.PACKS display copy.
+  const MODAL_PACKS = [
+    { id: 'starter', name: 'Starter', credits: 10, price: '$5' },
+    { id: 'growth', name: 'Growth', credits: 25, price: '$10' },
+    { id: 'power', name: 'Power', credits: 75, price: '$25' },
+  ];
+  const BORDER_DEFAULT = '#2d3d6b';
+  const BORDER_SELECTED = '#ecc94b';
+
+  // One pack row. Selectable rows are <label>s wrapping a real radio input
+  // (single-select group semantics, native keyboard support); the selected
+  // row carries the gold border. Non-selectable rows render exactly as
+  // the modal's rows always have.
+  function packRowHtml(pack, selectable, selected) {
+    const border = selected ? BORDER_SELECTED : BORDER_DEFAULT;
+    const popular = pack.id === 'growth'
+      ? ' <span style="background:#ecc94b;color:#1a1a1a;font-size:0.7rem;padding:0.15rem 0.5rem;border-radius:10px;">POPULAR</span>'
+      : '';
+    const nameBlock = '<div' + (selectable ? ' style="flex:1;"' : '') + '><strong>' + pack.name + '</strong>' + popular + '<br><span style="color:#a0aec0;font-size:0.85rem;">' + pack.credits + ' credits</span></div>';
+    const priceBlock = '<div style="font-size:1.2rem;font-weight:bold;">' + pack.price + '</div>';
+    if (!selectable) {
+      return '<div style="border:1px solid ' + border + ';border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;">' + nameBlock + priceBlock + '</div>';
+    }
+    return '<label data-pack-row="' + pack.id + '" style="border:1px solid ' + border + ';border-radius:8px;padding:1rem;display:flex;align-items:center;gap:0.75rem;cursor:pointer;">' +
+      '<input type="radio" name="credit-pack" value="' + pack.id + '"' + (selected ? ' checked' : '') + ' style="accent-color:#ecc94b;width:1.1rem;height:1.1rem;margin:0;flex:none;">' +
+      nameBlock + priceBlock + '</label>';
+  }
+
   function showCreditModal() {
     // Remove existing modal
     const old = document.getElementById('credit-modal');
@@ -100,23 +149,77 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
     // Create card
     const card = document.createElement('div');
     card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
+    const readyIds = MODAL_PACKS.filter(p => checkoutState.packReady[p.id]).map(p => p.id);
+    const quickBuy = Boolean(checkoutState.csrfToken) && readyIds.length > 0;
+    // Default selection: Growth (POPULAR) — the emphasis the modal has
+    // always shown. If Growth is not purchasable, fall back to the first
+    // ready pack rather than preselecting one that cannot be bought.
+    const selectedId = readyIds.indexOf('growth') !== -1 ? 'growth' : readyIds[0];
     card.innerHTML =
       '<h2 style="margin:0 0 0.5rem 0;font-size:1.3rem;">Credit Packs</h2>' +
-      '<p style="color:#a0aec0;font-size:0.9rem;margin:0 0 1.5rem 0;">Credits unlock premium features like PDF export. <a href="/credits" style="color:#ecc94b;">Learn more</a></p>' +
-      '<div style="display:grid;gap:0.75rem;">' +
-      '<div style="border:1px solid #2d3d6b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Starter</strong><br><span style="color:#a0aec0;font-size:0.85rem;">10 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$5</div></div>' +
-      '<div style="border:1px solid #ecc94b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Growth</strong> <span style="background:#ecc94b;color:#1a1a1a;font-size:0.7rem;padding:0.15rem 0.5rem;border-radius:10px;">POPULAR</span><br><span style="color:#a0aec0;font-size:0.85rem;">25 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$10</div></div>' +
-      '<div style="border:1px solid #2d3d6b;border-radius:8px;padding:1rem;display:flex;justify-content:space-between;align-items:center;"><div><strong>Power</strong><br><span style="color:#a0aec0;font-size:0.85rem;">75 credits</span></div><div style="font-size:1.2rem;font-weight:bold;">$25</div></div>' +
-      '</div>' +
-      '<a href="/credits" style="display:block;text-align:center;margin:1.5rem 0 0 0;padding:0.7rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;text-decoration:none;">Buy credits</a>' +
-      '<button id="credit-modal-close" style="width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;">Close</button>';
+      '<p style="color:#a0aec0;font-size:0.9rem;margin:0 0 1.5rem 0;">Credits unlock premium features like PDF export. <a href="/credits" style="color:#ecc94b;">Learn more</a></p>';
+    let buyForm = null;
+    if (quickBuy) {
+      // ISSUE-68: selectable packs + a real checkout form posting the
+      // selected pack to the existing /credits/checkout contract — the
+      // same data-auth-form/data-checkout-form handling as the credits
+      // page buy forms, errors inline in the form's role="status". The
+      // form element is built with the DOM API (not page markup): it
+      // exists only in this modal, only for a signed-in user.
+      buyForm = document.createElement('form');
+      buyForm.method = 'post';
+      buyForm.action = '/credits/checkout';
+      buyForm.id = 'credit-modal-form';
+      buyForm.setAttribute('data-auth-form', '');
+      buyForm.setAttribute('data-checkout-form', '');
+      buyForm.innerHTML =
+        '<div role="radiogroup" aria-label="Credit packs" style="display:grid;gap:0.75rem;">' +
+        MODAL_PACKS.map(p => packRowHtml(p, Boolean(checkoutState.packReady[p.id]), p.id === selectedId)).join('') +
+        '</div>' +
+        '<input type="hidden" name="pack_id" id="credit-modal-pack-id" value="' + selectedId + '">' +
+        '<input type="hidden" name="csrf_token" value="' + checkoutState.csrfToken + '">' +
+        '<button type="submit" style="display:block;width:100%;text-align:center;margin:1.5rem 0 0 0;padding:0.7rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;border:none;cursor:pointer;font-size:1rem;">Buy credits</button>' +
+        '<p role="status" aria-live="polite" style="margin:0.75rem 0 0 0;color:#f6a8a8;font-size:0.9rem;min-height:1.2em;"></p>';
+      card.appendChild(buyForm);
+    } else {
+      // No pack is purchasable (Stripe unconfigured — production today):
+      // keep the coming-soon state, no live buy form.
+      const soon = document.createElement('div');
+      soon.innerHTML =
+        '<div style="display:grid;gap:0.75rem;">' +
+        MODAL_PACKS.map(p => packRowHtml(p, false, p.id === 'growth')).join('') +
+        '</div>' +
+        '<p style="color:#a0aec0;font-size:0.9rem;text-align:center;margin:1.5rem 0 0 0;">Purchasing coming soon.</p>' +
+        '<a href="/credits" style="display:block;text-align:center;margin:1rem 0 0 0;padding:0.7rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;text-decoration:none;">View details</a>';
+      card.appendChild(soon);
+    }
+    const closeBtn = document.createElement('button');
+    closeBtn.id = 'credit-modal-close';
+    closeBtn.type = 'button';
+    closeBtn.textContent = 'Close';
+    closeBtn.style.cssText = 'width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;';
+    card.appendChild(closeBtn);
     overlay.appendChild(card);
     document.body.appendChild(overlay);
-    document.getElementById('credit-modal-close').addEventListener('click', () => overlay.remove());
+    closeBtn.addEventListener('click', () => overlay.remove());
     document.addEventListener('keydown', function esc(e) {
       if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', esc); }
     });
+    if (buyForm) {
+      wireAuthForm(buyForm);
+      const packIdInput = document.getElementById('credit-modal-pack-id');
+      buyForm.querySelectorAll('input[name="credit-pack"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+          packIdInput.value = radio.value;
+          buyForm.querySelectorAll('[data-pack-row]').forEach(row => {
+            row.style.borderColor = row.getAttribute('data-pack-row') === radio.value ? BORDER_SELECTED : BORDER_DEFAULT;
+          });
+        });
+      });
+    }
   }
+  // The insufficient-credits PDF modal (below) hands off to this modal.
+  window.showCreditModal = showCreditModal;
 })();
 
 (function() {
@@ -163,12 +266,19 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           msg.textContent = insufficient ? 'PDF export costs 2 credits.' : error;
           card.appendChild(msg);
           if (insufficient) {
-            // ISSUE-68: insufficient-credits entry point — the credits page
-            // hosts the per-pack buy forms.
-            const buy = document.createElement('a');
-            buy.href = '/credits';
+            // ISSUE-68: insufficient-credits entry point — hand off to the
+            // credit-pack modal so the user can buy without leaving the
+            // page; fall back to the credits page if the pack modal is
+            // unavailable (e.g. the badge script has not run yet).
+            const buy = document.createElement('button');
+            buy.type = 'button';
             buy.textContent = 'Buy credits';
-            buy.style.cssText = 'display:block;text-align:center;width:100%;margin-top:1rem;padding:0.6rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;text-decoration:none;box-sizing:border-box;';
+            buy.style.cssText = 'display:block;text-align:center;width:100%;margin-top:1rem;padding:0.6rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;border:none;cursor:pointer;box-sizing:border-box;font:inherit;';
+            buy.addEventListener('click', () => {
+              modal.remove();
+              if (typeof window.showCreditModal === 'function') window.showCreditModal();
+              else location.assign('/credits');
+            });
             card.appendChild(buy);
           }
           const close = document.createElement('button');

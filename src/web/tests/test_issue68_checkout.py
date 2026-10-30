@@ -88,16 +88,27 @@ def _login(checkout_env, email="buyer@example.com"):
 class _FakeStripeResponse:
     def __init__(self, status_code=200, payload=None):
         self.status_code = status_code
-        self._payload = payload if payload is not None else {"url": "https://checkout.stripe.com/pay/cs_test_123"}
+        self._payload = payload if payload is not None else {
+            "url": "https://checkout.stripe.com/pay/cs_test_123",
+            "id": "cs_test_123",
+        }
 
     def json(self):
         return self._payload
 
 
 def _fake_post(captured):
+    # Behaves like Stripe: every session creation returns a UNIQUE session id.
+    state = {"n": 0}
+
     def _post(url, data=None, auth=None, headers=None, timeout=None):
         captured.append({"url": url, "data": data, "auth": auth, "headers": headers})
-        return _FakeStripeResponse()
+        state["n"] += 1
+        sid = f"cs_test_{state['n']}"
+        return _FakeStripeResponse(payload={
+            "url": f"https://checkout.stripe.com/pay/{sid}",
+            "id": sid,
+        })
 
     return _post
 
@@ -129,7 +140,7 @@ def test_live_key_refused_without_network(checkout_env, monkeypatch):
     monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
     with pytest.raises(stripe_billing.LiveKeyRefused):
         stripe_billing.create_checkout_session(
-            user_id="u1", pack_id="starter",
+            user_id="u1", pack_id="starter", purchase_id="p1",
             success_url="https://x/s", cancel_url="https://x/c")
     assert captured == [], "live key must never reach the network"
 
@@ -148,10 +159,12 @@ def test_each_pack_sends_correct_price_and_metadata(checkout_env, monkeypatch):
     for pack_id, price_id in PACK_PRICES.items():
         captured = []
         monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
-        url = stripe_billing.create_checkout_session(
-            user_id="user-9", pack_id=pack_id,
+        url, session_id = stripe_billing.create_checkout_session(
+            user_id="user-9", pack_id=pack_id, purchase_id="purchase-9",
             success_url="https://x/s", cancel_url="https://x/c")
-        assert url == "https://checkout.stripe.com/pay/cs_test_123"
+        # Fresh fake per pack: first session of that fake.
+        assert session_id == "cs_test_1"
+        assert url == "https://checkout.stripe.com/pay/cs_test_1"
         call = captured[0]
         assert call["url"] == "https://api.stripe.com/v1/checkout/sessions"
         assert call["data"]["mode"] == "payment"
@@ -159,7 +172,8 @@ def test_each_pack_sends_correct_price_and_metadata(checkout_env, monkeypatch):
         assert call["data"]["line_items[0][quantity]"] == "1"
         assert call["data"]["success_url"] == "https://x/s"
         assert call["data"]["cancel_url"] == "https://x/c"
-        # Settlement contract (issue #69): user + pack identity on the session.
+        # Settlement contract (issue #69): purchase id is the join key.
+        assert call["data"]["metadata[purchase_id]"] == "purchase-9"
         assert call["data"]["metadata[user_id]"] == "user-9"
         assert call["data"]["metadata[pack_id]"] == pack_id
         assert call["data"]["metadata[credits]"] == str(stripe_billing.PACKS[pack_id]["credits"])
@@ -178,7 +192,7 @@ def test_unconfigured_pack_fails_closed(checkout_env, monkeypatch):
     monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
     with pytest.raises(stripe_billing.CheckoutNotConfigured):
         stripe_billing.create_checkout_session(
-            user_id="u1", pack_id="growth",
+            user_id="u1", pack_id="growth", purchase_id="p1",
             success_url="https://x/s", cancel_url="https://x/c")
     assert captured == []
 
@@ -192,7 +206,7 @@ def test_stripe_error_fails_closed(checkout_env, monkeypatch):
     monkeypatch.setattr(stripe_billing.httpx, "post", _boom)
     with pytest.raises(stripe_billing.CheckoutError):
         stripe_billing.create_checkout_session(
-            user_id="u1", pack_id="starter",
+            user_id="u1", pack_id="starter", purchase_id="p1",
             success_url="https://x/s", cancel_url="https://x/c")
 
 
@@ -258,29 +272,43 @@ def test_checkout_rejects_bad_csrf(checkout_env):
 
 
 def test_checkout_creates_session_for_each_pack(checkout_env, monkeypatch):
-    from app import stripe_billing
+    from app import models, stripe_billing
 
     user_id, csrf = _login(checkout_env)
+    captured = []
+    monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
     for pack_id, price_id in PACK_PRICES.items():
-        captured = []
-        monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
         resp = checkout_env.client.post(
             "/credits/checkout", data={"pack_id": pack_id, "csrf_token": csrf})
         assert resp.status_code == 200, (pack_id, resp.text)
-        assert resp.json()["checkout_url"] == "https://checkout.stripe.com/pay/cs_test_123"
-        call = captured[0]
+        call = captured[-1]
         assert call["data"]["line_items[0][price]"] == price_id
         assert call["data"]["metadata[user_id]"] == user_id
         assert call["data"]["metadata[pack_id]"] == pack_id
+    # Issue #69: each checkout attempt recorded a pending purchase whose id
+    # rode in the session metadata, each with its own Stripe session id.
+    with checkout_env.sessions() as db:
+        purchases = db.query(models.CreditPurchase).all()
+        assert len(purchases) == 3
+        session_ids = set()
+        for p in purchases:
+            assert p.status == "pending"
+            assert p.stripe_session_id not in session_ids
+            session_ids.add(p.stripe_session_id)
 
 
 def test_checkout_503_when_stripe_unconfigured(checkout_env, monkeypatch):
+    from app import models
+
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     _, csrf = _login(checkout_env)
     resp = checkout_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
     assert resp.status_code == 503
     assert "not available yet" in resp.json()["error"]
+    # Config pre-check fails before any database write: no purchase row.
+    with checkout_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_checkout_refuses_live_key(checkout_env, monkeypatch):

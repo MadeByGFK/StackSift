@@ -230,6 +230,27 @@ async def credits(request: Request):
 
     packs = stripe_billing.packs_for_display()
     status = request.query_params.get("checkout", "")
+    # ISSUE-71: the credits page shows the ledger-derived balance (never a
+    # display-only number) so the post-purchase balance is visible without
+    # the user hunting for it or hitting refresh.
+    balance_summary = None
+    latest_purchase = None
+    if _user is not None:
+        from app.db import SessionLocal
+        from app import credits as credits_helpers
+        from app.models import CreditPurchase
+
+        db = SessionLocal()
+        try:
+            balance_summary = credits_helpers.get_balance_summary(db, _user.id)
+            latest_purchase = (
+                db.query(CreditPurchase)
+                .filter(CreditPurchase.user_id == _user.id)
+                .order_by(CreditPurchase.created_at.desc())
+                .first()
+            )
+        finally:
+            db.close()
     return templates.TemplateResponse(
         request,
         "pricing.html",
@@ -239,6 +260,8 @@ async def credits(request: Request):
             "packs": packs,
             "checkout_ready": any(p["ready"] for p in packs),
             "checkout_status": status if status in ("success", "cancelled") else "",
+            "balance_summary": balance_summary,
+            "latest_purchase": latest_purchase,
         },
     )
 
@@ -309,12 +332,34 @@ async def credits_checkout(
     success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/credits?checkout=success"
     cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/credits?checkout=cancelled"
     try:
-        checkout_url = stripe_billing.create_checkout_session(
-            user_id=_user.id,
-            pack_id=pack_id,
-            success_url=success_url,
-            cancel_url=cancel_url,
-        )
+        # Fail closed on configuration BEFORE touching the database, so the
+        # purchases table only ever holds real checkout attempts.
+        stripe_billing._secret_key()
+        if stripe_billing.pack_price_id(pack_id) is None:
+            raise stripe_billing.CheckoutNotConfigured(
+                f"price not configured for pack {pack_id}")
+        # ISSUE-69: record the purchase as pending BEFORE the Stripe call, so
+        # a crash between Stripe and our DB cannot produce a paid session
+        # with no local record. The purchase id rides in the session metadata
+        # as the settlement join key.
+        from app import credits as credits_helpers
+        purchase = credits_helpers.create_pending_purchase(db, _user.id, pack_id)
+        db.commit()
+        try:
+            checkout_url, session_id = stripe_billing.create_checkout_session(
+                user_id=_user.id,
+                pack_id=pack_id,
+                purchase_id=purchase.id,
+                success_url=success_url,
+                cancel_url=cancel_url,
+            )
+        except Exception:
+            # Stripe never saw a session (or we never got its id): the
+            # pending row stays as an abandoned attempt for reconciliation.
+            db.rollback()
+            raise
+        purchase.stripe_session_id = session_id
+        db.commit()
     except stripe_billing.LiveKeyRefused:
         logging.getLogger(__name__).critical(
             "STRIPE_SECRET_KEY is a live key; checkout refused")
@@ -326,7 +371,179 @@ async def credits_checkout(
         )
     except stripe_billing.CheckoutError:
         raise HTTPException(503, "Credit purchases are temporarily unavailable. Please try again shortly.")
+    # Issue #62: purchase start — a Checkout session was created for this user.
+    # Standalone session: this route is otherwise read-only and never commits.
+    from app import funnel as funnel_helpers
+    funnel_helpers.emit_standalone(funnel_helpers.PURCHASE_START, user_id=_user.id,
+                                   meta={"pack_id": pack_id})
     return JSONResponse({"checkout_url": checkout_url})
+
+
+# ISSUE-69: Stripe webhook — idempotent credit granting (test mode only).
+# Server-to-server: no user session and no CSRF token. The Stripe-Signature
+# HMAC is the authentication; unsigned or mis-signed deliveries are answered
+# 400 before any database row is touched. Stripe retries non-2xx, so every
+# handler path below is idempotent.
+@app.post("/credits/webhook")
+async def credits_webhook(request: Request, db=Depends(get_db)):
+    import json as _json
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+    from sqlalchemy.exc import IntegrityError
+    from app import stripe_billing, models as _models
+    from app import credits as credits_helpers
+
+    log = logging.getLogger(__name__)
+    try:
+        webhook_secret = stripe_billing._webhook_secret()
+    except stripe_billing.LiveKeyRefused:
+        log.critical("STRIPE_SECRET_KEY is a live key; webhook refused")
+        raise HTTPException(500, "Credit purchases are misconfigured.")
+    except stripe_billing.WebhookNotConfigured:
+        raise HTTPException(503, "Credit purchases are unavailable right now.")
+
+    raw = await request.body()
+    if not stripe_billing.verify_stripe_signature(
+        raw, request.headers.get("stripe-signature"), webhook_secret
+    ):
+        log.warning("webhook: invalid Stripe signature; ignoring")
+        raise HTTPException(400, "Invalid webhook signature.")
+    try:
+        event = _json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "Invalid webhook payload.")
+    event_id = event.get("id")
+    event_type = event.get("type", "")
+    if not event_id or not isinstance(event_id, str):
+        raise HTTPException(400, "Invalid webhook payload.")
+
+    # Idempotency gate: the PK on stripe_event_id makes redelivery collide
+    # here, before any side effect. Roll back the failed insert and answer
+    # 200 so Stripe stops retrying a delivery we already handled.
+    webhook_event = _models.StripeWebhookEvent(
+        stripe_event_id=event_id, event_type=event_type, outcome="ignored")
+    db.add(webhook_event)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        log.info("webhook %s: redelivered event; granting nothing", event_id)
+        return JSONResponse({"status": "duplicate"})
+
+    if event_type != "checkout.session.completed" and event_type not in (
+        "checkout.session.expired",
+        "checkout.session.async_payment_failed",
+        "payment_intent.payment_failed",
+    ):
+        db.commit()
+        log.info("webhook %s: ignoring event type %s", event_id, event_type)
+        return JSONResponse({"status": "ignored"})
+
+    stripe_obj = event.get("data", {}).get("object", {}) or {}
+    obj_metadata = stripe_obj.get("metadata", {}) or {}
+
+    def _find_purchase():
+        purchase = None
+        purchase_ref = obj_metadata.get("purchase_id")
+        if purchase_ref:
+            try:
+                purchase = db.get(_models.CreditPurchase, purchase_ref)
+            except Exception:
+                # Malformed purchase_id in verified metadata: data corruption,
+                # not an attack — treat as unknown, never 500 (Stripe retries
+                # non-2xx into a loop).
+                log.warning("webhook %s: malformed metadata purchase_id %r",
+                            event_id, purchase_ref)
+                purchase = None
+        if purchase is None and stripe_obj.get("id"):
+            # Fallback join for sessions created before metadata[purchase_id]
+            # existed; the session id is backfilled onto the purchase at
+            # settlement.
+            from sqlalchemy import select as _select
+            purchase = db.execute(
+                _select(_models.CreditPurchase).where(
+                    _models.CreditPurchase.stripe_session_id == stripe_obj["id"])
+            ).scalar_one_or_none()
+        return purchase
+
+    # ISSUE-70: terminal failure signals. An expired session (or a failed
+    # async payment method) can never complete, so the pending purchase is
+    # failed outright — no credits, no ledger grant, nothing stuck pending.
+    # A failed card payment is NOT terminal: inside a Checkout session the
+    # customer sees Stripe's decline message and can retry with another card,
+    # so the purchase stays pending and a later completion still settles.
+    if event_type in ("checkout.session.expired",
+                      "checkout.session.async_payment_failed"):
+        purchase = _find_purchase()
+        if purchase is None:
+            webhook_event.outcome = "ignored"
+            webhook_event.note = "unknown purchase"
+            db.commit()
+            log.warning("webhook %s: no purchase for %s %s; ignoring",
+                        event_id, event_type, stripe_obj.get("id"))
+            return JSONResponse({"status": "ignored"})
+        webhook_event.purchase_id = purchase.id
+        reason = ("checkout session expired" if event_type == "checkout.session.expired"
+                  else "async payment failed")
+        transitioned = credits_helpers.fail_purchase(
+            db, purchase, reason=reason, stripe_event_id=event_id)
+        webhook_event.outcome = "processed"
+        webhook_event.note = f"purchase {reason}" + ("" if transitioned else " (already terminal)")
+        db.commit()
+        return JSONResponse({"status": "processed"})
+
+    if event_type == "payment_intent.payment_failed":
+        purchase = _find_purchase()
+        if purchase is None:
+            webhook_event.outcome = "ignored"
+            webhook_event.note = "unknown purchase"
+            db.commit()
+            log.warning("webhook %s: no purchase for payment intent %s; ignoring",
+                        event_id, stripe_obj.get("id"))
+            return JSONResponse({"status": "ignored"})
+        webhook_event.purchase_id = purchase.id
+        # Declined card: grant nothing. The purchase deliberately stays
+        # pending — the customer retries inside the still-open Checkout
+        # session; only expiry (above) or the stale-pending cleanup may
+        # terminally fail it.
+        webhook_event.outcome = "processed"
+        webhook_event.note = "card declined; purchase left pending for in-session retry"
+        db.commit()
+        log.info("webhook %s: purchase %s card declined; still %s, granting nothing",
+                 event_id, purchase.id, purchase.status)
+        return JSONResponse({"status": "processed"})
+
+    session_obj = stripe_obj
+    metadata = obj_metadata
+    purchase = _find_purchase()
+    if purchase is None:
+        webhook_event.outcome = "ignored"
+        webhook_event.note = "unknown purchase"
+        db.commit()
+        log.warning("webhook %s: no purchase for session %s; ignoring",
+                    event_id, session_obj.get("id"))
+        return JSONResponse({"status": "ignored"})
+
+    webhook_event.purchase_id = purchase.id
+    try:
+        outcome = credits_helpers.settle_purchase(
+            db,
+            purchase,
+            stripe_event_id=event_id,
+            stripe_session_id=session_obj.get("id") or "",
+            event_metadata=metadata,
+            amount_cents=session_obj.get("amount_total"),
+            currency=session_obj.get("currency"),
+            payment_intent_id=session_obj.get("payment_intent"),
+        )
+    except credits_helpers.SettlementError as exc:
+        webhook_event.outcome = "failed"
+        webhook_event.note = str(exc)[:250]
+        db.commit()
+        return JSONResponse({"status": "failed"})
+    webhook_event.outcome = outcome
+    db.commit()
+    return JSONResponse({"status": outcome})
 
 @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy(request: Request):
@@ -736,6 +953,15 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 settled = A.finish_free(db, identity, data, failure)
                 if settled is not None:
                     result_id = settled.id
+            if not failure and result_id is not None:
+                # Issue #62: first successful own-log analysis. The /demo route
+                # never reaches this path, so everything here is a user upload.
+                # Identity is the user, or the anonymous session hash for
+                # pre-account visitors (privacy-appropriate: no PII).
+                from app import funnel as funnel_helpers
+                funnel_helpers.emit(db, funnel_helpers.ANALYSIS_FIRST,
+                                    user_id=user_id, anon_id=anon,
+                                    once_per_identity=True)
             db.commit()
     except Exception:
         logging.getLogger(__name__).exception("Analysis execution or settlement failed")
@@ -939,6 +1165,13 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         return JSONResponse({"error": "Report not found"}, status_code=404)
     if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+    # Issue #62: export intent — an authenticated user with a real, unexpired
+    # report asked for a PDF export. Standalone session: intent counts whether
+    # or not credits suffice, and the 402 path rolls the request transaction
+    # back.
+    from app import funnel as funnel_helpers
+    funnel_helpers.emit_standalone(funnel_helpers.EXPORT_INTENT, user_id=user.id)
 
     base_idempotency_key = f"pdf-{result_id}"
     request_hash = result.integrity_digest

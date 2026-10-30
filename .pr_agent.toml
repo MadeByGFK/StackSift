@@ -1,0 +1,7 @@
+# PR-Agent configuration (repo-level).
+# The self-hosted reviewer runs ollama/qwen2.5-coder:7b, which is not in
+# PR-Agent's built-in MAX_TOKENS table; without this value every PR-Agent
+# tool errors out ("model is not defined in MAX_TOKENS"). 32768 = the
+# model's context window as served by Ollama.
+[config]
+custom_model_max_tokens = 32768

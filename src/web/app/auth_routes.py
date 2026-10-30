@@ -147,6 +147,22 @@ async def verify_email(request: Request, token: str = Form(...), db: DBSession =
         db.rollback()
         import logging
         logging.getLogger(__name__).exception("signup reward grant failed")
+    # Issue #62: funnel milestone — email verified. Standalone session: this
+    # route's own transaction is not otherwise committed here. Best-effort:
+    # never breaks verification.
+    try:
+        from app import funnel as funnel_helpers
+        from app.auth import hash_token as _hash_token
+        from app.models import EmailVerification as _EmailVerification
+        row = db.query(_EmailVerification).filter(
+            _EmailVerification.token_hash == _hash_token(token)).first()
+        if row is not None:
+            funnel_helpers.emit_standalone(funnel_helpers.EMAIL_VERIFIED,
+                                           user_id=row.user_id,
+                                           once_per_identity=True)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("funnel email_verified emission failed")
     return JSONResponse({"message": "Email verified. You can now log in."})
 
 
@@ -174,6 +190,15 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
         .all()
     )
     linked_providers = {row[0] for row in oauth_links}
+    # ISSUE-71: the account view shows the ledger-derived balance and the
+    # purchase history (pack, date, credits granted) — no display-only
+    # numbers, no card or Stripe detail.
+    from app import credits as credits_helpers
+    from app import stripe_billing as stripe_billing_helpers
+
+    balance_summary = credits_helpers.get_balance_summary(db, user.id)
+    purchases = credits_helpers.list_completed_purchases(db, user.id)
+    pack_names = {pid: p["name"] for pid, p in stripe_billing_helpers.PACKS.items()}
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -184,6 +209,9 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "current_session_id": str(session.id) if session else None,
             "csrf_token": session.csrf_token if session else "",
             "linked_providers": linked_providers,
+            "balance_summary": balance_summary,
+            "purchases": purchases,
+            "pack_names": pack_names,
         },
     )
 
@@ -413,16 +441,36 @@ async def me(request: Request, db: DBSession = Depends(get_db)):
 
 @router.get("/auth/balance")
 async def balance(request: Request, db: DBSession = Depends(get_db)):
-    """Return credit balance for the logged-in user (for nav display)."""
+    """Return credit balance for the logged-in user (for nav display).
+
+    ISSUE-68 (in-modal quick buy): a logged-in response also carries the
+    session CSRF token — the same token the page forms use — and per-pack
+    checkout readiness, so the nav credit-badge modal can post the
+    selected pack straight to /credits/checkout instead of sending the
+    user to the credits page. Anonymous callers get neither field.
+    """
     session = auth_helpers.get_session_from_cookie(db, request)
     if not session:
         return JSONResponse({"balance": None})
     try:
         from app import credits as credits_helpers
         summary = credits_helpers.get_balance_summary(db, session.user_id)
-        return JSONResponse({"balance": summary["balance"]})
+        balance_value = summary["balance"]
     except Exception:
         return JSONResponse({"balance": None})
+    from app import stripe_billing as stripe_billing_helpers
+
+    readiness = {
+        pack["id"]: pack["ready"]
+        for pack in stripe_billing_helpers.packs_for_display()
+    }
+    return JSONResponse(
+        {
+            "balance": balance_value,
+            "csrf_token": session.csrf_token,
+            "packs": readiness,
+        }
+    )
 
 @router.get("/auth/sessions")
 async def list_sessions(request: Request, db: DBSession = Depends(get_db)):

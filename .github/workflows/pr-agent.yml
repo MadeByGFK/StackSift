@@ -1,0 +1,56 @@
+# .github/workflows/pr-agent.yml
+#
+# Self-hosted PR-Agent code reviewer — mechanical first-pass on every PR.
+# Replaces Codex for routine reviews (Codex stays reserved for high-risk work
+# per the standing review-tier policy).
+#
+# How it works: on each PR event, the runner installs Ollama, pulls a small
+# coding model (~4.7GB), and runs PR-Agent's review. Free and unlimited;
+# no code leaves GitHub. Adds roughly 5-15 minutes per PR run.
+#
+# INSTALL (one time, from your Mac — the GitHub integration cannot push
+# workflow files, so this step is yours):
+#   1. Copy this file to .github/workflows/pr-agent.yml in your StackSift clone
+#   2. git add .github/workflows/pr-agent.yml
+#   3. git commit -m "Add self-hosted PR-Agent reviewer"
+#   4. git push origin staging/p1
+# No secrets or API keys needed. Targets staging/p1 because that's where
+# feature PRs land; add to master too if you want it on production PRs.
+
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr_agent_job:
+    # Skip bot PRs. For comments, only run on PR comments (supports /review).
+    if: |
+      github.event.sender.type != 'Bot' &&
+      (github.event_name == 'pull_request' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request))
+    runs-on: ubuntu-latest
+    name: PR-Agent review (Ollama, self-hosted)
+    steps:
+      - name: Install Ollama and pull model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > /tmp/ollama.log 2>&1 &)
+          sleep 10
+          ollama pull qwen2.5-coder:7b
+
+      - name: Run PR-Agent review
+        id: pragent
+        uses: qodo-ai/pr-agent@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFIG.MODEL: "ollama/qwen2.5-coder:7b"
+          # Ollama API base defaults to http://localhost:11434, which is
+          # where `ollama serve` is running above — no override needed.
