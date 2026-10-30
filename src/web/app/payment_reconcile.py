@@ -190,27 +190,64 @@ def fetch_day_disputes(key: str, day: date) -> list[dict]:
     )
 
 
+def _aggregate_disputes(disputes: list[dict]) -> dict:
+    """One synthetic Dispute dict for a charge with several disputes.
+
+    Stripe documents that a payment can have multiple disputes, and
+    its list APIs return reverse chronological order — so a naive
+    last-wins join keeps the OLDEST dispute and can drop a newer lost
+    one behind an older won one (Codex P2 on PR #108). Grouping is
+    therefore mandatory, not cosmetic. Money rule: only non-won
+    disputes subtract, and ``compute_reconciliation`` already caps
+    the per-charge portion at the unrefunded remainder, so summing
+    non-won amounts cannot double-count beyond the charge. Status
+    rule: lost beats open beats won (a lost dispute's funds are
+    gone; an open one's may still reverse, but the lost amount is
+    final); among open disputes the newest (first in list order)
+    supplies the displayed status. A charge whose disputes are all
+    won/charge_refunded aggregates to won with amount 0.
+    """
+    non_won = [d for d in disputes
+               if (d.get("status") or "unknown")
+               not in ("won", "charge_refunded")]
+    if not non_won:
+        return {"status": "won", "amount": 0}
+    amount = sum(int(d.get("amount") or 0) for d in non_won)
+    lost = [d for d in non_won if d.get("status") == "lost"]
+    if lost:
+        status = "lost"
+    else:
+        # First non-won in list order = newest open dispute.
+        status = non_won[0].get("status") or "unknown"
+    return {"status": status, "amount": amount}
+
+
 def attach_disputes(charges: list[dict], disputes: list[dict]) -> None:
     """Attach fetched Dispute objects to their charges, in place.
 
-    Joined by ``dispute.charge``. A charge that already carries an
-    expanded dispute dict (the test seam supplies these) is left
-    alone; a charge whose ``dispute`` is a bare id string or absent
-    gets the fetched object. Unknown charges are ignored.
+    Joined by ``dispute.charge`` and grouped per charge (see
+    ``_aggregate_disputes`` — a charge with several disputes gets
+    one aggregated object, never a last-wins overwrite). A charge
+    that already carries an expanded dispute dict (the test seam
+    supplies these) is left alone; a charge whose ``dispute`` is a
+    bare id string or absent gets the fetched object. Unknown
+    charges are ignored.
     """
-    by_charge = {}
+    by_charge: dict[str, list[dict]] = {}
     for d in disputes:
         charge_id = d.get("charge")
         if isinstance(charge_id, str) and charge_id:
-            by_charge[charge_id] = d
+            by_charge.setdefault(charge_id, []).append(d)
     for c in charges:
         if not c.get("disputed"):
             continue
         if isinstance(c.get("dispute"), dict):
             continue
-        dispute = by_charge.get(c.get("id"))
-        if dispute is not None:
-            c["dispute"] = dispute
+        group = by_charge.get(c.get("id"))
+        if not group:
+            continue
+        c["dispute"] = group[0] if len(group) == 1 \
+            else _aggregate_disputes(group)
 
 
 def _pack_for_charge(charge: dict, pi_to_pack: dict[str, str]) -> str:

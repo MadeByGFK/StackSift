@@ -719,6 +719,83 @@ def test_disputes_fetched_separately_from_charges(recon_env, monkeypatch):
             dispute_calls[0]["created[gte]"]
 
 
+def _dispute_fake(monkeypatch, disputes):
+    """httpx.get fake for the disputes-fetch path: one paired session,
+    one disputed charge, and the given disputes list (newest first,
+    as Stripe lists return). Returns captured (url, params) pairs."""
+    from app import payment_reconcile as pr  # noqa: F401 -- documents path
+    import httpx
+    captured = []
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return {"data": self._data, "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        captured.append((url, dict(params or {})))
+        if url.endswith("/charges"):
+            return FakeResp([_charge("ch_multi_1", 500, pi="pi_multi",
+                                     disputed=True)])
+        if url.endswith("/disputes"):
+            return FakeResp(disputes)
+        if url.endswith("/checkout/sessions"):
+            return FakeResp([_session("cs_multi_1", pi="pi_multi")])
+        return FakeResp([])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    return captured
+
+
+def test_multiple_disputes_grouped_not_last_wins(recon_env, monkeypatch):
+    """PR #108 Codex P2 regression: a charge with a newer lost dispute
+    and an older won dispute must NOT attach only the won object
+    (the old last-wins join kept the oldest, since Stripe lists are
+    reverse chronological, and recorded the day clean despite lost
+    funds). The grouped result subtracts the lost 500."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_new", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+        {"id": "dp_old", "charge": "ch_multi_1", "status": "won",
+         "amount": 500},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 500
+        assert run.per_pack["starter"]["stripe_net_cents"] == 0
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 500
+        assert dispute["status"] == "lost"
+
+
+def test_multiple_disputes_capped_at_charge(recon_env, monkeypatch):
+    """PR #108 Codex P2 follow-up: two lost 500 disputes on one 500
+    charge sum to 1000 but the per-charge cap holds the subtraction
+    at the unrefunded remainder (500), never double-counting beyond
+    the charge."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_a", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+        {"id": "dp_b", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 500
+        assert run.per_pack["starter"]["stripe_net_cents"] == 0
+
+
 def test_error_recovery_preserves_alert_history(recon_env, monkeypatch):
     """PR #108 Codex Finding 2 regression: a mismatch row whose alert
     was already delivered, then failed by a window re-run (Stripe
