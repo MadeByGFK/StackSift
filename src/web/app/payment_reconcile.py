@@ -155,13 +155,62 @@ def fetch_prior_sessions(key: str, day: date) -> list[dict]:
 
 
 def fetch_day_charges(key: str, day: date) -> list[dict]:
-    """Charges created on the UTC day (refund/dispute source)."""
+    """Charges created on the UTC day (refund/dispute source).
+
+    NOTE: no ``expand[]=data.dispute`` here. The current Stripe Charges
+    reference lists no ``dispute`` attribute on Charge (only the
+    ``disputed`` boolean), and the code pins no Stripe-Version header,
+    so an expansion the account's API version does not support would
+    400 the whole charges fetch and error every day. Dispute status
+    instead comes from the separate disputes fetch below (the spec's
+    documented fallback), which cannot fail the charges call.
+    """
     start, end = day_bounds(day)
     return _stripe_list(
         key, "/charges",
         int(start.timestamp()), int(end.timestamp()),
-        extra={"expand[]": "data.dispute"},
     )
+
+
+def fetch_day_disputes(key: str, day: date) -> list[dict]:
+    """Disputes created on or after the UTC day, up to now.
+
+    The spec's literal fallback window was ``[day - 90 days, day]``,
+    which would miss a dispute opened AFTER day-end for a day charge
+    (the common late-dispute case). Disputes for a day's charges are
+    necessarily created at or after day-start, so ``[day_start, now]``
+    is exactly complete at run time, and the 7-day window re-run picks
+    up disputes that open later. Paginated via ``_stripe_list``.
+    """
+    start, _ = day_bounds(day)
+    now = _utcnow()
+    return _stripe_list(
+        key, "/disputes",
+        int(start.timestamp()), int(now.timestamp()) + 1,
+    )
+
+
+def attach_disputes(charges: list[dict], disputes: list[dict]) -> None:
+    """Attach fetched Dispute objects to their charges, in place.
+
+    Joined by ``dispute.charge``. A charge that already carries an
+    expanded dispute dict (the test seam supplies these) is left
+    alone; a charge whose ``dispute`` is a bare id string or absent
+    gets the fetched object. Unknown charges are ignored.
+    """
+    by_charge = {}
+    for d in disputes:
+        charge_id = d.get("charge")
+        if isinstance(charge_id, str) and charge_id:
+            by_charge[charge_id] = d
+    for c in charges:
+        if not c.get("disputed"):
+            continue
+        if isinstance(c.get("dispute"), dict):
+            continue
+        dispute = by_charge.get(c.get("id"))
+        if dispute is not None:
+            c["dispute"] = dispute
 
 
 def _pack_for_charge(charge: dict, pi_to_pack: dict[str, str]) -> str:
@@ -498,10 +547,15 @@ def reconcile_day(db, day: date, *, stripe_get=None,
     scan (later days, alert-pending retry) on every tick of an outage
     once error days are retried by the job.
 
-    A ``force=True`` re-run of a final row UPDATES IT IN PLACE (same
+    A re-run over an existing row — ``force=True`` on a final row, or
+    a non-force retry of an 'error' row — UPDATES IT IN PLACE (same
     ``id`` and ``created_at``; status, totals, per_pack, differences
-    overwritten; error_note cleared) so no migration is needed. Alert
-    rules on a force re-run: a recomputed mismatch keeps a previous
+    overwritten; error_note cleared) so no migration is needed. This
+    is load-bearing for alert history: the old non-force success path
+    delete+inserted, so an error row that had already alerted (a
+    window re-run that failed after the alert went out) lost
+    ``alert_sent`` on recovery and sent the alert a second time.
+    Alert rules on any re-run: a recomputed mismatch keeps a previous
     ``alert_sent=True`` without re-sending; a previous
     ``alert_pending=True`` attempts delivery as usual; a recomputed
     clean clears ``alert_pending`` but keeps the historical
@@ -539,6 +593,11 @@ def reconcile_day(db, day: date, *, stripe_get=None,
         else:
             sessions = fetch_day_sessions(key, day)
             charges = fetch_day_charges(key, day)
+            if any(c.get("disputed") for c in charges):
+                # Dispute status via the separate disputes fetch (see
+                # fetch_day_charges): one extra call, only when a
+                # disputed charge exists, never on the charges call.
+                attach_disputes(charges, fetch_day_disputes(key, day))
             prior = fetch_prior_sessions(key, day)
             wide = None
             if any(int(c.get("amount_refunded") or 0) > 0 or c.get("disputed")
@@ -569,14 +628,21 @@ def reconcile_day(db, day: date, *, stripe_get=None,
                 recon_date=day, status="error", error_note=str(exc)[:500])
             db.add(row)
         else:
+            # Deliberately untouched: alert_sent / alert_pending.
+            # A failed re-run of an already-alerted mismatch row must
+            # keep its alert history, or the recovery re-sends it
+            # (Codex Finding 2 on PR #108).
             row.status = "error"
             row.error_note = str(exc)[:500]
         db.commit()
         return row
 
     status = "clean" if not result["differences"] else "mismatch"
-    if existing is not None and force:
-        # Force re-run: update in place, preserving id and created_at.
+    if existing is not None:
+        # Any re-run over an existing row updates in place, preserving
+        # id, created_at, and alert history (see the docstring: the
+        # old non-force branch delete+inserted here, which re-sent an
+        # already-delivered alert when an error row recovered).
         prev_status = existing.status
         prev_alert_sent = existing.alert_sent
         existing.status = status
@@ -607,9 +673,8 @@ def reconcile_day(db, day: date, *, stripe_get=None,
         db.add(run)
         db.commit()
     else:
-        if existing is not None:
-            db.delete(existing)
-            db.flush()
+        # Fresh day: no existing row (final rows return early above
+        # unless forced, and forced rows take the in-place branch).
         run = M.PaymentReconciliation(
             recon_date=day,
             status=status,

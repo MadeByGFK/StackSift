@@ -660,9 +660,118 @@ def test_wide_session_list_sends_no_payment_status_param(recon_env, monkeypatch)
     prior_start = datetime(2026, 10, 20, tzinfo=timezone.utc)
     assert session_calls[1]["created[gte]"] == int(prior_start.timestamp())
     assert session_calls[1]["created[lte]"] == int(day_start.timestamp()) - 1
-    # Finding 2 fetch change: charges are listed with the dispute expanded.
+    # PR #108 Finding 1 resolution: charges are listed WITHOUT an
+    # expand[] (the Charges reference lists no `dispute` attribute and
+    # the code pins no Stripe-Version, so an unsupported expansion
+    # would 400 the whole charges fetch). Dispute status comes from
+    # the separate /v1/disputes fetch instead.
     charge_calls = [p for u, p in captured if u.endswith("/charges")]
-    assert charge_calls[0]["expand[]"] == "data.dispute"
+    assert "expand[]" not in charge_calls[0]
+
+
+def test_disputes_fetched_separately_from_charges(recon_env, monkeypatch):
+    """PR #108 Finding 1 resolution: a disputed charge with no
+    expanded dispute object gets its status from a separate
+    /v1/disputes list call (joined by dispute.charge), and the
+    charges call itself carries no expand[]. A won dispute found
+    this way subtracts nothing, so the paired day stays clean."""
+    from app import payment_reconcile as pr
+    import httpx
+    captured = []
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return {"data": self._data, "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        captured.append((url, dict(params or {})))
+        if url.endswith("/charges"):
+            return FakeResp([_charge("ch_sep_1", 500, pi="pi_sep",
+                                     disputed=True)])
+        if url.endswith("/disputes"):
+            return FakeResp([{"id": "dp_sep_1", "charge": "ch_sep_1",
+                              "status": "won", "amount": 500}])
+        if url.endswith("/checkout/sessions"):
+            return FakeResp([_session("cs_sep_1", pi="pi_sep")])
+        return FakeResp([])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_sep_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        # Won dispute found via the separate fetch: subtracts nothing.
+        assert run.status == "clean"
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 0
+        assert run.differences == []
+        charge_calls = [p for u, p in captured if u.endswith("/charges")]
+        assert "expand[]" not in charge_calls[0]
+        dispute_calls = [p for u, p in captured if u.endswith("/disputes")]
+        assert len(dispute_calls) == 1
+        day_start = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        assert dispute_calls[0]["created[gte]"] == int(day_start.timestamp())
+        assert dispute_calls[0]["created[lte]"] >= \
+            dispute_calls[0]["created[gte]"]
+
+
+def test_error_recovery_preserves_alert_history(recon_env, monkeypatch):
+    """PR #108 Codex Finding 2 regression: a mismatch row whose alert
+    was already delivered, then failed by a window re-run (Stripe
+    down), keeps its id AND alert_sent=True through the error row,
+    and its non-force recovery sends no second alert."""
+    from app import models, payment_reconcile as pr
+    from app import email as email_module
+    sent = []
+    monkeypatch.setattr(email_module, "send_email",
+                        lambda to, subject, html: sent.append((to, subject)) or True)
+    monkeypatch.setenv("RECON_ALERT_EMAIL", "ops@example.com")
+    day = date(2026, 10, 20)
+    sess = _session("cs_recover_1")
+    failing = {"fail": False}
+
+    def get(kind, day):
+        if failing["fail"] and day == date(2026, 10, 20):
+            raise pr.ReconcileError("stripe down")
+        return {"sessions": [sess] if day == date(2026, 10, 20) else [],
+                "charges": [], "wide_sessions": [],
+                "prior_sessions": []}[kind]
+
+    with recon_env.sessions() as db:
+        run = pr.reconcile_day(db, day, stripe_get=get)
+        assert run.status == "mismatch"
+        assert run.alert_sent is True
+        assert len(sent) == 1
+        row_id, created_at = run.id, run.created_at
+        # Window re-run fails: the row becomes 'error' in place.
+        failing["fail"] = True
+        pr.reconcile_missing_days(db, stripe_get=get, today=date(2026, 10, 23))
+        db.expire_all()
+        row = _run(db, day)
+        assert row.status == "error"
+        assert row.id == row_id
+        assert row.created_at == created_at
+        assert row.alert_sent is True
+        assert len(sent) == 1
+        # Recovery: non-force retry of the error row, same id, no
+        # second alert, exactly one row for the day.
+        failing["fail"] = False
+        pr.reconcile_missing_days(db, stripe_get=get, today=date(2026, 10, 23))
+        db.expire_all()
+        row = _run(db, day)
+        assert row.status == "mismatch"
+        assert row.id == row_id
+        assert row.created_at == created_at
+        assert row.alert_sent is True
+        assert row.alert_pending is False
+        assert len(sent) == 1
+        rows = db.execute(select(models.PaymentReconciliation).where(
+            models.PaymentReconciliation.recon_date == day)).scalars().all()
+        assert len(rows) == 1
 
 
 # --- Issue #101: #72 pre-activation reconciliation fixes ---
