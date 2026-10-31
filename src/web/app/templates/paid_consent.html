@@ -35,7 +35,7 @@
   <div class="cost">{{ cost_label }}</div>
   <div class="cost-label">{{ cost_sentence }}</div>
   <div class="balance">Your balance: {{ eligible }} eligible credits ({{ balance }} total)</div>
-  <form method="post" action="/analyze/paid" class="consent-actions">
+  <form method="post" action="{{ confirm_action or "/analyze/paid" }}" class="consent-actions">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
     <input type="hidden" name="file_hash" value="{{ file_hash }}">
     <input type="hidden" name="idempotency_key" value="{{ consent_id }}">

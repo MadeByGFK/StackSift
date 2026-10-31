@@ -61,7 +61,8 @@ def _package_parent() -> str:
 def run_supervised(filename: str, content: bytes, *,
                    timeout: int = OVERSIZE_EXECUTION_TIMEOUT_SECONDS,
                    memory_limit: int = OVERSIZE_MEMORY_LIMIT_BYTES,
-                   original_byte_count: int | None = None) -> dict:
+                   original_byte_count: int | None = None,
+                   collect_comparison_evidence: bool = False) -> dict:
     """Run an oversize analysis in a supervised subprocess.
 
     Returns the analyze_upload() result dict on success, or an error dict
@@ -89,6 +90,11 @@ def run_supervised(filename: str, content: bytes, *,
         env["STACKSIFT_OVERSIZE_MEMORY_LIMIT"] = str(memory_limit)
         if original_byte_count is not None:
             env["STACKSIFT_OVERSIZE_ORIGINAL_BYTES"] = str(original_byte_count)
+        # Issue #102: compare reuses this worker (spec trim C1); the child
+        # threads the flag into analyze_upload so the evidence collector
+        # runs only for comparison inputs, never for oversize runs.
+        if collect_comparison_evidence:
+            env["STACKSIFT_COLLECT_COMPARISON_EVIDENCE"] = "1"
         # Contain the child's service temp file inside this per-run
         # directory (see module docstring): the parent removes the whole
         # directory after the child stops, even on a timeout kill.
@@ -162,7 +168,9 @@ def _child_main(argv: list[str]) -> int:
         original_byte_count = None
     data = analyze_upload(os.path.basename(in_path), content,
                           allow_oversize=True, use_alarm=False,
-                          original_byte_count=original_byte_count)
+                          original_byte_count=original_byte_count,
+                          collect_comparison_evidence=(
+                              os.environ.get("STACKSIFT_COLLECT_COMPARISON_EVIDENCE") == "1"))
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, default=str)
     return 0

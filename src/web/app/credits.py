@@ -59,6 +59,10 @@ COST_BATCH = 5  # Proposed (gated)
 # run, charged only on success (reserve during execution, net -3 on
 # success, full reversal on failure; never re-debit a committed completion).
 COST_OVERSIZE_ANALYSIS = 3
+# Issue #102: founder-ruled price (2026-10-24) — 3 credits per comparison,
+# charged only on success, even when the pair is identical or shows no
+# material differences (disclosed on the consent page, spec trim C10).
+COST_COMPARE = 3
 
 # Signup reward (approved 2026-10-15)
 SIGNUP_REWARD_CREDITS = 3
@@ -74,6 +78,8 @@ RATE_LIMIT_BATCH = 5
 # Issue #104, slice 1 (trim T3): explicit 30/hour policy for oversize, so
 # it never relies on _consume_rate()'s fallback.
 RATE_LIMIT_OVERSIZE_ANALYSIS = 30
+# Issue #102: explicit 30/hour policy for compare, same reason.
+RATE_LIMIT_COMPARE = 30
 
 # Consent validity
 CONSENT_TTL = timedelta(minutes=15)
@@ -595,6 +601,7 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
     limit = {
         "paid:additional_analysis": RATE_LIMIT_PAID_ANALYSIS,
         "paid:oversize_analysis": RATE_LIMIT_OVERSIZE_ANALYSIS,
+        "paid:compare_logs": RATE_LIMIT_COMPARE,
         "paid:pdf": RATE_LIMIT_PDF,
         "paid:batch": RATE_LIMIT_BATCH,
     }.get(policy, 30)
@@ -711,15 +718,21 @@ def outcome_severity(data):
     return "ok"
 
 
-def store_result(db, user_id, operation_id, data):
+def store_result(db, user_id, operation_id, data, *, result_type="analysis", severity="__default__"):
     # Obtain domain locks BEFORE inserting the result's operation FK.
     op, _, _ = _lock_operation(db, operation_id)
     if op.status != "reserved":
         raise AdmissionError("operation is no longer reserved")
     raw = json.dumps({k: v for k, v in data.items() if k not in ("current_user", "csrf_token")}, default=str)
     now = _utcnow()
-    result = models.Result(user_id=user_id, operation_id=operation_id, type="analysis",
-        severity=outcome_severity(data),
+    # Issue #102: comparison results store as type "comparison" with NULL
+    # severity (no single outcome severity exists for a diff; the reports
+    # list renders NULL as the neutral dot). Callers that pass no severity
+    # keep the previous outcome_severity behavior.
+    if severity == "__default__":
+        severity = outcome_severity(data)
+    result = models.Result(user_id=user_id, operation_id=operation_id, type=result_type,
+        severity=severity,
         storage_manifest=raw, integrity_digest=hash_input(raw.encode()), byte_count=len(raw.encode()),
         ready_at=now, expires_at=now + timedelta(days=7))
     db.add(result)

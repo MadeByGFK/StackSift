@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift — Compare two logs</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <nav class="nav-links">
+      <a href="/reports">My Reports</a>
+    </nav>
+  </header>
+
+  <section>
+    <h1>Compare two logs</h1>
+    <p>Upload A (before) and B (after). Comparison costs 3 credits, charged
+    only on success — even if the logs are identical or show no material
+    differences. Both files are subject to the free limits
+    (10 MB / 50,000 lines each). Existing reports cannot be compared
+    retrospectively: this is upload-only in v1.</p>
+    {% if error %}
+    <div class="error" role="alert">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/compare" enctype="multipart/form-data">
+      <div>
+        <label for="file_a">A — Before (baseline)</label>
+        <input type="file" id="file_a" name="file_a" accept=".log,.txt,.text" required>
+      </div>
+      <div>
+        <label for="file_b">B — After</label>
+        <input type="file" id="file_b" name="file_b" accept=".log,.txt,.text" required>
+      </div>
+      <button type="submit">Compare (3 credits)</button>
+    </form>
+  </section>
+</div>
+</body>
+</html>

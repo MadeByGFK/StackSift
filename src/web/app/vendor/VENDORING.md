@@ -32,6 +32,13 @@ to git is what runs on Railway. No hidden version mismatches.
 
 **Total:** 1,821 lines
 
+**Local divergence (issue #102, 2026-10-31):** `analyzer.py` gains an
+opt-in `collect_comparison_evidence` parameter on `analyze_log_file`
+(default OFF; when OFF the result shape is byte-identical to upstream).
+This is a web-app-local addition, not an upstream change — do not
+overwrite it on a vendor sync without re-applying the collector. The
+SHASUMS entry for `analyzer.py` tracks this local version.
+
 ## Import rewriting
 
 All `from stacksift.X import` statements have been rewritten to
