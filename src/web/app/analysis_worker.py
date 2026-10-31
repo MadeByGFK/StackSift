@@ -60,7 +60,8 @@ def _package_parent() -> str:
 
 def run_supervised(filename: str, content: bytes, *,
                    timeout: int = OVERSIZE_EXECUTION_TIMEOUT_SECONDS,
-                   memory_limit: int = OVERSIZE_MEMORY_LIMIT_BYTES) -> dict:
+                   memory_limit: int = OVERSIZE_MEMORY_LIMIT_BYTES,
+                   original_byte_count: int | None = None) -> dict:
     """Run an oversize analysis in a supervised subprocess.
 
     Returns the analyze_upload() result dict on success, or an error dict
@@ -69,6 +70,13 @@ def run_supervised(filename: str, content: bytes, *,
     is always stopped and joined (subprocess.run kills on timeout and
     waits) before this function returns, so the caller may safely settle
     the ledger reservation afterwards.
+
+    original_byte_count (PR #111 finding 6): the server-measured original
+    byte count for a confirmed oversize run. It is passed to the child
+    (STACKSIFT_OVERSIZE_ORIGINAL_BYTES) so the child's byte-ceiling check
+    runs against the originals, not the redacted bytes it receives — see
+    service.analyze_upload. None preserves the previous len(content)
+    behavior for direct (non-confirmation) worker calls.
     """
     tmp_dir = tempfile.mkdtemp(prefix="stacksift-oversize-")
     in_path = os.path.join(tmp_dir, "input.log")
@@ -79,6 +87,8 @@ def run_supervised(filename: str, content: bytes, *,
         env = dict(os.environ)
         env["PYTHONPATH"] = _package_parent() + os.pathsep + env.get("PYTHONPATH", "")
         env["STACKSIFT_OVERSIZE_MEMORY_LIMIT"] = str(memory_limit)
+        if original_byte_count is not None:
+            env["STACKSIFT_OVERSIZE_ORIGINAL_BYTES"] = str(original_byte_count)
         # Contain the child's service temp file inside this per-run
         # directory (see module docstring): the parent removes the whole
         # directory after the child stops, even on a timeout kill.
@@ -142,8 +152,17 @@ def _child_main(argv: list[str]) -> int:
         content = f.read()
     # use_alarm=False (T5): the parent enforces the deadline; SIGALRM is
     # never armed in a thread and never double-arms this process.
+    # PR #111 finding 6: pass the server-measured original byte count
+    # through (when the parent supplied one) so the byte ceiling is not
+    # re-applied to the redacted bytes the child receives.
+    original_byte_count = None
+    try:
+        original_byte_count = int(os.environ.get("STACKSIFT_OVERSIZE_ORIGINAL_BYTES", "") or 0) or None
+    except ValueError:
+        original_byte_count = None
     data = analyze_upload(os.path.basename(in_path), content,
-                          allow_oversize=True, use_alarm=False)
+                          allow_oversize=True, use_alarm=False,
+                          original_byte_count=original_byte_count)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, default=str)
     return 0

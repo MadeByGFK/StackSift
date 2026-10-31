@@ -1119,16 +1119,20 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
-def _execute_oversize(filename: str, content: bytes) -> dict:
+def _execute_oversize(filename: str, content: bytes, *, original_byte_count: int | None = None) -> dict:
     """Run an oversize analysis via the supervised worker (issue #104).
 
     Module-level indirection so HTTP/ledger tests can keep the existing
     mocked-execution pattern (monkeypatch main._execute_oversize) while
     real-subprocess tests cover app.analysis_worker.run_supervised
     directly (trim T5).
+
+    original_byte_count (PR #111 finding 6): the server-measured original
+    byte count from consent metadata, forwarded to the worker so its byte
+    ceiling is checked against the originals, not the redacted bytes.
     """
     from app.analysis_worker import run_supervised
-    return run_supervised(filename, content)
+    return run_supervised(filename, content, original_byte_count=original_byte_count)
 
 
 def _durable_analysis(request, filename, content, key, output="html", *, consent_id=None, digest=None):
@@ -1163,6 +1167,7 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 return _analysis_response(request, 400, message="Invalid consent.")
             consent_operation = _consent_row.operation_type
         paid_operation_type = None
+        oversize_original_bytes = None
         try:
             if consent_operation == "oversize_analysis":
                 # --- Oversize confirmation (direct paid admission) ---
@@ -1200,6 +1205,15 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                         return _analysis_response(request, 413, message="File too large. Oversize analysis supports up to 100 MB.")
                     if meta.get("line_count", 0) > MAX_OVERSIZE_UPLOAD_LINES:
                         return _analysis_response(request, 400, message="Too many lines. Oversize analysis supports up to 500,000 lines.")
+                    # PR #111 finding 6: carry the server-owned original
+                    # byte count to the worker so it does not re-apply
+                    # the byte ceiling to the redacted bytes it receives
+                    # (redaction can expand a near-ceiling file past
+                    # 100 MB). A missing/invalid count falls back to the
+                    # worker's len(content) check, which is the old
+                    # (safe, fail-closed) behavior.
+                    if isinstance(meta.get("byte_count"), int):
+                        oversize_original_bytes = meta["byte_count"]
                 worker = uuid_module.uuid4().hex
                 try:
                     # Direct admit_paid_operation: the free-quota branch
@@ -1278,7 +1292,8 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             # deadline; the standard path keeps in-process SIGALRM below.
             # A worker error dict settles exactly like an in-process
             # failure: full reservation reversal, no result published.
-            data = _execute_oversize(filename, content)
+            data = _execute_oversize(filename, content,
+                                     original_byte_count=oversize_original_bytes)
         else:
             data = analyze_upload(filename, content)
         failure = data.get("message", "Analysis failed.") if isinstance(data, dict) and "error" in data else None
@@ -1362,6 +1377,49 @@ async def analyze_paid(request: Request, consent_id: str = Form(...), file_hash:
             _durable_analysis, request, "", b"", idempotency_key,
             consent_id=consent_uuid, digest=file_hash)
     return _durable_analysis(request, "", b"", idempotency_key, consent_id=consent_uuid, digest=file_hash)
+
+
+@app.post("/analyze/paid/cancel", response_class=HTMLResponse)
+async def analyze_paid_cancel(request: Request, consent_id: str = Form(...),
+                              csrf_token: str = Form("")):
+    """Cancel a paid consent (issue #104 follow-up, PR #111 finding 5).
+
+    The oversize consent page's Cancel control previously only navigated
+    to "/", while _paid_consent_page's one-live-oversize check blocked
+    any second oversize upload until the first consent expired (up to
+    15 minutes). Cancel now actually releases that lockout: with a valid
+    session + CSRF token, an unconsumed consent owned by the caller is
+    expired and its pending files are deleted, so a fresh oversize upload
+    quotes immediately. Consumed consents are left untouched (their
+    pending files were already deleted on settlement). Unknown or
+    other-user consent IDs redirect without any change, so the endpoint
+    does not leak consent existence or ownership. No balance, operation,
+    or reservation is touched: cancel happens before any charge.
+    """
+    from app.db import SessionLocal
+    from app import auth, credits as C, models as M
+    import hmac
+    from fastapi.responses import RedirectResponse
+    with SessionLocal() as db:
+        session = auth.get_session_from_cookie(db, request)
+        if not session:
+            return _analysis_response(request, 401, message="Please log in to use Power-Up credits.")
+        if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+            return _analysis_response(request, 403, message="Invalid request. Please try again.")
+        try:
+            consent_uuid = uuid_module.UUID(consent_id)
+        except ValueError:
+            return _analysis_response(request, 400, message="Invalid consent.")
+        consent = db.get(M.Consent, consent_uuid)
+        if consent is None or consent.user_id != session.user.id:
+            return RedirectResponse("/", status_code=303)
+        if consent.consumed_by_operation_id is None and consent.consumed_by_free_request_id is None:
+            # Expire now: validate_consent rejects expires_at < now, and
+            # the one-live check only counts consents with expires_at > now.
+            consent.expires_at = C._utcnow()
+            db.commit()
+        _delete_paid_pending(str(consent_uuid))
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/credits/balance")

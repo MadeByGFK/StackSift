@@ -491,6 +491,134 @@ def test_one_live_oversize_pending_409(oversize_env):
     assert "already have an oversize upload" in r.text
 
 
+def _cancel(env, consent_id, csrf):
+    return env.client.post(
+        "/analyze/paid/cancel",
+        data={"consent_id": consent_id, "csrf_token": csrf},
+        follow_redirects=False,
+    )
+
+
+def test_cancel_oversize_releases_one_live_lockout(oversize_env):
+    # PR #111 finding 5: Cancel must actually release the one-live
+    # lockout, not just navigate away from the consent page.
+    import pathlib
+    env = oversize_env
+    _, uid, csrf = _signup_verify_login(env)
+    r = _post_oversize(env, _line_content(50001))
+    assert r.status_code == 402, r.text[:300]
+    assert "/analyze/paid/cancel" in r.text
+    consent_id, _ = _consent_fields(r.text)
+    r = _cancel(env, consent_id, csrf)
+    assert r.status_code == 303, r.text[:300]
+    assert r.headers["location"] == "/"
+    pending_dir = pathlib.Path(main._PAID_PENDING_DIR)
+    assert list(pending_dir.glob("pending-*.bin")) == []
+    assert list(pending_dir.glob("pending-*.meta.json")) == []
+    with env.sessions() as db:
+        consent = db.get(M.Consent, uuid.UUID(consent_id))
+        assert consent is not None
+        assert C._as_aware(consent.expires_at) <= C._utcnow()
+    # A fresh oversize upload quotes immediately (not 409), with no
+    # charge and no operation from the cancelled consent.
+    r = _post_oversize(env, _line_content(50002))
+    assert r.status_code == 402, r.text[:300]
+    assert "Use 3 credits" in r.text
+    assert _http_balance(env) == 3
+    assert _ops(env, uid) == []
+
+
+def test_cancel_rejects_bad_csrf_and_other_user(oversize_env):
+    import pathlib
+    env = oversize_env
+    _, uid, csrf = _signup_verify_login(env)
+    r = _post_oversize(env, _line_content(50001))
+    assert r.status_code == 402, r.text[:300]
+    consent_id, _ = _consent_fields(r.text)
+    # Bad CSRF: 403, consent untouched.
+    r = _cancel(env, consent_id, "not-the-csrf-token")
+    assert r.status_code == 403, r.text[:300]
+    # Other user: redirect with no change and no leak (the consent is
+    # still live, its pending file still present).
+    _, _, csrf2 = _signup_verify_login(env)
+    r = _cancel(env, consent_id, csrf2)
+    assert r.status_code == 303, r.text[:300]
+    with env.sessions() as db:
+        consent = db.get(M.Consent, uuid.UUID(consent_id))
+        assert consent is not None
+        assert C._as_aware(consent.expires_at) > C._utcnow()
+    pending_dir = pathlib.Path(main._PAID_PENDING_DIR)
+    assert len(list(pending_dir.glob("pending-*.bin"))) == 1
+
+
+def test_confirm_passes_original_bytes_to_worker(oversize_env, monkeypatch):
+    # PR #111 finding 6, HTTP side: confirmation forwards the
+    # server-measured original byte count to the worker.
+    env = oversize_env
+    _, uid, csrf = _signup_verify_login(env)
+    content = _line_content(50001)
+    r = _post_oversize(env, content)
+    assert r.status_code == 402, r.text[:300]
+    consent_id, file_hash = _consent_fields(r.text)
+    seen = {}
+    previous = main._execute_oversize
+
+    def recording(*args, **kwargs):
+        seen.update(kwargs)
+        return previous(*args, **kwargs)
+
+    monkeypatch.setattr(main, "_execute_oversize", recording)
+    r = _confirm(env, consent_id, file_hash, csrf)
+    assert r.status_code == 200, r.text[:300]
+    assert seen.get("original_byte_count") == len(content)
+
+
+def test_redacted_expansion_uses_original_bytes(monkeypatch):
+    # PR #111 finding 6, service side: a short labeled secret grows by
+    # 9 bytes per occurrence under redaction ("password=x" ->
+    # "password=[REDACTED]"). With a ceiling between the original and
+    # redacted sizes, the old len(content) check fails the run while
+    # the server-measured original count passes it.
+    from app.service import analyze_upload
+    from app import service as S
+    from app.redact import redact_secrets
+    line = b"2024-01-01 10:00:00 INFO password=x\n"
+    original = line * 20
+    redacted = redact_secrets(original.decode("utf-8")).encode("utf-8")
+    assert len(redacted) > len(original)
+    ceiling = (len(original) + len(redacted)) // 2
+    assert len(original) < ceiling < len(redacted)
+    monkeypatch.setattr(S, "MAX_OVERSIZE_UPLOAD_BYTES", ceiling)
+    out = analyze_upload("s.log", redacted, allow_oversize=True, use_alarm=False)
+    assert out.get("error") == "file_too_large"
+    out = analyze_upload("s.log", redacted, allow_oversize=True, use_alarm=False,
+                         original_byte_count=len(original))
+    assert "error" not in out, out
+
+
+def test_worker_child_uses_original_bytes(monkeypatch, tmp_path):
+    # PR #111 finding 6, worker side: the child receives redacted bytes
+    # plus the server-measured original count via the environment, and
+    # must not re-apply the byte ceiling to the redacted bytes.
+    import json
+    from app import analysis_worker
+    from app import service as S
+    from app.redact import redact_secrets
+    line = b"2024-01-01 10:00:00 INFO password=x\n"
+    original = line * 20
+    redacted = redact_secrets(original.decode("utf-8")).encode("utf-8")
+    ceiling = (len(original) + len(redacted)) // 2
+    assert len(original) < ceiling < len(redacted)
+    monkeypatch.setattr(S, "MAX_OVERSIZE_UPLOAD_BYTES", ceiling)
+    monkeypatch.setenv("STACKSIFT_OVERSIZE_ORIGINAL_BYTES", str(len(original)))
+    in_path = tmp_path / "input.log"
+    out_path = tmp_path / "output.json"
+    in_path.write_bytes(redacted)
+    assert analysis_worker._child_main([str(in_path), str(out_path)]) == 0
+    data = json.loads(out_path.read_text())
+    assert "error" not in data, data
+
+
 def test_pending_budget_exhaustion_503_no_consent(oversize_env, monkeypatch):
     env = oversize_env
     _, uid, _ = _signup_verify_login(env)

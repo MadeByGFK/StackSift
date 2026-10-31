@@ -200,7 +200,7 @@ def _jsonline_to_text(line: str) -> str:
 
 
 def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = False,
-                   use_alarm: bool = True) -> dict:
+                   use_alarm: bool = True, original_byte_count: int | None = None) -> dict:
     """Analyze an upload and clean up the analysis file during normal execution.
 
     allow_oversize=True (issue #104) raises the ceilings to 100 MB /
@@ -208,6 +208,17 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
     the line ceiling. use_alarm=False is for the supervised oversize worker,
     whose parent process enforces the deadline instead (T5: SIGALRM is never
     moved into a thread; the standard path keeps its 25-second SIGALRM).
+
+    original_byte_count (issue #104 follow-up, PR #111 finding 6): when the
+    supervised worker analyzes REDACTED bytes for a confirmed oversize run,
+    the byte ceiling must be checked against the SERVER-measured original
+    byte count (validated at confirmation from consent metadata), not
+    against len(content) of the transformed bytes — redaction can expand
+    a near-ceiling secret-dense file past 100 MB (a short labeled value
+    grows by 9 bytes per occurrence), which previously failed a run the
+    product had already quoted. When None (every non-worker path), the
+    ceiling is checked against len(content) as before. The line ceiling
+    already behaves this way (pre-redaction counting, T6).
     """
     # --- Input validation (robustness) ---
     byte_limit = MAX_OVERSIZE_UPLOAD_BYTES if allow_oversize else MAX_UPLOAD_BYTES
@@ -218,8 +229,9 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
             "message": "The uploaded file is empty. Please upload a log file with content.",
             "filename": filename,
         }
-    if len(content) > byte_limit:
-        size_mb = len(content) / (1024 * 1024)
+    measured_bytes = original_byte_count if original_byte_count is not None else len(content)
+    if measured_bytes > byte_limit:
+        size_mb = measured_bytes / (1024 * 1024)
         if allow_oversize:
             return {
                 "error": "file_too_large",
