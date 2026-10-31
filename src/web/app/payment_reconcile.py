@@ -457,13 +457,21 @@ def compute_reconciliation(
                         still_deducted = min(dispute_amount - open_amount,
                                              unrefunded)
                         reversible = dispute_portion - still_deducted
+                        # Codex P2 on PR #112 (zero-reversible case):
+                        # when non-open disputes already exhaust the
+                        # cap, reversible is 0 but the open dispute
+                        # still needs attention — preserve its status
+                        # and gross amount independently of positive
+                        # reversible exposure, so the note below can
+                        # warn about it without claiming the deduction
+                        # may reverse.
+                        entry["open_status"] = \
+                            dispute.get("open_status") or "unknown"
                         if reversible > 0:
                             entry["open_disputed_cents"] = reversible
-                            entry["open_status"] = \
-                                dispute.get("open_status") or "unknown"
-                            if open_amount != reversible:
-                                entry["open_gross_disputed_cents"] = \
-                                    open_amount
+                        if open_amount != reversible:
+                            entry["open_gross_disputed_cents"] = \
+                                open_amount
                 disputed_charges.append(entry)
 
     # --- Ledger side ---
@@ -576,6 +584,15 @@ def compute_reconciliation(
                 if dc.get("open_gross_disputed_cents"):
                     note += (" (%s¢ gross open)"
                              % dc["open_gross_disputed_cents"])
+            elif dc.get("open_gross_disputed_cents"):
+                # Zero reversible exposure: the open dispute still
+                # needs a response, but claiming the deduction may
+                # reverse would be false — the cap is already
+                # exhausted by other disputes.
+                note += ("; also open dispute (%s, %s¢ gross open) "
+                         "still outstanding — no amount reversible"
+                         % (dc.get("open_status"),
+                            dc["open_gross_disputed_cents"]))
         diff_entry = {
             "kind": "stripe_dispute",
             "charge_id": dc["charge_id"],
@@ -595,6 +612,10 @@ def compute_reconciliation(
             if dc.get("open_gross_disputed_cents"):
                 diff_entry["open_gross_disputed_cents"] = \
                     dc["open_gross_disputed_cents"]
+        elif dc.get("open_gross_disputed_cents"):
+            diff_entry["open_status"] = dc.get("open_status")
+            diff_entry["open_gross_disputed_cents"] = \
+                dc["open_gross_disputed_cents"]
         differences.append(diff_entry)
 
     return {
