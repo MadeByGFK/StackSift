@@ -24,7 +24,15 @@ from app.rate_limit import (
 )
 from app.client_ip import client_ip as _client_ip
 from app.sample_data import SAMPLE_FILENAME, SAMPLE_LOG
-from app.service import analyze_upload, render_text_report
+from app.service import (
+    analyze_upload,
+    render_text_report,
+    classify_upload_size,
+    count_original_lines,
+    MAX_OVERSIZE_UPLOAD_BYTES,
+    MAX_OVERSIZE_UPLOAD_LINES,
+    _is_binary_content,
+)
 
 # Phase 1: Auth
 from app.auth_routes import router as auth_router
@@ -219,6 +227,42 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+# Issue #104, trim T4: pre-multipart body guard, Content-Length variant.
+# The framework spools multipart before the route runs, so a route-level
+# guard cannot prevent spooling; this middleware rejects, before any
+# handler runs, only POST /analyze requests whose DECLARED Content-Length
+# exceeds the oversize ceiling plus 1 MiB of multipart overhead. It trusts
+# the header only for this early reject — the route still enforces the
+# real ceilings on actual bytes via bounded chunk reads, so chunked
+# uploads without Content-Length are covered there. It cannot break
+# existing uploads: every legitimate upload is far under this bound, and
+# all other paths are untouched. The residual limitation (a hostile
+# chunked body is spooled before the route's bounded read stops it) is
+# recorded as a known limitation; the bounded read is the enforcement.
+_OVERSIZE_GUARD_BYTES = MAX_OVERSIZE_UPLOAD_BYTES + 1024 * 1024
+
+
+@app.middleware("http")
+async def oversize_body_guard(request: Request, call_next):
+    if (request.method == "POST" and request.url.path == "/analyze"
+            and request.headers.get("content-length")):
+        try:
+            declared = int(request.headers["content-length"])
+        except ValueError:
+            declared = 0
+        if declared > _OVERSIZE_GUARD_BYTES:
+            _user, _csrf = _get_current_user_optional(request)
+            return templates.TemplateResponse(
+                request,
+                "index.html",
+                {"error": "File too large. Oversize analysis supports up to 100 MB.",
+                 "remaining": _remaining(_client_ip(request)),
+                 "current_user": _user, "csrf_token": _csrf},
+                status_code=413,
+            )
+    return await call_next(request)
 
 
 
@@ -626,11 +670,66 @@ async def analyze(
             f"(got '{suffix or 'no extension'}')."
         )
 
-    content = await file.read()
+    # Issue #104: bounded chunk reads (1 MiB chunks, stopping at the
+    # oversize ceiling + 1 byte) instead of an unbounded file.read().
+    # Chunk concatenation preserves exact bytes, so multi-byte characters
+    # and CRLF pairs straddling a chunk boundary still count correctly.
+    _read_limit = MAX_OVERSIZE_UPLOAD_BYTES + 1
+    _buf = bytearray()
+    while len(_buf) < _read_limit:
+        _chunk = await file.read(min(1024 * 1024, _read_limit - len(_buf)))
+        if not _chunk:
+            break
+        _buf.extend(_chunk)
+    content = bytes(_buf)
     if not content.strip():
         return error("That file is empty — nothing to analyze.")
-    if len(content) > MAX_BYTES:
-        return error("That file is over the 10 MB free-tier limit.")
+    if _is_binary_content(content):
+        return error("This appears to be a binary file, not a text log. "
+                     "StackSift analyzes text logs. If this is a log file, "
+                     "ensure it's saved as plain text (UTF-8).")
+    # Classification counts ORIGINAL decoded lines pre-redaction (T6) and
+    # enforces bytes and lines independently, ceilings inclusive.
+    _nbytes = len(content)
+    _nlines = count_original_lines(content)
+    _size_class = classify_upload_size(_nbytes, _nlines)
+    if _size_class == "unsupported":
+        if _nbytes > MAX_OVERSIZE_UPLOAD_BYTES:
+            return error("File too large. Oversize analysis supports up to 100 MB.",
+                         status=413)
+        return error(f"Too many lines ({_nlines:,}). "
+                     "Oversize analysis supports up to 500,000 lines.")
+    if _size_class == "oversize":
+        # Oversize never consumes free quota and never runs free: it goes
+        # straight to paid consent for signed-in users, and anonymous
+        # attempts get a 400 naming the exceeded free limit, with no
+        # consent, pending upload, reservation, or confirm action.
+        _user, _csrf = _get_current_user_optional(request)
+        if _user is None:
+            if _nbytes > MAX_BYTES:
+                return error("That file is over the 10 MB free-tier limit. "
+                             "Sign in to analyze files up to 100 MB / 500,000 lines "
+                             "with Power-Up credits, or upload a smaller file.")
+            return error("That file has more than 50,000 lines. "
+                         "Sign in to analyze files up to 100 MB / 500,000 lines "
+                         "with Power-Up credits, or upload a smaller file.")
+        from app import credits as _credits_helpers
+        try:
+            return _paid_consent_page(request, file.filename, content, _user, _csrf, ip,
+                                      operation="oversize_analysis",
+                                      byte_count=_nbytes, line_count=_nlines)
+        except _credits_helpers.InsufficientCredits:
+            return _analysis_response(request, 402,
+                                      message=OVERSIZE_INSUFFICIENT_MESSAGE,
+                                      buy_credits=True)
+        except _credits_helpers.AdmissionError as exc:
+            return _analysis_response(request, 409, message=str(exc))
+        except RuntimeError as exc:
+            if "capacity" in str(exc):
+                return error("Pending upload capacity exhausted. Please try again shortly.",
+                             status=503, headers={"Retry-After": "60"})
+            return error("Oversize analysis is temporarily unavailable. Please try again shortly.",
+                         status=503, headers={"Retry-After": "60"})
 
     if _use_shared_limiter():
         # PR #28: shared rate limiting with replay detection, ahead of the
@@ -731,8 +830,28 @@ from datetime import datetime, timezone
 
 # Temp file storage for consent flow (15-min TTL, keyed by content hash).
 # Single-worker deployment; files deleted after use or expiry.
+# Issue #104, trim T2: the aggregate pending budget is 256 MiB (a ceiling
+# only, not an allocation — the old 64 MiB cap could not hold a 100 MiB
+# input). Capacity checks and writes are serialized on _PENDING_LOCK, and
+# at most one live oversize pending upload per user is allowed (enforced
+# in _paid_consent_page via the live-consent check). Single-replica
+# assumption (T3): a multi-replica finding blocks production promotion,
+# not the staging merge.
 _PAID_PENDING_DIR = os.environ.get("STACKSIFT_PAID_TMP", tempfile.gettempdir() + "/stacksift-paid")
 _PAID_PENDING_TTL = 900  # 15 minutes
+_PAID_PENDING_BUDGET = 256 * 1024 * 1024  # 256 MiB aggregate ceiling
+
+import threading as _threading
+# RLock: _paid_consent_page holds it across the live-consent check +
+# consent creation + pending store (one-live-oversize enforcement), and
+# _store_paid_pending re-acquires it for the budget check + write.
+_PENDING_LOCK = _threading.RLock()
+
+# Issue #104: exact insufficient-credits message (spec §4), with the
+# /credits CTA rendered by _analysis_response(buy_credits=True).
+OVERSIZE_INSUFFICIENT_MESSAGE = (
+    "Oversize analysis costs 3 credits. You do not have enough eligible Power-Up credits."
+)
 
 
 def _paid_pending_path(file_hash: str) -> str:
@@ -742,15 +861,33 @@ def _paid_pending_path(file_hash: str) -> str:
     return os.path.join(_PAID_PENDING_DIR, f"pending-{token}.bin")
 
 
-def _store_paid_pending(file_hash: str, filename: str, content: bytes) -> None:
+def _paid_pending_meta_path(file_hash: str) -> str:
+    token = uuid_module.UUID(file_hash).hex
+    return os.path.join(_PAID_PENDING_DIR, f"pending-{token}.meta.json")
+
+
+def _store_paid_pending(file_hash: str, filename: str, content: bytes, meta: dict | None = None) -> None:
+    """Store a redacted pending upload (mode 0o600, exclusive creation).
+
+    The aggregate-budget check and the write are serialized on
+    _PENDING_LOCK (T2). Raises RuntimeError on storage exhaustion, with no
+    reservation created; callers must roll back any uncommitted consent.
+    Oversize metadata (server-measured byte/line counts) rides in a
+    sidecar file so confirmation revalidates server-owned measurements,
+    never client fields.
+    """
     path = _paid_pending_path(file_hash)
-    cleanup_pending_uploads()
-    if sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin")) + len(content) > 64*1024*1024:
-        raise RuntimeError("Pending upload capacity exhausted")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(json.dumps(filename).encode("utf-8") + b"\n")
-        f.write(content)
+    with _PENDING_LOCK:
+        cleanup_pending_uploads()
+        if sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin")) + len(content) > _PAID_PENDING_BUDGET:
+            raise RuntimeError("Pending upload capacity exhausted")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(json.dumps(filename).encode("utf-8") + b"\n")
+            f.write(content)
+        if meta is not None:
+            with open(_paid_pending_meta_path(file_hash), "w", encoding="utf-8") as f:
+                json.dump(meta, f)
 
 
 def _load_paid_pending(file_hash: str) -> tuple[str, bytes] | None:
@@ -760,6 +897,10 @@ def _load_paid_pending(file_hash: str) -> tuple[str, bytes] | None:
         age = datetime.now(timezone.utc).timestamp() - stat.st_mtime
         if age > _PAID_PENDING_TTL:
             os.unlink(path)
+            try:
+                os.unlink(_paid_pending_meta_path(file_hash))
+            except OSError:
+                pass
             return None
         with open(path, "rb") as f:
             raw = f.read()
@@ -767,6 +908,15 @@ def _load_paid_pending(file_hash: str) -> tuple[str, bytes] | None:
         filename = json.loads(raw[:nl].decode("utf-8"))
         content = raw[nl + 1:]
         return filename, content
+    except (OSError, ValueError):
+        return None
+
+
+def _load_paid_pending_meta(file_hash: str) -> dict | None:
+    try:
+        with open(_paid_pending_meta_path(file_hash), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
 
@@ -779,6 +929,12 @@ def cleanup_pending_uploads():
                 path.unlink()
         except FileNotFoundError:
             pass
+    for path in Path(_PAID_PENDING_DIR).glob("pending-*.meta.json"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _delete_paid_pending(file_hash: str) -> None:
@@ -786,15 +942,33 @@ def _delete_paid_pending(file_hash: str) -> None:
         os.unlink(_paid_pending_path(file_hash))
     except OSError:
         pass
+    try:
+        os.unlink(_paid_pending_meta_path(file_hash))
+    except OSError:
+        pass
 
 
-def _paid_consent_page(request: Request, filename: str, content: bytes, user, csrf_token: str, ip: str):
-    """Return a consent page offering 1-credit paid analysis. Raises on no DB."""
+def _paid_consent_page(request: Request, filename: str, content: bytes, user, csrf_token: str, ip: str,
+                       *, operation: str = "additional_analysis",
+                       byte_count: int | None = None, line_count: int | None = None):
+    """Return a consent page offering a paid analysis. Raises on no DB.
+
+    Generalized for issue #104 (trim T8): the operation policy is
+    server-selected. ``additional_analysis`` keeps its byte-identical
+    wording ("1 credit" / "Use 1 credit" / free-quota explanation);
+    ``oversize_analysis`` quotes 3 credits with the draft §3 copy. The
+    consent row binds user, operation type, redacted-content fingerprint,
+    pricing version, and (oversize) server-measured byte/line counts.
+    Consent creation changes neither balance nor allocations, and creates
+    no debit or operation. Raises InsufficientCredits when eligible
+    credits are below the operation cost, so callers return HTTP 402.
+    """
     import os as _os
     if not _os.environ.get("DATABASE_URL"):
         raise RuntimeError("no database")
     from app.db import SessionLocal
     from app import credits as credits_helpers
+    from app import models as _models
 
     from app.analysis_admission import fingerprint
     from app.redact import redact_secrets
@@ -816,40 +990,110 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
             status_code=500,
         )
     file_hash = fingerprint(filename, content)
+    if operation == "oversize_analysis":
+        cost = credits_helpers.COST_OVERSIZE_ANALYSIS
+    elif operation == "additional_analysis":
+        cost = credits_helpers.COST_ADDITIONAL_ANALYSIS
+    else:
+        raise ValueError(f"unknown paid operation: {operation}")
     db = SessionLocal()
     try:
-        # Check eligible credits
-        summary = credits_helpers.get_balance_summary(db, user.id)
-        if summary["eligible"] < 1:
-            # BR-01: raise the domain exception so _durable_analysis returns
-            # HTTP 402 (credit limit), not a generic 503.
-            raise credits_helpers.InsufficientCredits("insufficient credits")
-        # Create server-bound consent
-        consent = credits_helpers.create_consent(
-            db, user.id, "additional_analysis", file_hash,
-            credits_helpers.COST_ADDITIONAL_ANALYSIS,
-        )
-        db.commit()
-        consent_id = str(consent.id)
+        with _PENDING_LOCK:
+            if operation == "oversize_analysis":
+                # T2: at most one live oversize pending upload per user.
+                # A consent is live while unconsumed and unexpired; the
+                # check, creation, and pending store run under one lock so
+                # two concurrent uploads cannot both pass the check.
+                now = datetime.now(timezone.utc)
+                live = db.query(_models.Consent).filter(
+                    _models.Consent.user_id == user.id,
+                    _models.Consent.operation_type == "oversize_analysis",
+                    _models.Consent.consumed_by_operation_id.is_(None),
+                    _models.Consent.consumed_by_free_request_id.is_(None),
+                    _models.Consent.expires_at > now,
+                ).first()
+                if live is not None:
+                    raise credits_helpers.AdmissionError(
+                        "You already have an oversize upload awaiting confirmation. "
+                        "Confirm or wait for it to expire before uploading another oversize file.")
+            # Check eligible credits
+            summary = credits_helpers.get_balance_summary(db, user.id)
+            if summary["eligible"] < cost:
+                # BR-01: raise the domain exception so callers return
+                # HTTP 402 (credit limit), not a generic 503.
+                raise credits_helpers.InsufficientCredits("insufficient credits")
+            # Create server-bound consent (flushed, not yet committed, so
+            # a pending-store failure rolls it back: no dangling consent
+            # and no reservation on storage exhaustion).
+            consent = credits_helpers.create_consent(
+                db, user.id, operation, file_hash, cost,
+            )
+            db.flush()
+            consent_id = str(consent.id)
+            # Store file for the paid endpoint (deleted after use).
+            # Oversize metadata carries the SERVER-measured counts from
+            # upload classification; confirmation revalidates from these,
+            # never from client fields.
+            meta = None
+            if operation == "oversize_analysis":
+                meta = {"operation_type": operation, "byte_count": byte_count,
+                        "line_count": line_count, "user_id": str(user.id)}
+            try:
+                _store_paid_pending(consent_id, filename, content, meta=meta)
+            except Exception:
+                db.rollback()
+                raise
+            db.commit()
     finally:
         db.close()
 
-    # Store file for the paid endpoint (deleted after use)
-    _store_paid_pending(consent_id, filename, content)
-
-    return templates.TemplateResponse(
-        request,
-        "paid_consent.html",
-        {
+    if operation == "oversize_analysis":
+        size_mb = (byte_count or 0) / (1024 * 1024)
+        context = {
             "current_user": user,
             "csrf_token": csrf_token,
             "filename": filename,
             "file_hash": file_hash,
             "consent_id": consent_id,
-            "cost": 1,
+            "cost": cost,
             "balance": summary["balance"],
             "eligible": summary["eligible"],
-        },
+            "operation_type": operation,
+            "heading": "Oversize analysis",
+            "intro": "This file exceeds the free limits.",
+            "size_line": f"{byte_count:,} bytes ({size_mb:.1f} MB) · {line_count:,} lines",
+            "limits_line": "Analyze up to 100 MB / 500,000 lines.",
+            "cost_label": "3 credits",
+            "cost_sentence": "This run costs 3 credits.",
+            "confirm_label": "Use 3 credits",
+            "cancel_label": "Cancel",
+            "note": "No charge if the analysis fails. Results are available for 7 days.",
+        }
+    else:
+        context = {
+            "current_user": user,
+            "csrf_token": csrf_token,
+            "filename": filename,
+            "file_hash": file_hash,
+            "consent_id": consent_id,
+            "cost": cost,
+            "balance": summary["balance"],
+            "eligible": summary["eligible"],
+            "operation_type": operation,
+            "heading": "Free analyses used up",
+            "intro": "You've used your 10 free analyses this hour. They reset automatically.",
+            "size_line": None,
+            "limits_line": None,
+            "cost_label": "1 credit",
+            "cost_sentence": "Continue this analysis now with a Power-Up credit",
+            "confirm_label": "Use 1 credit",
+            "cancel_label": "Wait for free",
+            "note": "No charge if the analysis fails. Credits never expire. Results are available for 7 days.",
+        }
+    return templates.TemplateResponse(
+        request,
+        "paid_consent.html",
+        context,
         status_code=402,  # Payment Required
     )
 
@@ -875,6 +1119,18 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
+def _execute_oversize(filename: str, content: bytes) -> dict:
+    """Run an oversize analysis via the supervised worker (issue #104).
+
+    Module-level indirection so HTTP/ledger tests can keep the existing
+    mocked-execution pattern (monkeypatch main._execute_oversize) while
+    real-subprocess tests cover app.analysis_worker.run_supervised
+    directly (trim T5).
+    """
+    from app.analysis_worker import run_supervised
+    return run_supervised(filename, content)
+
+
 def _durable_analysis(request, filename, content, key, output="html", *, consent_id=None, digest=None):
     from app.db import SessionLocal
     from app import auth, credits as C, models as M, analysis_admission as A
@@ -895,38 +1151,116 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
         digest = digest or A.fingerprint(filename, content)
         if not key or len(key) > 255:
             return _analysis_response(request, 400, message="Invalid request identity.")
+        # Issue #104: operation type and cost are derived from the
+        # SERVER-side consent row only; no posted price or tier is ever
+        # trusted. Unknown operation types are rejected outright.
+        consent_operation = None
+        if consent_id:
+            _consent_row = db.get(M.Consent, consent_id, populate_existing=True)
+            if _consent_row is None:
+                return _analysis_response(request, 400, message="Invalid consent.")
+            if _consent_row.operation_type not in ("additional_analysis", "oversize_analysis"):
+                return _analysis_response(request, 400, message="Invalid consent.")
+            consent_operation = _consent_row.operation_type
+        paid_operation_type = None
         try:
-            existing = A.lookup(db, user_id, anon, key, digest, _client_ip(request))
-            if existing:
-                status, data, message = A.replay(db, existing, user_id)
-                rid = None
-                if status == 200 and data is not None and user_id is not None and getattr(existing, "result_id", None):
-                    rid = str(existing.result_id)
-                return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
-            if consent_id:
-                C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1)
+            if consent_operation == "oversize_analysis":
+                # --- Oversize confirmation (direct paid admission) ---
+                # Replay resolves BEFORE a consumed consent is rejected:
+                # a matching completed/in-progress operation replays
+                # without a new charge; only then is the consent validated.
+                try:
+                    _existing_op = C.find_operation(db, user_id, "oversize_analysis", key, digest)
+                except C.AdmissionError as exc:
+                    db.rollback()
+                    return _analysis_response(request, 409, message=str(exc))
+                if _existing_op is not None:
+                    status, data, message = A.replay(db, _existing_op, user_id)
+                    rid = None
+                    if status == 200 and data is not None and getattr(_existing_op, "result_id", None):
+                        rid = str(_existing_op.result_id)
+                    return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
+                try:
+                    C.validate_consent(db, consent_id, user_id, "oversize_analysis", digest,
+                                       C.COST_OVERSIZE_ANALYSIS)
+                except C.AdmissionError as exc:
+                    db.rollback()
+                    return _analysis_response(request, 409, message=str(exc))
                 pending = _load_paid_pending(str(consent_id))
                 if pending is None:
                     return _analysis_response(request, 410, message="Upload expired. Please upload the file again.")
                 filename, content = pending
                 if A.fingerprint(filename, content) != digest:
                     return _analysis_response(request, 409, message="Upload does not match your consent.")
-            worker = uuid_module.uuid4().hex
-            item, created = A.admit(db, user_id, anon, key, digest, _client_ip(request), worker, consent_id)
-            if item is None:
-                db.rollback()
-                if user:
-                    return _paid_consent_page(request, filename, content, user, _get_current_user_optional(request)[1], _client_ip(request))
-                return _analysis_response(request, 429, message="Free-tier limit reached (10 analyses/hour). Please try again later.")
-            paid = isinstance(item, M.Operation)
-            identity = item.id if paid else item.request_id
-            db.commit()
-            if not created:
-                status, data, message = A.replay(db, item, user_id)
-                rid = None
-                if status == 200 and data is not None and user_id is not None and getattr(item, "result_id", None):
-                    rid = str(item.result_id)
-                return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
+                # Revalidate ceilings from SERVER-owned measurements
+                # (consent-time metadata), never from client fields.
+                meta = _load_paid_pending_meta(str(consent_id))
+                if meta is not None:
+                    if meta.get("byte_count", 0) > MAX_OVERSIZE_UPLOAD_BYTES:
+                        return _analysis_response(request, 413, message="File too large. Oversize analysis supports up to 100 MB.")
+                    if meta.get("line_count", 0) > MAX_OVERSIZE_UPLOAD_LINES:
+                        return _analysis_response(request, 400, message="Too many lines. Oversize analysis supports up to 500,000 lines.")
+                worker = uuid_module.uuid4().hex
+                try:
+                    # Direct admit_paid_operation: the free-quota branch
+                    # of analysis_admission.admit() must NEVER convert an
+                    # oversize run into a free run. Slice 1 (T3): worker
+                    # pool size 1 via the global:oversize scope, existing
+                    # user/global permits, explicit 30/hour rate policy.
+                    item = C.admit_paid_operation(db, user_id, "oversize_analysis", key, digest,
+                                                  C.COST_OVERSIZE_ANALYSIS, consent_id, worker,
+                                                  input_manifest=_client_ip(request),
+                                                  extra_scopes=[("global:oversize", 1)])
+                except C.InsufficientCredits:
+                    db.rollback()
+                    return _analysis_response(request, 402, message=OVERSIZE_INSUFFICIENT_MESSAGE,
+                                              buy_credits=True)
+                except C.AdmissionError as exc:
+                    db.rollback()
+                    return _analysis_response(request, 409 if "409" in str(exc) else 429, message=str(exc))
+                paid = True
+                paid_operation_type = "oversize_analysis"
+                identity = item.id
+                created = (item.worker_id == worker)
+                db.commit()
+                if not created:
+                    status, data, message = A.replay(db, item, user_id)
+                    rid = None
+                    if status == 200 and data is not None and getattr(item, "result_id", None):
+                        rid = str(item.result_id)
+                    return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
+            else:
+                existing = A.lookup(db, user_id, anon, key, digest, _client_ip(request))
+                if existing:
+                    status, data, message = A.replay(db, existing, user_id)
+                    rid = None
+                    if status == 200 and data is not None and user_id is not None and getattr(existing, "result_id", None):
+                        rid = str(existing.result_id)
+                    return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
+                if consent_id:
+                    C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1)
+                    pending = _load_paid_pending(str(consent_id))
+                    if pending is None:
+                        return _analysis_response(request, 410, message="Upload expired. Please upload the file again.")
+                    filename, content = pending
+                    if A.fingerprint(filename, content) != digest:
+                        return _analysis_response(request, 409, message="Upload does not match your consent.")
+                worker = uuid_module.uuid4().hex
+                item, created = A.admit(db, user_id, anon, key, digest, _client_ip(request), worker, consent_id)
+                if item is None:
+                    db.rollback()
+                    if user:
+                        return _paid_consent_page(request, filename, content, user, _get_current_user_optional(request)[1], _client_ip(request))
+                    return _analysis_response(request, 429, message="Free-tier limit reached (10 analyses/hour). Please try again later.")
+                paid = isinstance(item, M.Operation)
+                identity = item.id if paid else item.request_id
+                db.commit()
+                if not created:
+                    status, data, message = A.replay(db, item, user_id)
+                    rid = None
+                    if status == 200 and data is not None and user_id is not None and getattr(item, "result_id", None):
+                        rid = str(item.result_id)
+                    return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
         except C.InsufficientCredits:
             db.rollback()
             return _analysis_response(request, 402, message="Insufficient Power-Up credits.", buy_credits=True)
@@ -939,7 +1273,14 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
             return _analysis_response(request, 503, message="Could not start analysis. Please retry this request.")
     result_id = None
     try:
-        data = analyze_upload(filename, content)
+        if paid_operation_type == "oversize_analysis":
+            # T5: oversize runs in the supervised subprocess with its own
+            # deadline; the standard path keeps in-process SIGALRM below.
+            # A worker error dict settles exactly like an in-process
+            # failure: full reservation reversal, no result published.
+            data = _execute_oversize(filename, content)
+        else:
+            data = analyze_upload(filename, content)
         failure = data.get("message", "Analysis failed.") if isinstance(data, dict) and "error" in data else None
         with SessionLocal() as db:
             if paid:

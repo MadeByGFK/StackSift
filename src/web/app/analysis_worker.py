@@ -1,0 +1,140 @@
+"""Supervised worker for oversize analysis (issue #104).
+
+SHARED INFRASTRUCTURE (approval trim T7): this module is the supervised-
+worker foundation for oversize analysis now and for batch (#103) and
+compare (#102) later. Later features REUSE it; they do not build a second
+worker.
+
+Design (approval trims T1, T5):
+- Oversize preprocessing/analysis runs in a supervised subprocess, never
+  blocking the async route and never moving SIGALRM into a thread. The
+  standard path keeps its 25-second SIGALRM; the subprocess runs with
+  use_alarm=False and the PARENT enforces the deadline via
+  subprocess timeout (stop + join before any ledger release, since
+  settlement only happens after run_supervised() returns).
+- The 60-second deadline and 512 MiB address-space ceiling are named,
+  configurable BENCHMARK CANDIDATES (T1), not promises: final values are
+  set from staging measurements, and no UI copy promises a time or memory
+  figure. The single-replica assumption (T3) applies: pending files and
+  the in-process worker pool live on one instance; a multi-replica
+  finding blocks production promotion, not the staging merge.
+
+The child is invoked as ``python -m app.analysis_worker <in> <out>`` with
+PYTHONPATH pointed at this package's parent directory, so it works
+regardless of the parent process's working directory. The child writes
+the analyze_upload() result dict as JSON (default=str, matching the
+ledger's storage convention); the parent returns it verbatim, including
+error dicts, so settlement treats worker failures exactly like
+in-process failures (full reservation reversal, no result published).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+# Benchmark candidates (T1) — tune only from staging measurements.
+OVERSIZE_EXECUTION_TIMEOUT_SECONDS = 60
+OVERSIZE_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
+
+
+def _package_parent() -> str:
+    """Directory containing the ``app`` package (for the child's PYTHONPATH)."""
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def run_supervised(filename: str, content: bytes, *,
+                   timeout: int = OVERSIZE_EXECUTION_TIMEOUT_SECONDS,
+                   memory_limit: int = OVERSIZE_MEMORY_LIMIT_BYTES) -> dict:
+    """Run an oversize analysis in a supervised subprocess.
+
+    Returns the analyze_upload() result dict on success, or an error dict
+    (with "error" and "message" keys, like analyze_upload failures) when
+    the worker times out, crashes, or produces no output. The subprocess
+    is always stopped and joined (subprocess.run kills on timeout and
+    waits) before this function returns, so the caller may safely settle
+    the ledger reservation afterwards.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="stacksift-oversize-")
+    in_path = os.path.join(tmp_dir, "input.log")
+    out_path = os.path.join(tmp_dir, "output.json")
+    try:
+        with open(in_path, "wb") as f:
+            f.write(content)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = _package_parent() + os.pathsep + env.get("PYTHONPATH", "")
+        env["STACKSIFT_OVERSIZE_MEMORY_LIMIT"] = str(memory_limit)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "app.analysis_worker", in_path, out_path],
+                timeout=timeout, capture_output=True, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            # subprocess.run kills the child and waits for it (stop + join).
+            return {
+                "error": "analysis_timeout",
+                "message": f"Oversize analysis exceeded {timeout}s timeout. "
+                           "The log may contain pathological patterns.",
+                "filename": filename,
+            }
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            return {
+                "error": "worker_failed",
+                "message": "Oversize analysis worker failed before producing a result.",
+                "filename": filename,
+            }
+        with open(out_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {
+                "error": "worker_failed",
+                "message": "Oversize analysis worker returned an invalid result.",
+                "filename": filename,
+            }
+        data.setdefault("filename", filename)
+        return data
+    finally:
+        for path in (in_path, out_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
+
+
+def _child_main(argv: list[str]) -> int:
+    """Child entry point: analyze one file, write the result JSON."""
+    if len(argv) != 2:
+        print("usage: python -m app.analysis_worker <input> <output>", file=sys.stderr)
+        return 2
+    in_path, out_path = argv
+    # Address-space ceiling (benchmark candidate, T1). Best effort: if the
+    # platform lacks resource limits, the parent timeout still bounds us.
+    try:
+        import resource
+        limit = int(os.environ.get("STACKSIFT_OVERSIZE_MEMORY_LIMIT", "0") or 0)
+        if limit > 0:
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    except (ImportError, ValueError, OSError):
+        pass
+    from app.service import analyze_upload
+    with open(in_path, "rb") as f:
+        content = f.read()
+    # use_alarm=False (T5): the parent enforces the deadline; SIGALRM is
+    # never armed in a thread and never double-arms this process.
+    data = analyze_upload(os.path.basename(in_path), content,
+                          allow_oversize=True, use_alarm=False)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, default=str)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_child_main(sys.argv[1:]))
