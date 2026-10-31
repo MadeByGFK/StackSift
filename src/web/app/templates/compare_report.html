@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift comparison — {{ filename }}</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <nav class="nav-links">
+      <a href="/reports">My Reports</a>
+      <a href="/compare">New comparison</a>
+    </nav>
+  </header>
+
+  <section class="report-head">
+    <h2>{{ filename }}</h2>
+    <p>A (before) vs B (after). Groups match on their exact normalized
+    pattern, independent of severity.</p>
+    {% if no_material_differences %}
+    <p><strong>No material differences were found between the two logs.</strong></p>
+    {% endif %}
+    <p><em>{{ resolved_note }}</em></p>
+    {% if current_user and report_id %}
+    <div class="report-actions" style="margin-top:1rem">
+      <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
+      </form>
+    </div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h3>Summary</h3>
+    <ul>
+      <li>New in B: {{ summary.new }}</li>
+      <li>Resolved (absent from B): {{ summary.resolved }}</li>
+      <li>Volume changed: {{ summary.volume_changed }}</li>
+      <li>Severity shifted: {{ summary.severity_shifted }}</li>
+      <li>Shared: {{ shared|length }}</li>
+    </ul>
+    <p>Material-change policy v{{ material_change.version }}: a shared group
+    counts as volume-changed when its count moves by at least
+    {{ material_change.min_absolute }} and at least
+    {{ (material_change.min_fraction_of_a * 100)|int }}% of its A count.</p>
+  </section>
+
+  <section>
+    <h3>New in B ({{ new|length }})</h3>
+    {% for e in new %}
+    <div><strong>[{{ e.b_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>
+    {% else %}<p>None.</p>{% endfor %}
+  </section>
+
+  <section>
+    <h3>Resolved ({{ resolved|length }})</h3>
+    {% for e in resolved %}
+    <div><strong>[{{ e.a_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>
+    {% else %}<p>None.</p>{% endfor %}
+  </section>
+
+  <section>
+    <h3>Volume changes ({{ volume_changes|length }})</h3>
+    {% for e in volume_changes %}
+    <div><strong>[{{ e.b_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>
+    {% else %}<p>None.</p>{% endfor %}
+  </section>
+
+  <section>
+    <h3>Severity shifts ({{ severity_shifts|length }})</h3>
+    {% for e in severity_shifts %}
+    <div><strong>{{ e.a_highest_severity }} → {{ e.b_highest_severity }} ({{ e.a_count }} → {{ e.b_count }})</strong><br>{{ e.template }}</div>
+    {% else %}<p>None.</p>{% endfor %}
+  </section>
+
+  <section>
+    <h3>Shared ({{ shared|length }})</h3>
+    <p>Unchanged-identity groups. Showing the first 50.</p>
+    {% for e in shared[:50] %}
+    <div><strong>[{{ e.b_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>
+    {% else %}<p>None.</p>{% endfor %}
+  </section>
+</div>
+</body>
+</html>
