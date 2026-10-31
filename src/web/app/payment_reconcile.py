@@ -440,13 +440,30 @@ def compute_reconciliation(
                 # raw Stripe object, which has no open_* keys): surface
                 # a still-open component hidden behind a lost/unknown
                 # aggregate status, so the difference note below can
-                # warn about it (Codex P2(b) on PR #108).
+                # warn about it (Codex P2(b) on PR #108). Codex P2 on
+                # PR #112: open_amount is the GROSS summed open
+                # amount, but disputed_cents is the capped deduction
+                # — reporting the gross as the outstanding component
+                # overstates what can reverse whenever the cap binds
+                # (a refund, or open sums beyond the charge). Report
+                # the reversible amount instead: the deduction minus
+                # what would still deduct if every open dispute
+                # resolved won. Keep the gross distinctly so no
+                # information is lost.
                 if isinstance(dispute, dict):
                     open_amount = int(dispute.get("open_amount") or 0)
                     if open_amount > 0:
-                        entry["open_disputed_cents"] = open_amount
-                        entry["open_status"] = \
-                            dispute.get("open_status") or "unknown"
+                        unrefunded = max(0, amount - refunded)
+                        still_deducted = min(dispute_amount - open_amount,
+                                             unrefunded)
+                        reversible = dispute_portion - still_deducted
+                        if reversible > 0:
+                            entry["open_disputed_cents"] = reversible
+                            entry["open_status"] = \
+                                dispute.get("open_status") or "unknown"
+                            if open_amount != reversible:
+                                entry["open_gross_disputed_cents"] = \
+                                    open_amount
                 disputed_charges.append(entry)
 
     # --- Ledger side ---
@@ -556,6 +573,9 @@ def compute_reconciliation(
                          "outstanding — amount may reverse"
                          % (dc.get("open_status"),
                             dc["open_disputed_cents"]))
+                if dc.get("open_gross_disputed_cents"):
+                    note += (" (%s¢ gross open)"
+                             % dc["open_gross_disputed_cents"])
         diff_entry = {
             "kind": "stripe_dispute",
             "charge_id": dc["charge_id"],
@@ -572,6 +592,9 @@ def compute_reconciliation(
         if dc.get("open_disputed_cents"):
             diff_entry["open_disputed_cents"] = dc["open_disputed_cents"]
             diff_entry["open_status"] = dc.get("open_status")
+            if dc.get("open_gross_disputed_cents"):
+                diff_entry["open_gross_disputed_cents"] = \
+                    dc["open_gross_disputed_cents"]
         differences.append(diff_entry)
 
     return {
