@@ -13,9 +13,9 @@ def fingerprint(filename, content):
     return C.hash_input(filename.encode() + b'\0' + content)
 
 
-def lookup(db, user_id, anonymous_hash, key, digest, ip=None):
+def lookup(db, user_id, anonymous_hash, key, digest, ip=None, operation_type="additional_analysis"):
     if user_id:
-        op = C.find_operation(db, user_id, 'additional_analysis', key, digest)
+        op = C.find_operation(db, user_id, operation_type, key, digest)
         if op:
             return op
     fr = db.get(M.FreeRequest, key, populate_existing=True)
