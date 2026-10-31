@@ -246,7 +246,8 @@ def _jsonline_to_text(line: str) -> str:
 
 
 def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = False,
-                   use_alarm: bool = True, original_byte_count: int | None = None) -> dict:
+                   use_alarm: bool = True, original_byte_count: int | None = None,
+                   collect_comparison_evidence: bool = False) -> dict:
     """Analyze an upload and clean up the analysis file during normal execution.
 
     allow_oversize=True (issue #104) raises the ceilings to 100 MB /
@@ -349,7 +350,10 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
                 tmp.write(text)
                 tmp_path = tmp.name
 
-            results = analyze_log_file(tmp_path)
+            # Issue #102: opt-in comparison evidence, default OFF so the
+            # single-file result shape is unchanged for every other caller.
+            results = analyze_log_file(
+                tmp_path, collect_comparison_evidence=collect_comparison_evidence)
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)

@@ -125,7 +125,21 @@ def normalize_issue(message: str) -> str:
     return msg
 
 
-def analyze_log_file(file_path: str) -> dict:
+def analyze_log_file(file_path: str, *, collect_comparison_evidence: bool = False) -> dict:
+    """Analyze one log file.
+
+    Issue #102 (comparison v1): when ``collect_comparison_evidence`` is
+    true, the result gains an additive ``comparison_evidence`` key, keyed
+    by the same normalized template as ``issues``. Each entry carries the
+    per-severity level distribution (the stored group's ``level`` is only
+    the first-occurrence level and cannot show severity movement) and up
+    to 2 example lines per observed severity, each truncated to 1,024
+    characters. When the flag is false (the default), the result shape is
+    exactly the historical one — no extra key, no behavior change. The
+    caller is responsible for feeding this function the prepared
+    (redacted, JSON-lines-adapted) text, so recorded example lines are
+    redacted analysis lines, never raw uploads.
+    """
     path = Path(file_path)
 
     if not path.exists():
@@ -134,6 +148,8 @@ def analyze_log_file(file_path: str) -> dict:
     level_counts = Counter()
     service_counts = Counter()
     issue_counts = {}
+    # Issue #102 evidence collector (default OFF, additive only).
+    comparison_evidence: dict = {} if collect_comparison_evidence else None
     events = []
     first_seen = None
     last_seen = None
@@ -188,6 +204,33 @@ def analyze_log_file(file_path: str) -> dict:
 
                 issue = issue_counts[template]
                 issue["count"] += 1
+
+                # Issue #102: opt-in comparison evidence, recorded at the
+                # same parse/group point so counts reconcile exactly with
+                # issue["count"] (same branch, same entries, no re-parse).
+                if comparison_evidence is not None:
+                    evidence = comparison_evidence.setdefault(template, {
+                        "level_counts": {},
+                        "examples": {},
+                        "examples_truncated": False,
+                    })
+                    evidence["level_counts"][entry.level] = (
+                        evidence["level_counts"].get(entry.level, 0) + 1
+                    )
+                    examples = evidence["examples"].setdefault(entry.level, [])
+                    if len(examples) < 2:
+                        text = line.rstrip("\n")
+                        if len(text) > 1024:
+                            text = text[:1024]
+                            evidence["examples_truncated"] = True
+                        examples.append({
+                            "line_number": total_lines,
+                            "text": text,
+                            "timestamp": entry.timestamp,
+                            "service": entry.service,
+                        })
+                    else:
+                        evidence["examples_truncated"] = True
 
                 # Preserve structured evidence (Phase A — no behavior change)
                 fields = extract_structured_fields(entry.message)
@@ -260,7 +303,7 @@ def analyze_log_file(file_path: str) -> dict:
             k: sorted(v) for k, v in issue["correlation"].items()
         }
 
-    return {
+    result = {
         "file": str(path),
         "total_lines": total_lines,
         "parsed_lines": parsed_lines,
@@ -272,6 +315,9 @@ def analyze_log_file(file_path: str) -> dict:
         "first_seen": first_seen,
         "last_seen": last_seen,
     }
+    if comparison_evidence is not None:
+        result["comparison_evidence"] = comparison_evidence
+    return result
 
 
 def analyze_path(input_path: str) -> dict:
