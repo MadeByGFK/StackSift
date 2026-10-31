@@ -796,6 +796,79 @@ def test_multiple_disputes_capped_at_charge(recon_env, monkeypatch):
         assert run.per_pack["starter"]["stripe_net_cents"] == 0
 
 
+def test_mixed_lost_and_open_dispute_preserves_open_warning(
+        recon_env, monkeypatch):
+    """PR #108 Codex P2(b) regression: a charge with a 100 lost
+    dispute and a 400 needs_response dispute aggregates to lost/500
+    (money math unchanged, capped at the charge), but the record
+    must NOT read as fully resolved — the difference entry keeps
+    the open component (400, needs_response) and its note warns
+    about it, so the founder alert shows the outstanding dispute."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_lost", "charge": "ch_multi_1", "status": "lost",
+         "amount": 100},
+        {"id": "dp_open", "charge": "ch_multi_1",
+         "status": "needs_response", "amount": 400},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 500
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 500
+        assert dispute["status"] == "lost"
+        assert dispute["open_disputed_cents"] == 400
+        assert dispute["open_status"] == "needs_response"
+        assert "lost" in dispute["note"]
+        assert "needs_response" in dispute["note"]
+        assert "may reverse" in dispute["note"]
+
+
+def test_lost_only_group_carries_no_open_warning(recon_env, monkeypatch):
+    """P2(b) scope guard: a lost-only charge must not gain a
+    spurious open clause — the note stays the plain lost note and
+    no open_* fields appear on the entry."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_a", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["status"] == "lost"
+        assert "open_disputed_cents" not in dispute
+        assert dispute["note"] == "negative entry; dispute status lost"
+
+
+def test_aggregate_disputes_open_component(recon_env):
+    """Unit-level P2(b) check: _aggregate_disputes reports the open
+    component (summed open cents, newest open status) alongside
+    the lost aggregate status, and reports zero/None when there is
+    no open dispute in the group."""
+    from app import payment_reconcile as pr
+    mixed = pr._aggregate_disputes([
+        {"status": "lost", "amount": 100},
+        {"status": "needs_response", "amount": 400},
+        {"status": "won", "amount": 500},
+    ])
+    assert mixed["status"] == "lost"
+    assert mixed["amount"] == 500
+    assert mixed["open_amount"] == 400
+    assert mixed["open_status"] == "needs_response"
+    lost_only = pr._aggregate_disputes([
+        {"status": "lost", "amount": 500},
+    ])
+    assert lost_only["open_amount"] == 0
+    assert lost_only["open_status"] is None
+
+
 def test_error_recovery_preserves_alert_history(recon_env, monkeypatch):
     """PR #108 Codex Finding 2 regression: a mismatch row whose alert
     was already delivered, then failed by a window re-run (Stripe

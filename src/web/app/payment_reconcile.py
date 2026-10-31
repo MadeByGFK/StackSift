@@ -206,20 +206,35 @@ def _aggregate_disputes(disputes: list[dict]) -> dict:
     final); among open disputes the newest (first in list order)
     supplies the displayed status. A charge whose disputes are all
     won/charge_refunded aggregates to won with amount 0.
+    Open-component rule (Codex P2(b) on PR #108): a lost aggregate
+    must NOT hide a still-open dispute — the aggregate also carries
+    ``open_amount`` (summed open-dispute cents) and ``open_status``
+    (newest open dispute's status), so ``compute_reconciliation``
+    can warn about the outstanding dispute alongside the lost
+    status instead of recording the group as fully resolved.
     """
     non_won = [d for d in disputes
                if (d.get("status") or "unknown")
                not in ("won", "charge_refunded")]
     if not non_won:
-        return {"status": "won", "amount": 0}
+        return {"status": "won", "amount": 0,
+                "open_amount": 0, "open_status": None}
     amount = sum(int(d.get("amount") or 0) for d in non_won)
+    open_disputes = [d for d in non_won
+                     if (d.get("status") or "unknown")
+                     in OPEN_DISPUTE_STATUSES]
+    open_amount = sum(int(d.get("amount") or 0) for d in open_disputes)
+    # First open in list order = newest open dispute.
+    open_status = open_disputes[0].get("status") or "unknown" \
+        if open_disputes else None
     lost = [d for d in non_won if d.get("status") == "lost"]
     if lost:
         status = "lost"
     else:
         # First non-won in list order = newest open dispute.
         status = non_won[0].get("status") or "unknown"
-    return {"status": status, "amount": amount}
+    return {"status": status, "amount": amount,
+            "open_amount": open_amount, "open_status": open_status}
 
 
 def attach_disputes(charges: list[dict], disputes: list[dict]) -> None:
@@ -418,9 +433,21 @@ def compute_reconciliation(
             if dispute_portion > 0:
                 stripe_disputes[pack] = stripe_disputes.get(pack, 0) \
                     + dispute_portion
-                disputed_charges.append({"charge_id": c["id"], "pack": pack,
-                                         "disputed_cents": dispute_portion,
-                                         "status": dispute_status})
+                entry = {"charge_id": c["id"], "pack": pack,
+                         "disputed_cents": dispute_portion,
+                         "status": dispute_status}
+                # Aggregated groups only (single disputes carry the
+                # raw Stripe object, which has no open_* keys): surface
+                # a still-open component hidden behind a lost/unknown
+                # aggregate status, so the difference note below can
+                # warn about it (Codex P2(b) on PR #108).
+                if isinstance(dispute, dict):
+                    open_amount = int(dispute.get("open_amount") or 0)
+                    if open_amount > 0:
+                        entry["open_disputed_cents"] = open_amount
+                        entry["open_status"] = \
+                            dispute.get("open_status") or "unknown"
+                disputed_charges.append(entry)
 
     # --- Ledger side ---
     purchases = db.execute(
@@ -510,22 +537,42 @@ def compute_reconciliation(
         # disputed_cents is the NET portion (capped at the unrefunded
         # remainder); won disputes append no entry at all (not an
         # anomaly). Open disputes may reverse — the 7-day re-run window
-        # corrects the row if they later resolve to won.
-        if dc["status"] == "unknown":
-            note = "negative entry; dispute status unknown"
-        elif dc["status"] in OPEN_DISPUTE_STATUSES:
+        # corrects the row if they later resolve to won. A mixed
+        # lost+open group keeps status "lost" but must still warn
+        # about its open component (Codex P2(b) on PR #108): the
+        # open amount is still reversible and needs a response, so
+        # recording the group as only "lost" would mislead the
+        # founder alert.
+        if dc["status"] in OPEN_DISPUTE_STATUSES:
             note = ("negative entry; dispute open (%s) — amount may "
                     "reverse" % dc["status"])
         else:
-            note = "negative entry; dispute status %s" % dc["status"]
-        differences.append({
+            if dc["status"] == "unknown":
+                note = "negative entry; dispute status unknown"
+            else:
+                note = "negative entry; dispute status %s" % dc["status"]
+            if dc.get("open_disputed_cents"):
+                note += ("; also open dispute (%s, %s¢) still "
+                         "outstanding — amount may reverse"
+                         % (dc.get("open_status"),
+                            dc["open_disputed_cents"]))
+        diff_entry = {
             "kind": "stripe_dispute",
             "charge_id": dc["charge_id"],
             "pack": dc["pack"],
             "disputed_cents": dc["disputed_cents"],
             "status": dc["status"],
             "note": note,
-        })
+        }
+        # Keep the open component structured, not just in the note:
+        # the founder alert dumps the whole entry, and a later reader
+        # should not have to parse the note to find the outstanding
+        # amount. (Pure-open groups need no extra fields — their
+        # status already says open.)
+        if dc.get("open_disputed_cents"):
+            diff_entry["open_disputed_cents"] = dc["open_disputed_cents"]
+            diff_entry["open_status"] = dc.get("open_status")
+        differences.append(diff_entry)
 
     return {
         "stripe_gross_cents": sum(stripe_gross.values()),
