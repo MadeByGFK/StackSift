@@ -691,7 +691,11 @@ def test_count_original_lines_pre_redaction_t6():
              b"-----END PRIVATE KEY-----\n")
     nblocks = 125001  # 500,004 original lines, ~125k redacted lines
     content = block * nblocks
-    assert count_original_lines(content) == 500004
+    # Bounded counting (PR #111 head-3 fix): counts above the oversize
+    # ceiling are reported as ceiling + 1, which still classifies as
+    # unsupported and still proves pre-redaction counting (redaction
+    # would collapse this to ~125k lines, below the ceiling).
+    assert count_original_lines(content) == 500001
     out = analyze_upload("k.log", content, allow_oversize=True, use_alarm=False)
     assert out.get("error") == "too_many_lines"
     assert "500,000" in out["message"]
@@ -721,6 +725,56 @@ def test_chunk_boundary_line_counting_unit():
     # Multi-byte char straddling the 1 MiB boundary: still 2 lines.
     content = b"A" * (1024 * 1024 - 1) + "é".encode() + b"\n" + b"z\n"
     assert count_original_lines(content) == 2
+
+
+def test_count_original_lines_bounded_at_ceiling():
+    # PR #111 head-3 fix (P1): a newline-dense input over the line
+    # ceiling is rejected without materializing the full line list —
+    # the count stops at ceiling + 1, which classifies as unsupported.
+    from app.service import count_original_lines, classify_upload_size
+    assert count_original_lines(b"\n" * 600000) == 500001
+    assert classify_upload_size(600000, count_original_lines(b"\n" * 600000)) == "unsupported"
+    # Boundary stays exact at and below the ceiling.
+    assert count_original_lines(b"\n" * 500000) == 500000
+    assert count_original_lines(b"a\n" * 500000) == 500000
+    assert count_original_lines(b"a\n" * 500000 + b"tail") == 500001
+    # Splitlines semantics preserved: CRLF is one break, lone CR is one.
+    assert count_original_lines(b"a\r\nb\rc\n") == 3
+    assert count_original_lines(b"") == 0
+    assert count_original_lines(b"no-newline") == 1
+
+
+def test_oversize_idempotency_replay_under_full_pool(oversize_env):
+    # PR #111 head-3 fix (P2): a second admit with the same key + hash
+    # replays the existing oversize operation instead of failing
+    # capacity, even while the first operation still holds the single
+    # global:oversize permit. SQLite serializes transactions, so it
+    # cannot reproduce the concurrent race itself; this test pins the
+    # replay-under-a-full-pool contract that the first-scope lock
+    # guarantees on Postgres, and exercises the oversize first-scope
+    # lock path (global:oversize sorts before global:paid).
+    env = oversize_env
+    _, uid, csrf = _signup_verify_login(env)
+    r = _post_oversize(env, _line_content(50001))
+    consent_id, file_hash = _consent_fields(r.text)
+    admit_kwargs = dict(
+        operation_type="oversize_analysis",
+        idempotency_key=consent_id, request_hash=file_hash, cost=3,
+        consent_id=uuid.UUID(consent_id), worker_id="test-worker",
+        extra_scopes=[("global:oversize", 1)],
+    )
+    with env.sessions() as db:
+        op1 = C.admit_paid_operation(db, uid, **admit_kwargs)
+        db.commit()
+        op1_id = op1.id  # read inside the session: commit expires attrs
+    assert _http_balance(env) == 0  # 3-credit reward fully reserved
+    with env.sessions() as db:
+        op2 = C.admit_paid_operation(db, uid, **admit_kwargs)
+        db.commit()
+        op2_id = op2.id  # read inside the session: commit expires attrs
+    assert op2_id == op1_id
+    assert len(_ops(env, uid)) == 1
+    assert _http_balance(env) == 0  # no second charge, no new reservation
 
 
 # --- worker: real subprocess -----------------------------------------------------

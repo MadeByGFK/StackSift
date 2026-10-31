@@ -8,6 +8,7 @@ may already have spooled the raw upload to disk before this service runs.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import signal
@@ -43,6 +44,11 @@ MAX_OVERSIZE_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
 MAX_OVERSIZE_UPLOAD_LINES = 500_000
 
 
+# Line-break characters with str.splitlines() semantics. "\r\n" is a
+# single break and is corrected for below (counted once, not twice).
+_LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
 def count_original_lines(content: bytes) -> int:
     """Count ORIGINAL decoded lines, pre-redaction (issue #104, trim T6).
 
@@ -50,8 +56,48 @@ def count_original_lines(content: bytes) -> int:
     classification counts the decoded input before redact_secrets() runs.
     Uses the same UTF-8-with-replacement decoding and splitlines()
     semantics as analyze_upload().
+
+    Bounded-memory fix (issue #104 follow-up, PR #111 head-3 review):
+    the previous implementation decoded the whole upload and
+    materialized a full splitlines() list before any ceiling check, so
+    a newline-dense upload below the byte ceiling forced a full decode
+    plus a full list before rate limiting or auth. This version decodes
+    in 1 MiB chunks with an incremental decoder (multi-byte characters
+    and CRLF pairs straddling a chunk boundary still count correctly),
+    counts breaks per chunk in C, and stops as soon as the oversize
+    line ceiling is exceeded. Counts above that ceiling are reported
+    as MAX_OVERSIZE_UPLOAD_LINES + 1: classification only needs
+    over/under the ceiling, and no caller needs an exact over-ceiling
+    count (the route reports the ceiling in its error message).
     """
-    return len(content.decode("utf-8", errors="replace").splitlines())
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    count = 0
+    prev_ended_cr = False
+    last_char = ""
+    saw_text = False
+    for start in range(0, len(content), 1024 * 1024):
+        chunk = decoder.decode(content[start:start + 1024 * 1024])
+        if not chunk:
+            continue  # chunk was the first half of a multi-byte char
+        saw_text = True
+        breaks = sum(chunk.count(ch) for ch in _LINE_BREAK_CHARS)
+        breaks -= chunk.count("\r\n")  # CRLF is one break, not two
+        if prev_ended_cr and chunk.startswith("\n"):
+            breaks -= 1  # CRLF split across chunks: \r already counted
+        count += breaks
+        if count > MAX_OVERSIZE_UPLOAD_LINES:
+            return MAX_OVERSIZE_UPLOAD_LINES + 1
+        prev_ended_cr = chunk.endswith("\r")
+        last_char = chunk[-1]
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        saw_text = True
+        last_char = tail[-1]
+    if saw_text and last_char not in _LINE_BREAK_CHARS:
+        count += 1  # final partial line after the last break
+        if count > MAX_OVERSIZE_UPLOAD_LINES:
+            return MAX_OVERSIZE_UPLOAD_LINES + 1
+    return count
 
 
 def classify_upload_size(nbytes: int, nlines: int) -> str:

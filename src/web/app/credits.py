@@ -489,15 +489,30 @@ def admit_paid_operation(
             raise AdmissionError("idempotency key reused with different input (409)")
         return existing
 
-    # Lock-order fix (issue #104 follow-up): _acquire_capacity below locks
-    # scopes in sorted order, and release/recovery lock sorted too. For
-    # oversize, "global:oversize" sorts BEFORE "global:paid", so
-    # pre-locking "global:paid" here first would invert that order and
-    # deadlock against a transaction locking oversize-then-paid. Skip
-    # the pre-lock whenever an extra scope sorts before "global:paid";
-    # _acquire_capacity ensures the "global:paid" row anyway.
-    if not any(scope_key < "global:paid" for scope_key, _ in (extra_scopes or [])):
-        _ensure_capacity_scope(db, "global:paid", DEFAULT_GLOBAL_CONCURRENT_LIMIT)
+    # Idempotency-serialization fix (issue #104 follow-up, PR #111
+    # head-3 review): lock the lexicographically-FIRST capacity scope
+    # BEFORE the authoritative identity lookup, without consuming
+    # capacity. Two concurrent same-key confirmations previously both
+    # passed the unlocked lookup, then serialized on the oversize row
+    # lock inside _acquire_capacity, and the second failed capacity
+    # (429) instead of replaying the now-existing operation (202),
+    # breaking the documented idempotent contract. With the first
+    # scope locked first, the second transaction blocks on that row
+    # until the first commits, so its lookup below sees the existing
+    # operation and replays it. Lock order is preserved: the first
+    # scope is locked first here, and _acquire_capacity below locks
+    # scopes in the same sorted order. For standard operations the
+    # first scope is "global:paid" (as before); for oversize it is
+    # "global:oversize", which sorts before "global:paid" and was
+    # previously left unlocked by the old skip-the-pre-lock rule.
+    _wanted_scopes = {
+        "global:paid": DEFAULT_GLOBAL_CONCURRENT_LIMIT,
+        f"user:{user_id}:paid": DEFAULT_USER_CONCURRENT_LIMIT,
+    }
+    for scope_key, limit in (extra_scopes or []):
+        _wanted_scopes[scope_key] = limit
+    _first_scope = sorted(_wanted_scopes)[0]
+    _ensure_capacity_scope(db, _first_scope, _wanted_scopes[_first_scope])
     existing = find_operation(db, user_id, operation_type, idempotency_key, request_hash)
     if existing is not None:
         return existing
