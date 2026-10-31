@@ -1333,7 +1333,8 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
 async def analyze_paid(request: Request, consent_id: str = Form(...), file_hash: str = Form(...),
                        idempotency_key: str = Form(...), csrf_token: str = Form("")):
     from app.db import SessionLocal
-    from app import auth
+    from app import auth, models as M
+    import asyncio
     import hmac
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
@@ -1345,6 +1346,21 @@ async def analyze_paid(request: Request, consent_id: str = Form(...), file_hash:
         consent_uuid = uuid_module.UUID(consent_id)
     except ValueError:
         return _analysis_response(request, 400, message="Invalid consent.")
+    # Issue #104 follow-up (P1): the oversize execution waits up to 60s
+    # on a supervised subprocess, which must not block the async event
+    # loop on a single-worker deployment. Oversize never arms SIGALRM
+    # (child use_alarm=False, parent subprocess timeout), so running
+    # its _durable_analysis in a worker thread is safe. The
+    # additional_analysis path stays on the event loop: its 25s SIGALRM
+    # only works in the main thread, and that path is unchanged.
+    is_oversize = False
+    with SessionLocal() as db:
+        _consent_row = db.get(M.Consent, consent_uuid)
+        is_oversize = _consent_row is not None and _consent_row.operation_type == "oversize_analysis"
+    if is_oversize:
+        return await asyncio.to_thread(
+            _durable_analysis, request, "", b"", idempotency_key,
+            consent_id=consent_uuid, digest=file_hash)
     return _durable_analysis(request, "", b"", idempotency_key, consent_id=consent_uuid, digest=file_hash)
 
 

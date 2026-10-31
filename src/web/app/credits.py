@@ -489,7 +489,15 @@ def admit_paid_operation(
             raise AdmissionError("idempotency key reused with different input (409)")
         return existing
 
-    _ensure_capacity_scope(db, "global:paid", DEFAULT_GLOBAL_CONCURRENT_LIMIT)
+    # Lock-order fix (issue #104 follow-up): _acquire_capacity below locks
+    # scopes in sorted order, and release/recovery lock sorted too. For
+    # oversize, "global:oversize" sorts BEFORE "global:paid", so
+    # pre-locking "global:paid" here first would invert that order and
+    # deadlock against a transaction locking oversize-then-paid. Skip
+    # the pre-lock whenever an extra scope sorts before "global:paid";
+    # _acquire_capacity ensures the "global:paid" row anyway.
+    if not any(scope_key < "global:paid" for scope_key, _ in (extra_scopes or [])):
+        _ensure_capacity_scope(db, "global:paid", DEFAULT_GLOBAL_CONCURRENT_LIMIT)
     existing = find_operation(db, user_id, operation_type, idempotency_key, request_hash)
     if existing is not None:
         return existing

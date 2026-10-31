@@ -6,8 +6,10 @@ compare (#102) later. Later features REUSE it; they do not build a second
 worker.
 
 Design (approval trims T1, T5):
-- Oversize preprocessing/analysis runs in a supervised subprocess, never
-  blocking the async route and never moving SIGALRM into a thread. The
+- Oversize preprocessing/analysis runs in a supervised subprocess and
+  never moves SIGALRM into a thread. The /analyze/paid route runs the
+  oversize path in a worker thread (main.py analyze_paid), so the
+  up-to-60s subprocess wait never blocks the async event loop. The
   standard path keeps its 25-second SIGALRM; the subprocess runs with
   use_alarm=False and the PARENT enforces the deadline via
   subprocess timeout (stop + join before any ledger release, since
@@ -23,15 +25,24 @@ The child is invoked as ``python -m app.analysis_worker <in> <out>`` with
 PYTHONPATH pointed at this package's parent directory, so it works
 regardless of the parent process's working directory. The child writes
 the analyze_upload() result dict as JSON (default=str, matching the
-ledger's storage convention); the parent returns it verbatim, including
+ledger's storage convention); the parent returns it with the original
+filename restored (the child only ever sees ``input.log``), including
 error dicts, so settlement treats worker failures exactly like
 in-process failures (full reservation reversal, no result published).
+
+The child's own temporary file (service.py's NamedTemporaryFile) is
+contained by pointing the child's TMPDIR at the parent-owned per-run
+directory, which the parent removes wholesale (shutil.rmtree) after the
+child is stopped and joined — so a timeout kill, which bypasses the
+child's own finally-unlink, cannot orphan a redacted temp file in the
+system temp directory.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,6 +79,10 @@ def run_supervised(filename: str, content: bytes, *,
         env = dict(os.environ)
         env["PYTHONPATH"] = _package_parent() + os.pathsep + env.get("PYTHONPATH", "")
         env["STACKSIFT_OVERSIZE_MEMORY_LIMIT"] = str(memory_limit)
+        # Contain the child's service temp file inside this per-run
+        # directory (see module docstring): the parent removes the whole
+        # directory after the child stops, even on a timeout kill.
+        env["TMPDIR"] = tmp_dir
         try:
             proc = subprocess.run(
                 [sys.executable, "-m", "app.analysis_worker", in_path, out_path],
@@ -95,18 +110,16 @@ def run_supervised(filename: str, content: bytes, *,
                 "message": "Oversize analysis worker returned an invalid result.",
                 "filename": filename,
             }
-        data.setdefault("filename", filename)
+        # Overwrite, not setdefault: the child only ever saw "input.log",
+        # so its result dict already carries that name and setdefault
+        # would never restore the user's original filename.
+        data["filename"] = filename
         return data
     finally:
-        for path in (in_path, out_path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-        try:
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass
+        # Remove the whole per-run directory, including any temp file the
+        # child left behind when it was killed on timeout. rmtree runs
+        # only after subprocess.run has stopped and joined the child.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _child_main(argv: list[str]) -> int:

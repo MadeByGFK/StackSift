@@ -617,6 +617,46 @@ def test_worker_memory_failure_returns_error_dict():
     assert data.get("error") == "worker_failed"
 
 
+def test_worker_result_filename_is_original_not_input_log():
+    # Follow-up fix P2: the child only ever sees "input.log", so the
+    # parent must overwrite (not setdefault) the result filename.
+    from app.analysis_worker import run_supervised
+    data = run_supervised("my-real-name.log", _line_content(100))
+    assert "error" not in data, data
+    assert data["filename"] == "my-real-name.log"
+
+
+def test_worker_parent_dir_cleaned_including_child_orphan(monkeypatch):
+    # Follow-up fix P2: a timeout-killed child leaves its service temp
+    # file behind; it must live in the parent-owned per-run directory
+    # (TMPDIR) and be removed wholesale with that directory.
+    import json
+    import os
+    import subprocess
+    from types import SimpleNamespace
+    from app import analysis_worker
+
+    seen_dirs = []
+
+    def fake_run(argv, timeout=None, capture_output=None, env=None):
+        in_path, out_path = argv[3], argv[4]
+        run_dir = os.path.dirname(in_path)
+        seen_dirs.append(run_dir)
+        # The child must have been pointed at the per-run dir.
+        assert env is not None and env.get("TMPDIR") == run_dir
+        # Mimic the killed child's orphaned service temp file.
+        with open(os.path.join(run_dir, "tmp-orphan.log"), "w") as f:
+            f.write("redacted content\n")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump({"filename": "input.log"}, f)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    data = analysis_worker.run_supervised("real.log", b"2024-01-01 INFO x\n")
+    assert data["filename"] == "real.log"
+    assert seen_dirs and not os.path.exists(seen_dirs[0])
+
+
 # --- ledger-level: rate, pool, recovery, T10 ---------------------------------------
 
 def test_oversize_rate_policy_explicit_30_per_hour(oversize_env):
