@@ -948,9 +948,67 @@ def _delete_paid_pending(file_hash: str) -> None:
         pass
 
 
+# Issue #102: pair-pending storage for a comparison consent. The two
+# redacted files share the consent's single pending file (the pending
+# path is keyed by a UUID consent ID, so two separate stores are not
+# possible): a JSON header line with both filenames, then an 8-byte
+# big-endian length for A, then A's bytes, then B's bytes. The loader
+# is compare-only; the single-file loader never parses a pair file.
+# Budget and TTL handling mirror _store_paid_pending / _load_paid_pending.
+def _store_compare_pending(consent_id: str, filename_a: str, content_a: bytes,
+                           filename_b: str, content_b: bytes) -> None:
+    path = _paid_pending_path(consent_id)
+    with _PENDING_LOCK:
+        cleanup_pending_uploads()
+        if (sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin"))
+                + len(content_a) + len(content_b) > _PAID_PENDING_BUDGET):
+            raise RuntimeError("Pending upload capacity exhausted")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(json.dumps([filename_a, filename_b]).encode("utf-8") + b"\n")
+            f.write(len(content_a).to_bytes(8, "big"))
+            f.write(content_a)
+            f.write(content_b)
+
+
+def _load_compare_pending(consent_id: str) -> tuple[str, bytes, str, bytes] | None:
+    path = _paid_pending_path(consent_id)
+    try:
+        stat = os.stat(path)
+        if datetime.now(timezone.utc).timestamp() - stat.st_mtime > _PAID_PENDING_TTL:
+            os.unlink(path)
+            return None
+        with open(path, "rb") as f:
+            raw = f.read()
+        nl = raw.index(b"\n")
+        filename_a, filename_b = json.loads(raw[:nl].decode("utf-8"))
+        len_a = int.from_bytes(raw[nl + 1:nl + 9], "big")
+        content_a = raw[nl + 9:nl + 9 + len_a]
+        content_b = raw[nl + 9 + len_a:]
+        if len(content_a) != len_a:
+            return None
+        return filename_a, content_a, filename_b, content_b
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _compare_pair_hash(filename_a: str, content_a: bytes, filename_b: str, content_b: bytes) -> str:
+    """Ordered-pair fingerprint binding a compare consent to both files.
+
+    Direction matters: A (before) and B (after) are not interchangeable,
+    so the hash is over the ordered pair of single-file fingerprints.
+    """
+    from app.analysis_admission import fingerprint as _fingerprint
+    from app import credits as _credits_helpers
+    return _credits_helpers.hash_input(
+        (_fingerprint(filename_a, content_a) + "\0"
+         + _fingerprint(filename_b, content_b)).encode("utf-8"))
+
+
 def _paid_consent_page(request: Request, filename: str, content: bytes, user, csrf_token: str, ip: str,
                        *, operation: str = "additional_analysis",
-                       byte_count: int | None = None, line_count: int | None = None):
+                       byte_count: int | None = None, line_count: int | None = None,
+                       filename_b: str | None = None, content_b: bytes | None = None):
     """Return a consent page offering a paid analysis. Raises on no DB.
 
     Generalized for issue #104 (trim T8): the operation policy is
@@ -959,9 +1017,12 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
     ``oversize_analysis`` quotes 3 credits with the draft §3 copy. The
     consent row binds user, operation type, redacted-content fingerprint,
     pricing version, and (oversize) server-measured byte/line counts.
-    Consent creation changes neither balance nor allocations, and creates
-    no debit or operation. Raises InsufficientCredits when eligible
-    credits are below the operation cost, so callers return HTTP 402.
+    Issue #102 adds ``compare_logs``: both files are redacted, the
+    consent binds the ORDERED pair hash (A = before, B = after), and
+    the pair is stored with _store_compare_pending. Consent creation
+    changes neither balance nor allocations, and creates no debit or
+    operation. Raises InsufficientCredits when eligible credits are
+    below the operation cost, so callers return HTTP 402.
     """
     import os as _os
     if not _os.environ.get("DATABASE_URL"):
@@ -981,6 +1042,11 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
         text = content.decode("utf-8", errors="replace")
         redacted_text = redact_secrets(text)
         content = redacted_text.encode("utf-8")
+        if operation == "compare_logs":
+            if content_b is None or filename_b is None:
+                raise ValueError("compare consent requires both files")
+            text_b = content_b.decode("utf-8", errors="replace")
+            content_b = redact_secrets(text_b).encode("utf-8")
     except Exception:
         # GFD Finding 2: Fail closed. Never persist unredacted content.
         # If redaction fails, abort rather than writing raw logs to disk.
@@ -989,9 +1055,14 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
             content="<h1>Upload processing error</h1><p>Could not securely process your file. Please try again.</p>",
             status_code=500,
         )
-    file_hash = fingerprint(filename, content)
+    if operation == "compare_logs":
+        file_hash = _compare_pair_hash(filename, content, filename_b, content_b)
+    else:
+        file_hash = fingerprint(filename, content)
     if operation == "oversize_analysis":
         cost = credits_helpers.COST_OVERSIZE_ANALYSIS
+    elif operation == "compare_logs":
+        cost = credits_helpers.COST_COMPARE
     elif operation == "additional_analysis":
         cost = credits_helpers.COST_ADDITIONAL_ANALYSIS
     else:
@@ -1039,7 +1110,11 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
                 meta = {"operation_type": operation, "byte_count": byte_count,
                         "line_count": line_count, "user_id": str(user.id)}
             try:
-                _store_paid_pending(consent_id, filename, content, meta=meta)
+                if operation == "compare_logs":
+                    _store_compare_pending(consent_id, filename, content,
+                                           filename_b, content_b)
+                else:
+                    _store_paid_pending(consent_id, filename, content, meta=meta)
             except Exception:
                 db.rollback()
                 raise
@@ -1066,8 +1141,35 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
             "cost_label": "3 credits",
             "cost_sentence": "This run costs 3 credits.",
             "confirm_label": "Use 3 credits",
+            "confirm_action": "/analyze/paid",
             "cancel_label": "Cancel",
             "note": "No charge if the analysis fails. Results are available for 7 days.",
+        }
+    elif operation == "compare_logs":
+        # Spec trim C10: the consent page discloses that an identical
+        # pair, or a comparison with no material differences, still
+        # costs 3 credits. Consent creation itself charges nothing.
+        context = {
+            "current_user": user,
+            "csrf_token": csrf_token,
+            "filename": f"{filename} → {filename_b}",
+            "file_hash": file_hash,
+            "consent_id": consent_id,
+            "cost": cost,
+            "balance": summary["balance"],
+            "eligible": summary["eligible"],
+            "operation_type": operation,
+            "heading": "Compare two logs",
+            "intro": "Compare A (before) against B (after).",
+            "size_line": None,
+            "limits_line": "Free limits apply to both files (10 MB / 50,000 lines each).",
+            "cost_label": "3 credits",
+            "cost_sentence": ("This comparison costs 3 credits — even if the logs are "
+                              "identical or show no material differences."),
+            "confirm_label": "Use 3 credits",
+            "confirm_action": "/compare/paid",
+            "cancel_label": "Cancel",
+            "note": "No charge if the comparison fails. Results are available for 7 days.",
         }
     else:
         context = {
@@ -1087,6 +1189,7 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
             "cost_label": "1 credit",
             "cost_sentence": "Continue this analysis now with a Power-Up credit",
             "confirm_label": "Use 1 credit",
+            "confirm_action": "/analyze/paid",
             "cancel_label": "Wait for free",
             "note": "No charge if the analysis fails. Credits never expire. Results are available for 7 days.",
         }
@@ -1422,6 +1525,263 @@ async def analyze_paid_cancel(request: Request, consent_id: str = Form(...),
     return RedirectResponse("/", status_code=303)
 
 
+# ---------------------------------------------------------------------------
+# Issue #102: Compare two logs (paid, 3 credits)
+# ---------------------------------------------------------------------------
+
+COMPARE_INSUFFICIENT_MESSAGE = (
+    "Comparing two logs costs 3 credits. You do not have enough eligible Power-Up credits."
+)
+
+
+def _comparison_response(request, status, data=None, message=None, *, report_id=None):
+    """Render a comparison outcome: the comparison report on success,
+    the compare form with an error otherwise."""
+    user, csrf = _get_current_user_optional(request)
+    if data is None:
+        return templates.TemplateResponse(request, "compare.html", {
+            "error": message, "current_user": user, "csrf_token": csrf},
+            status_code=status)
+    data = dict(data, current_user=user, csrf_token=csrf)
+    if report_id is not None:
+        data["report_id"] = report_id
+    data.setdefault("elapsed", 0.0)
+    return templates.TemplateResponse(request, "compare_report.html", data, status_code=status)
+
+
+def _execute_compare(filename_a: str, content_a: bytes, filename_b: str, content_b: bytes):
+    """Run both analyses via the supervised worker (spec trim C1: compare
+    REUSES the #104 worker, it does not build a second one).
+
+    Module-level indirection so HTTP/ledger tests can keep the mocked-
+    execution pattern (monkeypatch main._execute_compare) while real
+    subprocess behavior is covered for run_supervised directly. Both
+    inputs were already validated against the FREE limits at POST
+    /compare (trim C7: oversize + compare is out of v1 scope); the
+    worker's oversize ceilings therefore never widen a comparison.
+    Returns (result_a, result_b) in analyze_upload wrapper shape.
+    """
+    from app.analysis_worker import run_supervised
+    return (
+        run_supervised(filename_a, content_a, collect_comparison_evidence=True),
+        run_supervised(filename_b, content_b, collect_comparison_evidence=True),
+    )
+
+
+def _durable_compare(request, key, *, consent_id, digest):
+    """Confirm a comparison consent: replay, admit (-3), run, settle.
+
+    Mirrors _durable_analysis's oversize branch: one reservation covers
+    both analyzer runs, the diff, and persistence (reserve -3, complete
+    on success, full reversal on any failure); a committed result is
+    never reversed on delivery disconnect (replay returns it).
+    """
+    from app.db import SessionLocal
+    from app import auth, credits as C, models as M, analysis_admission as A
+    from app.compare_service import compare_results
+    user, _ = _get_current_user_optional(request)
+    user_id = user.id if user else None
+    if user_id is None:
+        return _comparison_response(request, 401, message="Please log in to compare logs.")
+    item = None
+    worker = uuid_module.uuid4().hex
+    with SessionLocal() as db:
+        try:
+            existing = C.find_operation(db, user_id, "compare_logs", key, digest)
+        except C.AdmissionError as exc:
+            db.rollback()
+            return _comparison_response(request, 409, message=str(exc))
+        if existing is not None:
+            status, data, message = A.replay(db, existing, user_id)
+            rid = str(existing.result_id) if (status == 200 and existing.result_id) else None
+            return _comparison_response(request, status, data, message, report_id=rid)
+        try:
+            C.validate_consent(db, consent_id, user_id, "compare_logs", digest, C.COST_COMPARE)
+        except C.AdmissionError as exc:
+            db.rollback()
+            return _comparison_response(request, 409, message=str(exc))
+        pair = _load_compare_pending(str(consent_id))
+        if pair is None:
+            return _comparison_response(request, 410, message="Upload expired. Please upload the files again.")
+        filename_a, content_a, filename_b, content_b = pair
+        if _compare_pair_hash(filename_a, content_a, filename_b, content_b) != digest:
+            return _comparison_response(request, 409, message="Upload does not match your consent.")
+        try:
+            item = C.admit_paid_operation(db, user_id, "compare_logs", key, digest,
+                                          C.COST_COMPARE, consent_id, worker,
+                                          input_manifest=_client_ip(request))
+        except C.InsufficientCredits:
+            db.rollback()
+            return _comparison_response(request, 402, message=COMPARE_INSUFFICIENT_MESSAGE)
+        except C.AdmissionError as exc:
+            db.rollback()
+            return _comparison_response(request, 409 if "409" in str(exc) else 429, message=str(exc))
+        db.commit()
+        if item.worker_id != worker:
+            status, data, message = A.replay(db, item, user_id)
+            rid = str(item.result_id) if (status == 200 and item.result_id) else None
+            return _comparison_response(request, status, data, message, report_id=rid)
+    result_id = None
+    try:
+        data_a, data_b = _execute_compare(filename_a, content_a, filename_b, content_b)
+        failure = None
+        for data in (data_a, data_b):
+            if isinstance(data, dict) and "error" in data:
+                failure = data.get("message", "Comparison failed.")
+                break
+        with SessionLocal() as db:
+            if failure:
+                C.release_operation(db, item.id, worker, "analysis_failed")
+            else:
+                a_result = dict(data_a["results"])
+                b_result = dict(data_b["results"])
+                # The analyzer saw temp paths; the stored payload names
+                # the user's files (compare_service derives display names
+                # from result["file"]).
+                a_result["file"] = filename_a
+                b_result["file"] = filename_b
+                payload = compare_results(a_result, b_result)
+                result = C.store_result(db, user_id, item.id, payload,
+                                        result_type="comparison", severity=None)
+                C.complete_operation(db, item.id, worker, result.id)
+                result_id = result.id
+            db.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("Comparison execution or settlement failed")
+        try:
+            with SessionLocal() as db:
+                C.release_operation(db, item.id, worker, "execution_failed")
+                db.commit()
+        except Exception:
+            logging.getLogger(__name__).exception("Comparison settlement needs recovery")
+        return _comparison_response(request, 503, message="Comparison could not be delivered. Retry this request to check its outcome.")
+    finally:
+        _delete_paid_pending(str(consent_id))
+    if failure:
+        return _comparison_response(request, 400, message=failure)
+    # Re-read the stored payload so the rendered report is exactly what
+    # persistence holds (integrity-checked, like the historical view).
+    with SessionLocal() as db:
+        result = db.get(M.Result, result_id)
+        payload = C.result_payload(result, user_id=user_id, operation_id=item.id,
+                                   free_request_id=result.free_request_id)
+    return _comparison_response(request, 200, payload, report_id=str(result_id))
+
+
+@app.get("/compare", response_class=HTMLResponse)
+async def compare_form(request: Request):
+    """Comparison upload form (paid feature: login required)."""
+    from fastapi.responses import RedirectResponse
+    from app import auth as auth_helpers
+    from app.db import SessionLocal
+    # Load session.user INSIDE the session: it is a lazy relationship and
+    # accessing it after close raises DetachedInstanceError.
+    with SessionLocal() as db:
+        session = auth_helpers.get_session_from_cookie(db, request)
+        _user = session.user if session else None
+        _csrf = session.csrf_token if session else ""
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "compare.html", {
+        "current_user": _user, "csrf_token": _csrf})
+
+
+@app.post("/compare", response_class=HTMLResponse)
+async def compare_upload(request: Request, file_a: UploadFile | None = File(None),
+                         file_b: UploadFile | None = File(None)):
+    """Validate BOTH uploads before any analysis or reservation (approved
+    spec §5), then quote 3 credits on the generalized consent page.
+
+    Trim C7: both files are subject to the FREE limits even though
+    oversize has shipped — an oversize file is rejected here, never
+    routed into an oversize comparison. Consent creation charges nothing.
+    """
+    from fastapi.responses import RedirectResponse
+    from app.db import SessionLocal
+    from app import auth as auth_helpers
+    from app import credits as _credits_helpers
+    # Load session.user INSIDE the session (see compare_form).
+    with SessionLocal() as db:
+        session = auth_helpers.get_session_from_cookie(db, request)
+        _user = session.user if session else None
+        _csrf = session.csrf_token if session else ""
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+
+    def error(message: str, status: int = 400):
+        return templates.TemplateResponse(request, "compare.html", {
+            "error": message, "current_user": _user, "csrf_token": _csrf},
+            status_code=status)
+
+    if not file_a or not file_a.filename or not file_b or not file_b.filename:
+        return error("Please choose two files: A (before) and B (after).")
+    contents = []
+    for label, upload in (("A", file_a), ("B", file_b)):
+        suffix = Path(upload.filename).suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            return error(
+                f"File {label}: only {', '.join(sorted(ALLOWED_SUFFIXES))} files are supported "
+                f"(got '{suffix or 'no extension'}').")
+        buf = bytearray()
+        read_limit = MAX_OVERSIZE_UPLOAD_BYTES + 1
+        while len(buf) < read_limit:
+            chunk = await upload.read(min(1024 * 1024, read_limit - len(buf)))
+            if not chunk:
+                break
+            buf.extend(chunk)
+        content = bytes(buf)
+        if not content.strip():
+            return error(f"File {label} is empty — nothing to compare.")
+        if _is_binary_content(content):
+            return error(f"File {label} appears to be a binary file, not a text log.")
+        # Free limits only (C7): oversize or unsupported in either file
+        # rejects the whole pair before any analysis runs.
+        if classify_upload_size(len(content), count_original_lines(content)) != "standard":
+            return error(
+                f"File {label} exceeds the free limits (10 MB / 50,000 lines). "
+                "Oversize comparison is not available yet.", status=413)
+        contents.append((upload.filename, content))
+    try:
+        return _paid_consent_page(request, contents[0][0], contents[0][1], _user, _csrf,
+                                  _client_ip(request), operation="compare_logs",
+                                  filename_b=contents[1][0], content_b=contents[1][1])
+    except _credits_helpers.InsufficientCredits:
+        return _comparison_response(request, 402, message=COMPARE_INSUFFICIENT_MESSAGE)
+    except _credits_helpers.AdmissionError as exc:
+        return _comparison_response(request, 409, message=str(exc))
+    except RuntimeError as exc:
+        if "capacity" in str(exc):
+            return error("Pending upload capacity exhausted. Please try again shortly.", status=503)
+        raise
+
+
+@app.post("/compare/paid", response_class=HTMLResponse)
+async def compare_paid(request: Request, consent_id: str = Form(...), file_hash: str = Form(...),
+                       idempotency_key: str = Form(...), csrf_token: str = Form("")):
+    """Confirm a comparison consent (CSRF-protected, like /analyze/paid).
+
+    Runs in a worker thread: the supervised worker's subprocess wait must
+    not block the async event loop on a single-worker deployment.
+    """
+    from app.db import SessionLocal
+    from app import auth, models as M
+    import asyncio
+    import hmac
+    with SessionLocal() as db:
+        session = auth.get_session_from_cookie(db, request)
+        if not session:
+            return _comparison_response(request, 401, message="Please log in to use Power-Up credits.")
+        if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+            return _comparison_response(request, 403, message="Invalid request. Please try again.")
+    try:
+        consent_uuid = uuid_module.UUID(consent_id)
+    except ValueError:
+        return _comparison_response(request, 400, message="Invalid consent.")
+    return await asyncio.to_thread(
+        _durable_compare, request, idempotency_key,
+        consent_id=consent_uuid, digest=file_hash)
+
+
 @app.get("/credits/balance")
 async def credits_balance(request: Request):
     """JSON API: current user's credit balance summary."""
@@ -1463,9 +1823,11 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     per_page = 20
     page = max(1, page)
     offset = (page - 1) * per_page
+    # Issue #102: comparison reports (type "comparison") list alongside
+    # analyses; PDF-only results stay excluded.
     base_q = db.query(models.Result).filter(
         models.Result.user_id == _user.id,
-        models.Result.type == "analysis",
+        models.Result.type.in_(["analysis", "comparison"]),
         models.Result.expires_at > now,
         models.Result.deleted_at.is_(None),
     )
@@ -1516,10 +1878,12 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         rid = _uuid.UUID(result_id)
     except ValueError:
         return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+    # Issue #102: report_kind dispatch — a comparison result renders the
+    # comparison template; report.html itself is unchanged.
     result = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == _user.id,
-        models.Result.type == "analysis",
+        models.Result.type.in_(["analysis", "comparison"]),
         models.Result.deleted_at.is_(None),
     ).first()
     if not result:
@@ -1540,7 +1904,19 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     data["is_historical"] = True
     # Older manifests predate the elapsed field; the template requires it.
     data.setdefault("elapsed", 0.0)
+    if result.type == "comparison":
+        return templates.TemplateResponse(request, "compare_report.html", data)
     return templates.TemplateResponse(request, "report.html", data)
+
+
+def _safe_download_filename(filename: str) -> str:
+    """Header-safe download name: HTTP headers are latin-1, so a report
+    filename containing non-ASCII characters (a comparison filename
+    contains "→") would raise UnicodeEncodeError on download. The stored
+    filename is untouched; only the header value is sanitized."""
+    safe = "".join(ch if (ch.isascii() and (ch.isalnum() or ch in "._-")) else "-"
+                   for ch in filename)
+    return safe or "report"
 
 
 @app.post("/reports/{result_id}/pdf")
@@ -1570,10 +1946,12 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     except ValueError:
         return JSONResponse({"error": "Invalid report ID"}, status_code=400)
 
+    # Issue #102: PDF export also serves comparison reports (2 credits,
+    # standard price); the renderer branches on the result type below.
     result = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == user.id,
-        models.Result.type == "analysis",
+        models.Result.type.in_(["analysis", "comparison"]),
         models.Result.deleted_at.is_(None),
     ).first()
     if not result:
@@ -1616,7 +1994,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                     return Response(
                         content=pdf_bytes,
                         media_type="application/pdf",
-                        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+                        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(filename)}.pdf"'},
                     )
                 except (credits_helpers.AdmissionError, KeyError, ValueError):
                     # Stored PDF is invalid or expired; don't attempt to reuse the
@@ -1656,16 +2034,19 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=409)
 
-    from app.pdf_export import generate_report_pdf
+    from app.pdf_export import generate_report_pdf, generate_comparison_pdf
     try:
-        # Validate source analysis result integrity before generating PDF
+        # Validate source result integrity before generating PDF
         manifest_data = credits_helpers.result_payload(
             result, user_id=user.id,
             operation_id=result.operation_id,
             free_request_id=result.free_request_id,
         )
         filename = manifest_data.get("filename", "report")
-        pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
+        if result.type == "comparison":
+            pdf_bytes = generate_comparison_pdf(result.storage_manifest, filename)
+        else:
+            pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
     except Exception as e:
         try:
             credits_helpers.release_operation(db, op.id, worker_id, str(e)[:200])
@@ -1693,6 +2074,6 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{filename}.pdf"'},
+        headers={"Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(filename)}.pdf"'},
     )
 
