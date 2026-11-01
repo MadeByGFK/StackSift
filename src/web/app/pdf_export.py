@@ -488,8 +488,16 @@ def generate_comparison_pdf(manifest_json: str, filename: str = "comparison") ->
              f"B (after): {b_in.get('filename', '')} — "
              f"{b_in.get('total_lines', 0)} lines, {b_in.get('parsed_lines', 0)} parsed.")
 
-    def entry_line(entry):
-        sev = entry.get("b_highest_severity") or entry.get("a_highest_severity") or ""
+    def entry_line(entry, severity_transition=False):
+        a_sev = entry.get("a_highest_severity") or ""
+        b_sev = entry.get("b_highest_severity") or ""
+        if severity_transition and a_sev and b_sev:
+            # A severity shift is only meaningful as a transition: rendering
+            # just the B severity makes an escalation and an improvement at
+            # the same counts indistinguishable (issue #117).
+            sev = f"{a_sev} -> {b_sev}"
+        else:
+            sev = b_sev or a_sev
         line(f"[{sev}] {entry.get('a_count', 0)} -> {entry.get('b_count', 0)}",
              size=10, style="B")
         para(str(entry.get("template", "")))
@@ -502,7 +510,7 @@ def generate_comparison_pdf(manifest_json: str, filename: str = "comparison") ->
         if not entries:
             para("None.")
         for entry in entries:
-            entry_line(entry)
+            entry_line(entry, severity_transition=(key == "severity_shifts"))
 
     pdf.ln(5)
     pdf.set_font("Helvetica", "I", 9)

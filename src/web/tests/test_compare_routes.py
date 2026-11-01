@@ -321,6 +321,43 @@ def test_worker_compare_evidence(monkeypatch, tmp_path):
     assert payload["no_material_differences"] is True
 
 
+def test_comparison_pdf_renders_severity_transitions():
+    """Issue #117: a severity-shift entry must render its A-to-B transition.
+
+    An escalation (WARN -> ERROR) and an improvement (CRITICAL -> ERROR) at
+    identical counts must produce distinct, correct PDF text; rendering only
+    the B severity made them indistinguishable.
+    """
+    import json
+
+    def shift(template, a_sev, b_sev):
+        return {
+            "template": template,
+            "a_count": 6,
+            "b_count": 6,
+            "a_highest_severity": a_sev,
+            "b_highest_severity": b_sev,
+        }
+
+    payload = {
+        "inputs": {"a": {"filename": "a.log"}, "b": {"filename": "b.log"}},
+        "summary": {"new": 0, "resolved": 0, "volume_changed": 0,
+                    "severity_shifted": 2},
+        "new": [],
+        "resolved": [],
+        "volume_changes": [],
+        "severity_shifts": [
+            shift("disk usage warning escalated", "WARN", "ERROR"),
+            shift("critical failure improved", "CRITICAL", "ERROR"),
+        ],
+        "shared": [],
+    }
+    pdf = generate_comparison_pdf(json.dumps(payload), "a.log -> b.log")
+    assert pdf.startswith(b"%PDF")
+    assert b"[WARN -> ERROR] 6 -> 6" in pdf
+    assert b"[CRITICAL -> ERROR] 6 -> 6" in pdf
+
+
 def test_comparison_pdf_contains_all_change_entries():
     a = analyze_upload("a.log", LOG_A, collect_comparison_evidence=True)["results"]
     b = analyze_upload("b.log", LOG_B, collect_comparison_evidence=True)["results"]
