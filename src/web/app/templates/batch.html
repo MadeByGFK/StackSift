@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift — Batch analysis</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <nav class="nav-links">
+      <a href="/reports">My Reports</a>
+    </nav>
+  </header>
+
+  <section>
+    <h1>Batch analysis</h1>
+    <p>Upload 2 to 5 log files and get ONE combined report, in upload
+    order. Pricing: the first file follows the normal rules (your free
+    hourly allowance if one is available, otherwise 1 credit), plus
+    1 credit for each additional file. The full total is quoted before
+    you confirm, and nothing is charged if the batch fails. Every file
+    must satisfy the free limits (10 MB / 50,000 lines each). For a
+    single file, use the <a href="/">single-file upload</a> instead.</p>
+    {% if error %}
+    <div class="error" role="alert">{{ error }}</div>
+    {% endif %}
+    {% if buy_credits %}
+    <p><a href="/credits" class="buy-credits-cta">Buy credits</a></p>
+    {% endif %}
+    <form method="post" action="/batch" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="files">Log files (2–5, in order)</label>
+        <input type="file" id="files" name="files" multiple accept=".log,.txt,.text" required>
+      </div>
+      <button type="submit">Get batch quote</button>
+    </form>
+  </section>
+</div>
+</body>
+</html>

@@ -244,8 +244,29 @@ async def security_headers(request: Request, call_next):
 _OVERSIZE_GUARD_BYTES = MAX_OVERSIZE_UPLOAD_BYTES + 1024 * 1024
 
 
+# Issue #103: batch pre-multipart body guard — 50 MiB of file data
+# (5 files x the 10 MiB free ceiling) plus 1 MiB of multipart overhead.
+_BATCH_GUARD_BYTES = 51 * 1024 * 1024
+
+
 @app.middleware("http")
 async def oversize_body_guard(request: Request, call_next):
+    if (request.method == "POST" and request.url.path == "/batch"
+            and request.headers.get("content-length")):
+        try:
+            declared_batch = int(request.headers["content-length"])
+        except ValueError:
+            declared_batch = 0
+        if declared_batch > _BATCH_GUARD_BYTES:
+            _user, _csrf = _get_current_user_optional(request)
+            return templates.TemplateResponse(
+                request,
+                "batch.html",
+                {"error": "Batch too large. A batch is at most 5 files of "
+                          "10 MB each (50 MB total).",
+                 "current_user": _user, "csrf_token": _csrf},
+                status_code=413,
+            )
     if (request.method == "POST" and request.url.path == "/analyze"
             and request.headers.get("content-length")):
         try:
@@ -1782,6 +1803,557 @@ async def compare_paid(request: Request, consent_id: str = Form(...), file_hash:
         consent_id=consent_uuid, digest=file_hash)
 
 
+# ---------------------------------------------------------------------------
+# Issue #103: Batch analysis (paid) — 2-5 files, ONE combined report.
+#
+# Pricing (founder-ruled, trim B1): total = (0 if the first file can use
+# the free hourly allowance else 1) + (N-1) x 1 credits. One reservation,
+# one completion, full release on any failure; an admitted first-file
+# free attempt is NOT restored on failure (trim B8). Execution reuses
+# the #104 supervised worker (trim B3) under a batch-specific 150s
+# outer wall deadline; per-file limits are the FREE limits (trim B9).
+# ---------------------------------------------------------------------------
+
+from app.batch_service import MAX_BATCH_FILES as _MAX_BATCH_FILES
+from app.batch_service import MIN_BATCH_FILES as _MIN_BATCH_FILES
+
+BATCH_OUTER_DEADLINE_SECONDS = 150
+
+
+def _batch_insufficient_message(file_count: int, total: int) -> str:
+    return (f"This {file_count}-file batch costs {total} credits. "
+            "Insufficient eligible Power-Up credits.")
+
+
+def _batch_response(request, status, data=None, message=None, *, report_id=None,
+                    buy_credits=False):
+    """Render a batch outcome: the combined report on success, the batch
+    form with an error otherwise."""
+    user, csrf = _get_current_user_optional(request)
+    if data is None:
+        return templates.TemplateResponse(request, "batch.html", {
+            "error": message, "current_user": user, "csrf_token": csrf,
+            "buy_credits": buy_credits}, status_code=status)
+    data = dict(data, current_user=user, csrf_token=csrf)
+    if report_id is not None:
+        data["report_id"] = report_id
+    data.setdefault("elapsed", 0.0)
+    return templates.TemplateResponse(request, "batch_report.html", data, status_code=status)
+
+
+def _batch_bundle_hash(files) -> str:
+    """Ordered bundle fingerprint binding a batch consent to its files.
+
+    Deterministic serialization of (ordinal, display filename, redacted
+    content digest) per file; duplicate filenames stay distinct by
+    ordinal, and reordering changes the hash.
+    """
+    from app.analysis_admission import fingerprint as _fingerprint
+    from app import credits as _credits_helpers
+    manifest = [[ordinal, filename, _fingerprint(filename, content)]
+                for ordinal, filename, content in files]
+    return _credits_helpers.hash_input(json.dumps(manifest).encode("utf-8"))
+
+
+def _store_batch_pending(consent_id: str, files, counts) -> None:
+    """Store the versioned ordinal-indexed bundle envelope.
+
+    Layout under the existing pending dir, keyed by the consent UUID
+    (same path/mode/TTL discipline as _store_paid_pending): one JSON
+    header line {version, files:[{ordinal, filename, length,
+    byte_count, line_count}]} followed by the redacted contents in
+    upload order. ``counts`` carries the SERVER-measured original
+    byte/line counts per file for confirmation-time revalidation.
+    Never routed through the single-file pending loader.
+    """
+    header = {
+        "version": 1,
+        "files": [
+            {"ordinal": ordinal, "filename": filename, "length": len(content),
+             "byte_count": counts[i][0], "line_count": counts[i][1]}
+            for i, (ordinal, filename, content) in enumerate(files)
+        ],
+    }
+    envelope_size = len(json.dumps(header).encode("utf-8")) + 1 + sum(
+        len(content) for _, _, content in files)
+    path = _paid_pending_path(consent_id)
+    with _PENDING_LOCK:
+        cleanup_pending_uploads()
+        if (sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin"))
+                + envelope_size > _PAID_PENDING_BUDGET):
+            raise RuntimeError("Pending upload capacity exhausted")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(json.dumps(header).encode("utf-8") + b"\n")
+            for _, _, content in files:
+                f.write(content)
+
+
+def _load_batch_pending(consent_id: str):
+    """Load a bundle envelope; None on missing/expired/corrupt.
+
+    Returns a list of (ordinal, filename, content, byte_count,
+    line_count) in upload order.
+    """
+    path = _paid_pending_path(consent_id)
+    try:
+        stat = os.stat(path)
+        if datetime.now(timezone.utc).timestamp() - stat.st_mtime > _PAID_PENDING_TTL:
+            os.unlink(path)
+            return None
+        with open(path, "rb") as f:
+            raw = f.read()
+        nl = raw.index(b"\n")
+        header = json.loads(raw[:nl].decode("utf-8"))
+        if not isinstance(header, dict) or header.get("version") != 1:
+            return None
+        entries = header["files"]
+        pos = nl + 1
+        out = []
+        for entry in entries:
+            length = int(entry["length"])
+            content = raw[pos:pos + length]
+            if len(content) != length:
+                return None
+            pos += length
+            out.append((int(entry["ordinal"]), entry["filename"], content,
+                        int(entry["byte_count"]), int(entry["line_count"])))
+        if pos != len(raw):
+            return None
+        return out
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _batch_consent_page(request: Request, validated, user, csrf_token: str, ip: str,
+                        *, quote=None):
+    """Quote a batch and return the generalized consent page (402).
+
+    ``validated`` is a list of dicts {ordinal, filename, content,
+    byte_count, line_count} holding the ORIGINAL uploads (already
+    validated against the free limits). Redaction happens here, before
+    fingerprinting and disk persistence — raw logs are never written.
+    Consent creation charges nothing, claims no allowance, and creates
+    no reservation. Raises InsufficientCredits (eligible < total),
+    RuntimeError on pending-capacity exhaustion.
+    """
+    import os as _os
+    if not _os.environ.get("DATABASE_URL"):
+        raise RuntimeError("no database")
+    from app.db import SessionLocal
+    from app import credits as credits_helpers
+    from app import batch_admission
+    from app.redact import redact_secrets
+
+    files = []
+    counts = []
+    try:
+        for entry in validated:
+            text = entry["content"].decode("utf-8", errors="replace")
+            redacted = redact_secrets(text).encode("utf-8")
+            files.append((entry["ordinal"], entry["filename"], redacted))
+            counts.append((entry["byte_count"], entry["line_count"]))
+    except Exception:
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(
+            content="<h1>Upload processing error</h1><p>Could not securely process your files. Please try again.</p>",
+            status_code=500,
+        )
+    n = len(files)
+    file_hash = _batch_bundle_hash(files)
+    db = SessionLocal()
+    try:
+        if quote is None:
+            total, first_cost, free_available = batch_admission.batch_price(db, ip, n)
+        else:
+            total, first_cost, free_available = quote
+        summary = credits_helpers.get_balance_summary(db, user.id)
+        if summary["eligible"] < total:
+            raise credits_helpers.InsufficientCredits("insufficient credits")
+        with _PENDING_LOCK:
+            consent = credits_helpers.create_consent(
+                db, user.id, "batch", file_hash, total)
+            db.flush()
+            consent_id = str(consent.id)
+            try:
+                _store_batch_pending(consent_id, files, counts)
+            except Exception:
+                db.rollback()
+                raise
+            db.commit()
+    finally:
+        db.close()
+
+    first_line = ("free hourly allowance" if free_available
+                  else "1 credit (free allowance used)")
+    total_bytes = sum(c[0] for c in counts)
+    context = {
+        "current_user": user,
+        "csrf_token": csrf_token,
+        "filename": f"Batch \u2014 {n} files",
+        "file_list": [f"{ordinal}. {filename}" for ordinal, filename, _ in files],
+        "file_hash": file_hash,
+        "consent_id": consent_id,
+        "cost": total,
+        "balance": summary["balance"],
+        "eligible": summary["eligible"],
+        "operation_type": "batch",
+        "heading": "Batch analysis",
+        "intro": (f"{n} files. First file: {first_line}. "
+                  f"{n - 1} additional file{'s' if n - 1 != 1 else ''} "
+                  f"\u00d7 1 credit. Total: {total} credits."),
+        "size_line": f"{total_bytes:,} bytes across {n} files, in upload order",
+        "limits_line": "Free limits apply to every file (10 MB / 50,000 lines each). Duplicate filenames are separate files, told apart by their number.",
+        "cost_label": f"{total} credit{'s' if total != 1 else ''}",
+        "cost_sentence": "This batch produces one combined report.",
+        "confirm_label": f"Analyze {n} files \u2014 use {total} credits",
+        "confirm_action": "/batch/paid",
+        "cancel_label": "Cancel",
+        "note": ("All credits are released if the batch fails, but an admitted "
+                 "first-file free attempt is counted even if the batch fails and "
+                 "is not restored. This consent screen consumes no allowance. "
+                 "Results are available for 7 days. PDF export of the combined "
+                 "report costs 2 credits once, not per file."),
+    }
+    return templates.TemplateResponse(
+        request, "paid_consent.html", context, status_code=402)
+
+
+def _execute_batch(files):
+    """Run the batch sequentially in upload order via the shared
+    supervised worker (trim B3: #104's run_supervised, NOT a new
+    worker), under the batch-specific 150-second outer wall deadline.
+
+    ``files`` is a list of (ordinal, filename, content). Returns one
+    analyze_upload-shaped dict per file, in order; a file whose worker
+    run fails carries an error dict, and a blown outer deadline turns
+    the current file into a timeout error so settlement releases the
+    whole reservation.
+    """
+    import time as _time
+    from app.analysis_worker import run_supervised
+    start = _time.monotonic()
+    results = []
+    for ordinal, filename, content in files:
+        remaining = BATCH_OUTER_DEADLINE_SECONDS - (_time.monotonic() - start)
+        if remaining <= 0:
+            results.append({
+                "error": "analysis_timeout",
+                "message": f"Batch exceeded the {BATCH_OUTER_DEADLINE_SECONDS}s "
+                           "outer deadline before this file finished.",
+                "filename": filename,
+            })
+            break
+        results.append(run_supervised(
+            filename, content, timeout=max(1, min(60, int(remaining)))))
+    return results
+
+
+def _durable_batch(request, key, *, consent_id, digest):
+    """Confirm a batch consent: replay, re-quote check, admit once
+    (reservation + free-first claim in one transaction), run, settle.
+
+    Mirrors the compare/oversize settlement discipline: replay before
+    consent validation, one reservation for the whole bundle, full
+    reversal on any failure/exception, a committed result never
+    reversed.
+    """
+    from app.db import SessionLocal
+    from app import credits as C, models as M, analysis_admission as A
+    from app import batch_admission, batch_service
+    user, csrf = _get_current_user_optional(request)
+    if user is None:
+        return _batch_response(request, 401, message="Please log in to use Power-Up credits.")
+    user_id = user.id
+    ip = _client_ip(request)
+    worker = uuid_module.uuid4().hex
+    operation_id = None
+    total_cost = None
+    first_cost = None
+    bundle = None
+    with SessionLocal() as db:
+        try:
+            existing = C.find_operation(db, user_id, "batch", key, digest)
+        except C.AdmissionError as exc:
+            db.rollback()
+            return _batch_response(request, 409, message=str(exc))
+        if existing is not None:
+            status, data, message = A.replay(db, existing, user_id)
+            rid = str(existing.result_id) if (status == 200 and existing.result_id) else None
+            return _batch_response(request, status, data, message, report_id=rid)
+        consent_row = db.get(M.Consent, consent_id, populate_existing=True)
+        quoted_total = consent_row.max_cost if consent_row is not None else None
+        bundle = _load_batch_pending(str(consent_id))
+        if bundle is None:
+            return _batch_response(request, 410, message="Upload expired. Please upload the files again.")
+        files = [(ordinal, filename, content) for ordinal, filename, content, _, _ in bundle]
+        if _batch_bundle_hash(files) != digest:
+            return _batch_response(request, 409, message="Upload does not match your consent.")
+        # Revalidate every free limit from the SERVER-owned counts
+        # recorded at intake, never from client fields (trim B9).
+        for ordinal, filename, content, byte_count, line_count in bundle:
+            problem = None
+            if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
+                problem = "unsupported file type"
+            elif not content.strip():
+                problem = "file is empty"
+            elif _is_binary_content(content):
+                problem = "file appears to be binary, not a text log"
+            elif byte_count > MAX_BYTES:
+                problem = "exceeds the 10 MB free limit"
+            elif line_count > 50_000:
+                problem = "exceeds the 50,000-line free limit"
+            if problem:
+                return _batch_response(
+                    request, 400,
+                    message=f"File {ordinal} ({filename}): {problem}. "
+                            "No files were analyzed and no credits were reserved.")
+        # Consent validation as its own step (the oversize pattern):
+        # owner/type/hash/expiry/consumption failures are 409 here,
+        # before quota or ledger admission maps its own errors.
+        try:
+            C.validate_consent(db, consent_id, user_id, "batch", digest,
+                               quoted_total if quoted_total is not None else 0)
+        except C.AdmissionError as exc:
+            db.rollback()
+            return _batch_response(request, 409, message=str(exc))
+        try:
+            item = batch_admission.admit_batch_operation(
+                db, user_id, key, digest, consent_id, worker, ip, len(bundle))
+        except batch_admission.RequoteRequired as rq:
+            db.rollback()
+            # Invalidate the old quote, then issue a replacement consent
+            # at the recomputed total for the same bundle; run nothing.
+            with SessionLocal() as db2:
+                stale = db2.get(M.Consent, consent_id)
+                if stale is not None:
+                    stale.expires_at = C._utcnow()
+                    db2.commit()
+            _delete_paid_pending(str(consent_id))
+            validated = [
+                {"ordinal": ordinal, "filename": filename, "content": content,
+                 "byte_count": byte_count, "line_count": line_count}
+                for ordinal, filename, content, byte_count, line_count in bundle
+            ]
+            try:
+                return _batch_consent_page(request, validated, user, csrf, ip)
+            except C.InsufficientCredits:
+                return _analysis_response(
+                    request, 402,
+                    message=_batch_insufficient_message(len(bundle), rq.new_total),
+                    buy_credits=True)
+            except RuntimeError:
+                return _batch_response(
+                    request, 503,
+                    message="Pending upload capacity exhausted. Please try again shortly.")
+        except C.InsufficientCredits:
+            db.rollback()
+            return _analysis_response(
+                request, 402,
+                message=_batch_insufficient_message(
+                    len(bundle), quoted_total if quoted_total is not None else 0),
+                buy_credits=True)
+        except C.AdmissionError as exc:
+            db.rollback()
+            return _batch_response(request, 409 if "409" in str(exc) else 429,
+                                   message=str(exc))
+        except Exception:
+            db.rollback()
+            logging.getLogger(__name__).exception("Batch admission failed")
+            return _batch_response(request, 503, message="Could not start the batch. Please try again shortly.")
+        operation_id = item.id
+        total_cost = item.cost
+        first_cost = 0 if item.free_allowance_claim else C.COST_ADDITIONAL_ANALYSIS
+        created = (item.worker_id == worker)
+        db.commit()
+        if not created:
+            status, data, message = A.replay(db, item, user_id)
+            rid = str(item.result_id) if (status == 200 and item.result_id) else None
+            return _batch_response(request, status, data, message, report_id=rid)
+    result_id = None
+    failure = None
+    try:
+        payloads = _execute_batch(
+            [(ordinal, filename, content) for ordinal, filename, content, _, _ in bundle])
+        if len(payloads) != len(bundle):
+            failure = "Batch execution stopped before every file was analyzed."
+        else:
+            for (ordinal, filename, *_), payload in zip(bundle, payloads):
+                if isinstance(payload, dict) and "error" in payload:
+                    failure = (f"File {ordinal} ({filename}): "
+                               f"{payload.get('message', 'Analysis failed.')}")
+                    break
+        with SessionLocal() as db:
+            if failure:
+                C.release_operation(db, operation_id, worker, "analysis_failed")
+            else:
+                payload = batch_service.build_batch_payload(
+                    [(ordinal, filename, payload)
+                     for (ordinal, filename, *_), payload in zip(bundle, payloads)],
+                    pricing={"file_count": len(bundle),
+                             "first_file_cost": first_cost,
+                             "additional_file_cost": C.COST_BATCH_ADDITIONAL_FILE,
+                             "total_cost": total_cost})
+                result = C.store_result(
+                    db, user_id, operation_id, payload, result_type="analysis",
+                    severity=batch_service.batch_severity(
+                        payload["summary"]["level_counts"]))
+                C.complete_operation(db, operation_id, worker, result.id)
+                result_id = result.id
+            db.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("Batch execution or settlement failed")
+        try:
+            with SessionLocal() as db:
+                C.release_operation(db, operation_id, worker, "execution_failed")
+                db.commit()
+        except Exception:
+            logging.getLogger(__name__).exception("Batch settlement needs recovery")
+        return _batch_response(request, 503, message="Batch could not be delivered. Retry this request to check its outcome.")
+    finally:
+        _delete_paid_pending(str(consent_id))
+    if failure:
+        return _batch_response(request, 400, message=failure)
+    with SessionLocal() as db:
+        result = db.get(M.Result, result_id)
+        payload = C.result_payload(result, user_id=user_id, operation_id=operation_id,
+                                   free_request_id=result.free_request_id)
+    return _batch_response(request, 200, payload, report_id=str(result_id))
+
+
+@app.get("/batch", response_class=HTMLResponse)
+async def batch_form(request: Request):
+    """Batch upload form (paid feature: login required)."""
+    from fastapi.responses import RedirectResponse
+    from app import auth as auth_helpers
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        session = auth_helpers.get_session_from_cookie(db, request)
+        _user = session.user if session else None
+        _csrf = session.csrf_token if session else ""
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "batch.html", {
+        "current_user": _user, "csrf_token": _csrf})
+
+
+@app.post("/batch", response_class=HTMLResponse)
+async def batch_intake(request: Request, files: list[UploadFile] = File(...),
+                       csrf_token: str = Form("")):
+    """Validate ALL uploads before any analysis or reservation, then
+    quote the batch total on the generalized consent page.
+
+    Anonymous POSTs get 401 (no consent, pending bundle, or reservation).
+    Any invalid file rejects the WHOLE batch with 400 naming its
+    ordinal/name; no analyzer call, reservation, quota claim, result,
+    or pending artifact survives a validation failure.
+    """
+    from app.db import SessionLocal
+    from app import auth as auth_helpers
+    from app import credits as _credits_helpers
+    from app import batch_admission
+    with SessionLocal() as db:
+        session = auth_helpers.get_session_from_cookie(db, request)
+        _user = session.user if session else None
+        _csrf = session.csrf_token if session else ""
+    if not session:
+        return _batch_response(request, 401, message="Please log in to analyze a batch.")
+
+    def error(message: str, status: int = 400):
+        return templates.TemplateResponse(request, "batch.html", {
+            "error": message, "current_user": _user, "csrf_token": _csrf},
+            status_code=status)
+
+    no_charge = " No files were analyzed and no credits were reserved."
+    if files is None or len(files) < _MIN_BATCH_FILES:
+        return error(f"A batch needs at least {_MIN_BATCH_FILES} files. "
+                     "For one file, use the single-file upload on the home page." + no_charge)
+    if len(files) > _MAX_BATCH_FILES:
+        return error(f"A batch is at most {_MAX_BATCH_FILES} files; "
+                     f"you selected {len(files)}." + no_charge)
+    validated = []
+    for ordinal, upload in enumerate(files, start=1):
+        filename = upload.filename or ""
+        if not filename:
+            return error(f"File {ordinal}: please choose a file." + no_charge)
+        suffix = Path(filename).suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            return error(
+                f"File {ordinal} ({filename}): only "
+                f"{', '.join(sorted(ALLOWED_SUFFIXES))} files are supported "
+                f"(got '{suffix or 'no extension'}')." + no_charge)
+        buf = bytearray()
+        read_limit = MAX_BYTES + 1
+        while len(buf) < read_limit:
+            chunk = await upload.read(min(1024 * 1024, read_limit - len(buf)))
+            if not chunk:
+                break
+            buf.extend(chunk)
+        content = bytes(buf)
+        if not content.strip():
+            return error(f"File {ordinal} ({filename}): file is empty \u2014 nothing to analyze." + no_charge)
+        if _is_binary_content(content):
+            return error(f"File {ordinal} ({filename}): this appears to be a binary file, not a text log." + no_charge)
+        if len(content) > MAX_BYTES:
+            return error(f"File {ordinal} ({filename}): exceeds the 10 MB free limit "
+                         f"({MAX_BYTES // (1024 * 1024)} MB per file)." + no_charge)
+        line_count = count_original_lines(content)
+        if line_count > 50_000:
+            return error(f"File {ordinal} ({filename}): exceeds the 50,000-line limit." + no_charge)
+        validated.append({"ordinal": ordinal, "filename": filename,
+                          "content": content, "byte_count": len(content),
+                          "line_count": line_count})
+    ip = _client_ip(request)
+    try:
+        with SessionLocal() as db:
+            quote = batch_admission.batch_price(db, ip, len(validated))
+    except Exception:
+        return error("Batch analysis is temporarily unavailable. Please try again shortly.",
+                     status=503)
+    total = quote[0]
+    try:
+        return _batch_consent_page(request, validated, _user, _csrf, ip, quote=quote)
+    except _credits_helpers.InsufficientCredits:
+        return _analysis_response(
+            request, 402, message=_batch_insufficient_message(len(validated), total),
+            buy_credits=True)
+    except _credits_helpers.AdmissionError as exc:
+        return _batch_response(request, 409, message=str(exc))
+    except RuntimeError as exc:
+        if "capacity" in str(exc):
+            return error("Pending upload capacity exhausted. Please try again shortly.",
+                         status=503)
+        return error("Batch analysis is temporarily unavailable. Please try again shortly.",
+                     status=503)
+
+
+@app.post("/batch/paid", response_class=HTMLResponse)
+async def batch_paid(request: Request, consent_id: str = Form(...), file_hash: str = Form(...),
+                     idempotency_key: str = Form(...), csrf_token: str = Form("")):
+    """Confirm a batch consent (CSRF-protected, like /analyze/paid).
+
+    Runs in a worker thread: the supervised worker's subprocess wait
+    must not block the async event loop on a single-worker deployment.
+    """
+    from app.db import SessionLocal
+    from app import auth
+    import asyncio
+    import hmac
+    with SessionLocal() as db:
+        session = auth.get_session_from_cookie(db, request)
+        if not session:
+            return _batch_response(request, 401, message="Please log in to use Power-Up credits.")
+        if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+            return _batch_response(request, 403, message="Invalid request. Please try again.")
+    try:
+        consent_uuid = uuid_module.UUID(consent_id)
+    except ValueError:
+        return _batch_response(request, 400, message="Invalid consent.")
+    return await asyncio.to_thread(
+        _durable_batch, request, idempotency_key,
+        consent_id=consent_uuid, digest=file_hash)
+
+
 @app.get("/credits/balance")
 async def credits_balance(request: Request):
     """JSON API: current user's credit balance summary."""
@@ -1906,6 +2478,11 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     data.setdefault("elapsed", 0.0)
     if result.type == "comparison":
         return templates.TemplateResponse(request, "compare_report.html", data)
+    # Issue #103: a batch result is type "analysis" with a batch
+    # discriminator in its manifest; only it dispatches to the batch
+    # template — report.html itself is unchanged.
+    if data.get("report_kind") == "batch":
+        return templates.TemplateResponse(request, "batch_report.html", data)
     return templates.TemplateResponse(request, "report.html", data)
 
 
@@ -2034,7 +2611,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=409)
 
-    from app.pdf_export import generate_report_pdf, generate_comparison_pdf
+    from app.pdf_export import generate_report_pdf, generate_comparison_pdf, generate_batch_pdf
     try:
         # Validate source result integrity before generating PDF
         manifest_data = credits_helpers.result_payload(
@@ -2043,7 +2620,12 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
             free_request_id=result.free_request_id,
         )
         filename = manifest_data.get("filename", "report")
-        if result.type == "comparison":
+        if manifest_data.get("report_kind") == "batch":
+            # Issue #103 (trim B5): ONE 2-credit export for the whole
+            # combined artifact — the charge above is the standard
+            # single COST_PDF admission for this operation.
+            pdf_bytes = generate_batch_pdf(result.storage_manifest, filename)
+        elif result.type == "comparison":
             pdf_bytes = generate_comparison_pdf(result.storage_manifest, filename)
         else:
             pdf_bytes = generate_report_pdf(result.storage_manifest, filename)
