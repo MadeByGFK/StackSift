@@ -54,7 +54,31 @@ def _as_aware(dt: datetime | None) -> datetime | None:
 PRICING_VERSION = 1
 COST_ADDITIONAL_ANALYSIS = 1  # CONFIRMED
 COST_PDF = 2  # Proposed (Phase 2B)
-COST_BATCH = 5  # Proposed (gated)
+# Issue #103 (trim B1): the obsolete fixed COST_BATCH = 5 proposal is
+# REMOVED. Founder-ruled batch pricing (2026-10-24) is per-file: the
+# first file under the normal rules (free hourly allowance if available,
+# otherwise COST_ADDITIONAL_ANALYSIS) plus 1 credit per additional file.
+COST_BATCH_ADDITIONAL_FILE = 1
+
+
+def batch_total_cost(file_count: int, free_first_available: bool) -> int:
+    """Server-side batch price (issue #103): totals 1..5 for N=2..5.
+
+    total = (0 if free_first_available else COST_ADDITIONAL_ANALYSIS)
+            + (file_count - 1) * COST_BATCH_ADDITIONAL_FILE
+    """
+    if not 2 <= file_count <= 5:
+        raise ValueError("batch file count out of range")
+    first = 0 if free_first_available else COST_ADDITIONAL_ANALYSIS
+    return first + (file_count - 1) * COST_BATCH_ADDITIONAL_FILE
+# Issue #104: founder-ruled price (2026-10-24) — 3 credits per oversize
+# run, charged only on success (reserve during execution, net -3 on
+# success, full reversal on failure; never re-debit a committed completion).
+COST_OVERSIZE_ANALYSIS = 3
+# Issue #102: founder-ruled price (2026-10-24) — 3 credits per comparison,
+# charged only on success, even when the pair is identical or shows no
+# material differences (disclosed on the consent page, spec trim C10).
+COST_COMPARE = 3
 
 # Signup reward (approved 2026-10-15)
 SIGNUP_REWARD_CREDITS = 3
@@ -67,6 +91,11 @@ DEFAULT_GLOBAL_CONCURRENT_LIMIT = 20
 RATE_LIMIT_PAID_ANALYSIS = 30
 RATE_LIMIT_PDF = 10
 RATE_LIMIT_BATCH = 5
+# Issue #104, slice 1 (trim T3): explicit 30/hour policy for oversize, so
+# it never relies on _consume_rate()'s fallback.
+RATE_LIMIT_OVERSIZE_ANALYSIS = 30
+# Issue #102: explicit 30/hour policy for compare, same reason.
+RATE_LIMIT_COMPARE = 30
 
 # Consent validity
 CONSENT_TTL = timedelta(minutes=15)
@@ -381,19 +410,31 @@ def _ensure_capacity_scope(db: Session, scope_key: str, limit: int) -> models.Ca
     return scope
 
 
-def _acquire_capacity(db: Session, user_id: uuid.UUID) -> list[str]:
+def _acquire_capacity(db: Session, user_id: uuid.UUID,
+                      extra_scopes: list[tuple[str, int]] | None = None) -> list[str]:
     """Acquire one unit of user + global paid-operation capacity.
 
     Returns the scope keys acquired. Raises AdmissionError if at limit.
     Lock order: lexicographic scope-key order (v11.1 Section 4.1).
+
+    extra_scopes (issue #104, slice 1, trim T3): additional
+    (scope_key, limit) pairs acquired in the same lock order and released
+    through the same permit memberships as the standard scopes. Oversize
+    passes [("global:oversize", 1)] for its worker pool of size 1. The
+    durable ledger-backed capacity scope is slice 2 and is NOT built here;
+    this scope row is the slice-1 single-replica pool, and a multi-replica
+    finding blocks production promotion, not the staging merge.
     """
     user_scope = f"user:{user_id}:paid"
     global_scope = "global:paid"
-    scopes = sorted([global_scope, user_scope])
+    wanted = {global_scope: DEFAULT_GLOBAL_CONCURRENT_LIMIT,
+              user_scope: DEFAULT_USER_CONCURRENT_LIMIT}
+    for scope_key, limit in (extra_scopes or []):
+        wanted[scope_key] = limit
 
     acquired = []
-    for scope_key in scopes:
-        limit = DEFAULT_GLOBAL_CONCURRENT_LIMIT if scope_key == global_scope else DEFAULT_USER_CONCURRENT_LIMIT
+    for scope_key in sorted(wanted):
+        limit = wanted[scope_key]
         scope = _ensure_capacity_scope(db, scope_key, limit)
         free_active = db.scalar(select(func.count()).select_from(models.FreeRequest).where(
             models.FreeRequest.status == "in_progress")) if scope_key == global_scope else 0
@@ -443,6 +484,8 @@ def admit_paid_operation(
     consent_id: uuid.UUID,
     worker_id: str,
     input_manifest: str | None = None,
+    extra_scopes: list[tuple[str, int]] | None = None,
+    free_allowance_claim: bool = False,
 ) -> models.Operation:
     """Atomically admit a paid operation.
 
@@ -469,11 +512,34 @@ def admit_paid_operation(
             raise AdmissionError("idempotency key reused with different input (409)")
         return existing
 
-    _ensure_capacity_scope(db, "global:paid", DEFAULT_GLOBAL_CONCURRENT_LIMIT)
+    # Idempotency-serialization fix (issue #104 follow-up, PR #111
+    # head-3 review): lock the lexicographically-FIRST capacity scope
+    # BEFORE the authoritative identity lookup, without consuming
+    # capacity. Two concurrent same-key confirmations previously both
+    # passed the unlocked lookup, then serialized on the oversize row
+    # lock inside _acquire_capacity, and the second failed capacity
+    # (429) instead of replaying the now-existing operation (202),
+    # breaking the documented idempotent contract. With the first
+    # scope locked first, the second transaction blocks on that row
+    # until the first commits, so its lookup below sees the existing
+    # operation and replays it. Lock order is preserved: the first
+    # scope is locked first here, and _acquire_capacity below locks
+    # scopes in the same sorted order. For standard operations the
+    # first scope is "global:paid" (as before); for oversize it is
+    # "global:oversize", which sorts before "global:paid" and was
+    # previously left unlocked by the old skip-the-pre-lock rule.
+    _wanted_scopes = {
+        "global:paid": DEFAULT_GLOBAL_CONCURRENT_LIMIT,
+        f"user:{user_id}:paid": DEFAULT_USER_CONCURRENT_LIMIT,
+    }
+    for scope_key, limit in (extra_scopes or []):
+        _wanted_scopes[scope_key] = limit
+    _first_scope = sorted(_wanted_scopes)[0]
+    _ensure_capacity_scope(db, _first_scope, _wanted_scopes[_first_scope])
     existing = find_operation(db, user_id, operation_type, idempotency_key, request_hash)
     if existing is not None:
         return existing
-    acquired_scopes = _acquire_capacity(db, user_id)
+    acquired_scopes = _acquire_capacity(db, user_id, extra_scopes=extra_scopes)
 
     try:
         if has_active_restriction(db, user_id, "spend"):
@@ -493,6 +559,7 @@ def admit_paid_operation(
             request_hash=request_hash,
             input_manifest=input_manifest,
             cost=cost,
+            free_allowance_claim=bool(free_allowance_claim),
             pricing_version=PRICING_VERSION,
             consent_id=consent.id,
             status="reserved",
@@ -551,6 +618,8 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
     """Atomically consume one unit from a rate bucket. Raises AdmissionError if over limit."""
     limit = {
         "paid:additional_analysis": RATE_LIMIT_PAID_ANALYSIS,
+        "paid:oversize_analysis": RATE_LIMIT_OVERSIZE_ANALYSIS,
+        "paid:compare_logs": RATE_LIMIT_COMPARE,
         "paid:pdf": RATE_LIMIT_PDF,
         "paid:batch": RATE_LIMIT_BATCH,
     }.get(policy, 30)
@@ -667,15 +736,21 @@ def outcome_severity(data):
     return "ok"
 
 
-def store_result(db, user_id, operation_id, data):
+def store_result(db, user_id, operation_id, data, *, result_type="analysis", severity="__default__"):
     # Obtain domain locks BEFORE inserting the result's operation FK.
     op, _, _ = _lock_operation(db, operation_id)
     if op.status != "reserved":
         raise AdmissionError("operation is no longer reserved")
     raw = json.dumps({k: v for k, v in data.items() if k not in ("current_user", "csrf_token")}, default=str)
     now = _utcnow()
-    result = models.Result(user_id=user_id, operation_id=operation_id, type="analysis",
-        severity=outcome_severity(data),
+    # Issue #102: comparison results store as type "comparison" with NULL
+    # severity (no single outcome severity exists for a diff; the reports
+    # list renders NULL as the neutral dot). Callers that pass no severity
+    # keep the previous outcome_severity behavior.
+    if severity == "__default__":
+        severity = outcome_severity(data)
+    result = models.Result(user_id=user_id, operation_id=operation_id, type=result_type,
+        severity=severity,
         storage_manifest=raw, integrity_digest=hash_input(raw.encode()), byte_count=len(raw.encode()),
         ready_at=now, expires_at=now + timedelta(days=7))
     db.add(result)

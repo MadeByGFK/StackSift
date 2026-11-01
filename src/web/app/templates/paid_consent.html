@@ -17,28 +17,54 @@
 .consent-actions { display: flex; gap: 12px; justify-content: center; }
 .btn-confirm { background: var(--accent); color: #1a1a2e; border: none; padding: 12px 32px; border-radius: 8px; font-weight: 700; font-size: 1rem; cursor: pointer; }
 .btn-confirm:hover { filter: brightness(1.1); }
-.btn-cancel { border: 1px solid var(--border); color: var(--text); background: transparent; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 1rem; }
+.btn-cancel { border: 1px solid var(--border); color: var(--text); background: transparent; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 1rem; cursor: pointer; font-family: inherit; }
 .btn-cancel:hover { border-color: var(--accent); }
 .consent-note { margin-top: 20px; font-size: 0.85rem; color: var(--muted); }
 </style>
 </head>
 <body>
 <div class="consent-box">
-  <h1>Free analyses used up</h1>
-  <p>You've used your 10 free analyses this hour. They reset automatically.</p>
+  {# Server-selected operation policy (issue #104, trim T8). The
+     additional_analysis strings below stay byte-identical to the
+     original template; oversize_analysis renders the draft §3 copy. #}
+  <h1>{{ heading }}</h1>
+  <p>{{ intro }}</p>
   <div class="file">{{ filename }}</div>
-  <div class="cost">1 credit</div>
-  <div class="cost-label">Continue this analysis now with a Power-Up credit</div>
+  {% if file_list %}
+  <div class="file-list">
+    {% for entry in file_list %}
+    <div class="file">{{ entry }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if size_line %}<p>{{ size_line }}</p>{% endif %}
+  {% if limits_line %}<p>{{ limits_line }}</p>{% endif %}
+  <div class="cost">{{ cost_label }}</div>
+  <div class="cost-label">{{ cost_sentence }}</div>
   <div class="balance">Your balance: {{ eligible }} eligible credits ({{ balance }} total)</div>
-  <form method="post" action="/analyze/paid" class="consent-actions">
+  <form method="post" action="{{ confirm_action or "/analyze/paid" }}" class="consent-actions">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
     <input type="hidden" name="file_hash" value="{{ file_hash }}">
     <input type="hidden" name="idempotency_key" value="{{ consent_id }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" class="btn-confirm">Use 1 credit</button>
-    <a href="/" class="btn-cancel">Wait for free</a>
+    <button type="submit" class="btn-confirm">{{ confirm_label }}</button>
+    {# additional_analysis keeps its original Cancel link: it has no
+       one-live check, so navigating away is harmless there. #}
+    {% if operation_type != "oversize_analysis" %}
+    <a href="/" class="btn-cancel">{{ cancel_label }}</a>
+    {% endif %}
   </form>
-  <p class="consent-note">No charge if the analysis fails. Credits never expire. Results are available for 7 days.</p>
+  {# PR #111 finding 5: for oversize, Cancel must actually release the
+     one-live-consent lockout, so it POSTs (CSRF-protected) to the cancel
+     endpoint instead of merely navigating to "/". #}
+  {% if operation_type == "oversize_analysis" %}
+  <form method="post" action="/analyze/paid/cancel" class="consent-actions">
+    <input type="hidden" name="consent_id" value="{{ consent_id }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn-cancel">{{ cancel_label }}</button>
+  </form>
+  {% endif %}
+  <p class="consent-note">{{ note }}</p>
 </div>
 </body>
 </html>

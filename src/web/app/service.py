@@ -8,6 +8,7 @@ may already have spooled the raw upload to disk before this service runs.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import signal
@@ -36,6 +37,83 @@ from app.vendor.diagnostics import (
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_UPLOAD_LINES = 50_000
 ANALYSIS_TIMEOUT_SECONDS = 25
+
+# Issue #104: oversize analysis (paid, 3 credits). Free limits above are
+# UNCHANGED; these ceilings are inclusive and enforced independently.
+MAX_OVERSIZE_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+MAX_OVERSIZE_UPLOAD_LINES = 500_000
+
+
+# Line-break characters with str.splitlines() semantics. "\r\n" is a
+# single break and is corrected for below (counted once, not twice).
+_LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def count_original_lines(content: bytes) -> int:
+    """Count ORIGINAL decoded lines, pre-redaction (issue #104, trim T6).
+
+    Redaction must not shrink an over-ceiling upload under the limit, so
+    classification counts the decoded input before redact_secrets() runs.
+    Uses the same UTF-8-with-replacement decoding and splitlines()
+    semantics as analyze_upload().
+
+    Bounded-memory fix (issue #104 follow-up, PR #111 head-3 review):
+    the previous implementation decoded the whole upload and
+    materialized a full splitlines() list before any ceiling check, so
+    a newline-dense upload below the byte ceiling forced a full decode
+    plus a full list before rate limiting or auth. This version decodes
+    in 1 MiB chunks with an incremental decoder (multi-byte characters
+    and CRLF pairs straddling a chunk boundary still count correctly),
+    counts breaks per chunk in C, and stops as soon as the oversize
+    line ceiling is exceeded. Counts above that ceiling are reported
+    as MAX_OVERSIZE_UPLOAD_LINES + 1: classification only needs
+    over/under the ceiling, and no caller needs an exact over-ceiling
+    count (the route reports the ceiling in its error message).
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    count = 0
+    prev_ended_cr = False
+    last_char = ""
+    saw_text = False
+    for start in range(0, len(content), 1024 * 1024):
+        chunk = decoder.decode(content[start:start + 1024 * 1024])
+        if not chunk:
+            continue  # chunk was the first half of a multi-byte char
+        saw_text = True
+        breaks = sum(chunk.count(ch) for ch in _LINE_BREAK_CHARS)
+        breaks -= chunk.count("\r\n")  # CRLF is one break, not two
+        if prev_ended_cr and chunk.startswith("\n"):
+            breaks -= 1  # CRLF split across chunks: \r already counted
+        count += breaks
+        if count > MAX_OVERSIZE_UPLOAD_LINES:
+            return MAX_OVERSIZE_UPLOAD_LINES + 1
+        prev_ended_cr = chunk.endswith("\r")
+        last_char = chunk[-1]
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        saw_text = True
+        last_char = tail[-1]
+    if saw_text and last_char not in _LINE_BREAK_CHARS:
+        count += 1  # final partial line after the last break
+        if count > MAX_OVERSIZE_UPLOAD_LINES:
+            return MAX_OVERSIZE_UPLOAD_LINES + 1
+    return count
+
+
+def classify_upload_size(nbytes: int, nlines: int) -> str:
+    """Classify an upload by the free and oversize ceilings (inclusive).
+
+    Returns "standard" (both free limits met), "oversize" (a free limit is
+    exceeded but both oversize ceilings are met), or "unsupported" (an
+    oversize ceiling is exceeded). Bytes and lines are enforced
+    independently: a small-byte file with 50,001 lines is oversize, as is
+    a few-line file over 10 MiB. Input is never truncated to qualify.
+    """
+    if nbytes <= MAX_UPLOAD_BYTES and nlines <= MAX_UPLOAD_LINES:
+        return "standard"
+    if nbytes <= MAX_OVERSIZE_UPLOAD_BYTES and nlines <= MAX_OVERSIZE_UPLOAD_LINES:
+        return "oversize"
+    return "unsupported"
 
 
 class AnalysisTimeout(Exception):
@@ -167,17 +245,47 @@ def _jsonline_to_text(line: str) -> str:
     return f"{date_part} {time_part} {level} {message}"
 
 
-def analyze_upload(filename: str, content: bytes) -> dict:
-    """Analyze an upload and clean up the analysis file during normal execution."""
+def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = False,
+                   use_alarm: bool = True, original_byte_count: int | None = None,
+                   collect_comparison_evidence: bool = False) -> dict:
+    """Analyze an upload and clean up the analysis file during normal execution.
+
+    allow_oversize=True (issue #104) raises the ceilings to 100 MB /
+    500,000 lines and counts ORIGINAL decoded lines pre-redaction (T6) for
+    the line ceiling. use_alarm=False is for the supervised oversize worker,
+    whose parent process enforces the deadline instead (T5: SIGALRM is never
+    moved into a thread; the standard path keeps its 25-second SIGALRM).
+
+    original_byte_count (issue #104 follow-up, PR #111 finding 6): when the
+    supervised worker analyzes REDACTED bytes for a confirmed oversize run,
+    the byte ceiling must be checked against the SERVER-measured original
+    byte count (validated at confirmation from consent metadata), not
+    against len(content) of the transformed bytes — redaction can expand
+    a near-ceiling secret-dense file past 100 MB (a short labeled value
+    grows by 9 bytes per occurrence), which previously failed a run the
+    product had already quoted. When None (every non-worker path), the
+    ceiling is checked against len(content) as before. The line ceiling
+    already behaves this way (pre-redaction counting, T6).
+    """
     # --- Input validation (robustness) ---
+    byte_limit = MAX_OVERSIZE_UPLOAD_BYTES if allow_oversize else MAX_UPLOAD_BYTES
+    line_limit = MAX_OVERSIZE_UPLOAD_LINES if allow_oversize else MAX_UPLOAD_LINES
     if len(content) == 0:
         return {
             "error": "empty_file",
             "message": "The uploaded file is empty. Please upload a log file with content.",
             "filename": filename,
         }
-    if len(content) > MAX_UPLOAD_BYTES:
-        size_mb = len(content) / (1024 * 1024)
+    measured_bytes = original_byte_count if original_byte_count is not None else len(content)
+    if measured_bytes > byte_limit:
+        size_mb = measured_bytes / (1024 * 1024)
+        if allow_oversize:
+            return {
+                "error": "file_too_large",
+                "message": f"File too large ({size_mb:.1f}MB). Maximum is 100MB. "
+                           "For larger files, consider splitting by time range.",
+                "filename": filename,
+            }
         return {
             "error": "file_too_large",
             "message": f"File too large ({size_mb:.1f}MB). Maximum is 10MB. "
@@ -193,11 +301,22 @@ def analyze_upload(filename: str, content: bytes) -> dict:
             "filename": filename,
         }
     text = content.decode("utf-8", errors="replace")
+    # T6: count ORIGINAL decoded lines pre-redaction. Redaction must not
+    # shrink an over-ceiling upload under the limit.
+    original_line_count = len(text.splitlines())
     # Redact recognized patterns before creating the analysis file.
     # This does not cover the framework's earlier raw-upload spool.
     text = redact_secrets(text)
     lines = text.splitlines()
-    if len(lines) > MAX_UPLOAD_LINES:
+    checked_lines = original_line_count if allow_oversize else len(lines)
+    if checked_lines > line_limit:
+        if allow_oversize:
+            return {
+                "error": "too_many_lines",
+                "message": f"Too many lines ({original_line_count:,}). Maximum is 500,000 lines. "
+                           "For larger files, consider splitting by time range.",
+                "filename": filename,
+            }
         return {
             "error": "too_many_lines",
             "message": f"Too many lines ({len(lines):,}). Maximum is 50,000 lines. "
@@ -218,8 +337,11 @@ def analyze_upload(filename: str, content: bytes) -> dict:
     # SIGALRM covers the ENTIRE pipeline: parsing, ranking, Phase D.
     # (Previous version only covered analyze_log_file, leaving rank_candidates
     # and presentation unprotected against pathological inputs.)
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(ANALYSIS_TIMEOUT_SECONDS)
+    # T5: the oversize worker runs with use_alarm=False; its parent process
+    # enforces the deadline, so no SIGALRM is armed here.
+    if use_alarm:
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(ANALYSIS_TIMEOUT_SECONDS)
     try:
         try:
             with tempfile.NamedTemporaryFile(
@@ -228,7 +350,10 @@ def analyze_upload(filename: str, content: bytes) -> dict:
                 tmp.write(text)
                 tmp_path = tmp.name
 
-            results = analyze_log_file(tmp_path)
+            # Issue #102: opt-in comparison evidence, default OFF so the
+            # single-file result shape is unchanged for every other caller.
+            results = analyze_log_file(
+                tmp_path, collect_comparison_evidence=collect_comparison_evidence)
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
@@ -283,7 +408,8 @@ def analyze_upload(filename: str, content: bytes) -> dict:
             "filename": filename,
         }
     finally:
-        signal.alarm(0)  # Cancel alarm
+        if use_alarm:
+            signal.alarm(0)  # Cancel alarm
 
     return {
         "filename": filename,

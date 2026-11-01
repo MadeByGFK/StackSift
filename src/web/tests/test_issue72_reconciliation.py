@@ -120,8 +120,9 @@ def _session(sid, pack_id="starter", amount=None, pi="pi_1"):
     }
 
 
-def _charge(cid, amount, pi="pi_1", refunded=0, disputed=False, pack_meta=None):
-    return {
+def _charge(cid, amount, pi="pi_1", refunded=0, disputed=False, pack_meta=None,
+            dispute=None):
+    charge = {
         "id": cid,
         "amount": amount,
         "amount_refunded": refunded,
@@ -131,6 +132,11 @@ def _charge(cid, amount, pi="pi_1", refunded=0, disputed=False, pack_meta=None):
         "created": 0,
         "metadata": {"pack_id": pack_meta} if pack_meta else {},
     }
+    if dispute is not None:
+        # Mirrors the expanded dispute object (fetch_day_charges passes
+        # expand[]=data.dispute); omitted means the fallback path.
+        charge["dispute"] = dispute
+    return charge
 
 
 def _fake(sessions=(), charges=(), wide=()):
@@ -371,6 +377,7 @@ def test_missing_days_job_survives_still_failing_error_day(recon_env):
                 "sessions": [_session("cs_surv_1")] if day == later_day else [],
                 "charges": [],
                 "wide_sessions": [],
+                "prior_sessions": [],
             }[kind]
         runs = pr.reconcile_missing_days(db, stripe_get=get,
                                          today=date(2026, 10, 23))
@@ -442,6 +449,7 @@ def test_missing_days_job_retries_error_day_after_later_days(recon_env):
                 ([_session("cs_lat_1")] if day == later_day else []),
                 "charges": [],
                 "wide_sessions": [],
+                "prior_sessions": [],
             }[kind],
             today=date(2026, 10, 23),
         )
@@ -475,6 +483,7 @@ def test_missing_days_job_retries_error_day_as_latest_row(recon_env):
                 "sessions": [_session("cs_err2_1")] if day == err_day else [],
                 "charges": [],
                 "wide_sessions": [],
+                "prior_sessions": [],
             }[kind],
             today=date(2026, 10, 22),
         )
@@ -530,6 +539,7 @@ def test_missing_days_backfill_from_first_purchase(recon_env):
                 else ([_session(f"cs_bf_2")] if day == date(2026, 10, 19) else []),
                 "charges": [],
                 "wide_sessions": [],
+                "prior_sessions": [],
             }[kind],
             today=date(2026, 10, 21),
         )
@@ -613,8 +623,10 @@ def test_stripe_session_list_sends_no_payment_status_param(monkeypatch):
 def test_wide_session_list_sends_no_payment_status_param(recon_env, monkeypatch):
     """Issue #72 follow-up: the refund-attribution wide fetch in
     reconcile_day sends the same invalid parameter. Drive reconcile_day
-    with stripe_get=None and a faked httpx.get so both session list
-    calls (day + wide) are captured; neither may carry payment_status."""
+    with stripe_get=None and a faked httpx.get so all session list
+    calls (day + prior + wide) are captured; none may carry
+    payment_status. The prior call covers the settlement-lookback window
+    [day - 4, day - 1] (Finding 1a)."""
     from app import payment_reconcile as pr
     import httpx
     captured = []
@@ -639,7 +651,759 @@ def test_wide_session_list_sends_no_payment_status_param(recon_env, monkeypatch)
     with recon_env.sessions() as db:
         pr.reconcile_day(db, date(2026, 10, 24), stripe_get=None)
     session_calls = [p for u, p in captured if u.endswith("/checkout/sessions")]
-    # Day fetch + wide refund-attribution fetch.
-    assert len(session_calls) == 2
+    # Day fetch + prior settlement-lookback fetch + wide
+    # refund-attribution fetch.
+    assert len(session_calls) == 3
     for params in session_calls:
         assert "payment_status" not in params
+    day_start = datetime(2026, 10, 24, tzinfo=timezone.utc)
+    prior_start = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    assert session_calls[1]["created[gte]"] == int(prior_start.timestamp())
+    assert session_calls[1]["created[lte]"] == int(day_start.timestamp()) - 1
+    # PR #108 Finding 1 resolution: charges are listed WITHOUT an
+    # expand[] (the Charges reference lists no `dispute` attribute and
+    # the code pins no Stripe-Version, so an unsupported expansion
+    # would 400 the whole charges fetch). Dispute status comes from
+    # the separate /v1/disputes fetch instead.
+    charge_calls = [p for u, p in captured if u.endswith("/charges")]
+    assert "expand[]" not in charge_calls[0]
+
+
+def test_disputes_fetched_separately_from_charges(recon_env, monkeypatch):
+    """PR #108 Finding 1 resolution: a disputed charge with no
+    expanded dispute object gets its status from a separate
+    /v1/disputes list call (joined by dispute.charge), and the
+    charges call itself carries no expand[]. A won dispute found
+    this way subtracts nothing, so the paired day stays clean."""
+    from app import payment_reconcile as pr
+    import httpx
+    captured = []
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return {"data": self._data, "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        captured.append((url, dict(params or {})))
+        if url.endswith("/charges"):
+            return FakeResp([_charge("ch_sep_1", 500, pi="pi_sep",
+                                     disputed=True)])
+        if url.endswith("/disputes"):
+            return FakeResp([{"id": "dp_sep_1", "charge": "ch_sep_1",
+                              "status": "won", "amount": 500}])
+        if url.endswith("/checkout/sessions"):
+            return FakeResp([_session("cs_sep_1", pi="pi_sep")])
+        return FakeResp([])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_sep_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        # Won dispute found via the separate fetch: subtracts nothing.
+        assert run.status == "clean"
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 0
+        assert run.differences == []
+        charge_calls = [p for u, p in captured if u.endswith("/charges")]
+        assert "expand[]" not in charge_calls[0]
+        dispute_calls = [p for u, p in captured if u.endswith("/disputes")]
+        assert len(dispute_calls) == 1
+        day_start = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        assert dispute_calls[0]["created[gte]"] == int(day_start.timestamp())
+        assert dispute_calls[0]["created[lte]"] >= \
+            dispute_calls[0]["created[gte]"]
+
+
+def _dispute_fake(monkeypatch, disputes):
+    """httpx.get fake for the disputes-fetch path: one paired session,
+    one disputed charge, and the given disputes list (newest first,
+    as Stripe lists return). Returns captured (url, params) pairs."""
+    from app import payment_reconcile as pr  # noqa: F401 -- documents path
+    import httpx
+    captured = []
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return {"data": self._data, "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        captured.append((url, dict(params or {})))
+        if url.endswith("/charges"):
+            return FakeResp([_charge("ch_multi_1", 500, pi="pi_multi",
+                                     disputed=True)])
+        if url.endswith("/disputes"):
+            return FakeResp(disputes)
+        if url.endswith("/checkout/sessions"):
+            return FakeResp([_session("cs_multi_1", pi="pi_multi")])
+        return FakeResp([])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    return captured
+
+
+def test_multiple_disputes_grouped_not_last_wins(recon_env, monkeypatch):
+    """PR #108 Codex P2 regression: a charge with a newer lost dispute
+    and an older won dispute must NOT attach only the won object
+    (the old last-wins join kept the oldest, since Stripe lists are
+    reverse chronological, and recorded the day clean despite lost
+    funds). The grouped result subtracts the lost 500."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_new", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+        {"id": "dp_old", "charge": "ch_multi_1", "status": "won",
+         "amount": 500},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 500
+        assert run.per_pack["starter"]["stripe_net_cents"] == 0
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 500
+        assert dispute["status"] == "lost"
+
+
+def test_multiple_disputes_capped_at_charge(recon_env, monkeypatch):
+    """PR #108 Codex P2 follow-up: two lost 500 disputes on one 500
+    charge sum to 1000 but the per-charge cap holds the subtraction
+    at the unrefunded remainder (500), never double-counting beyond
+    the charge."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_a", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+        {"id": "dp_b", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 500
+        assert run.per_pack["starter"]["stripe_net_cents"] == 0
+
+
+def test_mixed_lost_and_open_dispute_preserves_open_warning(
+        recon_env, monkeypatch):
+    """PR #108 Codex P2(b) regression: a charge with a 100 lost
+    dispute and a 400 needs_response dispute aggregates to lost/500
+    (money math unchanged, capped at the charge), but the record
+    must NOT read as fully resolved — the difference entry keeps
+    the open component (400, needs_response) and its note warns
+    about it, so the founder alert shows the outstanding dispute."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_lost", "charge": "ch_multi_1", "status": "lost",
+         "amount": 100},
+        {"id": "dp_open", "charge": "ch_multi_1",
+         "status": "needs_response", "amount": 400},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 500
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 500
+        assert dispute["status"] == "lost"
+        assert dispute["open_disputed_cents"] == 400
+        assert dispute["open_status"] == "needs_response"
+        assert "lost" in dispute["note"]
+        assert "needs_response" in dispute["note"]
+        assert "may reverse" in dispute["note"]
+
+
+def test_open_component_capped_at_reversible_amount(
+        recon_env, monkeypatch):
+    """PR #112 Codex P2 regression (refund-capped case): a 500 charge
+    with a 300 refund, a 100 lost dispute and a 400 needs_response
+    dispute deducts only 200 (the cap), and only 100 of that can
+    reverse if the open dispute resolves won — so the record must
+    report open_disputed_cents 100, not the 400 gross, while keeping
+    the 400 gross distinctly. Money math stays 200."""
+    from app import payment_reconcile as pr
+    import httpx
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return {"data": self._data, "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        if url.endswith("/charges"):
+            return FakeResp([_charge("ch_multi_1", 500, pi="pi_multi",
+                                     refunded=300, disputed=True)])
+        if url.endswith("/disputes"):
+            return FakeResp([
+                {"id": "dp_lost", "charge": "ch_multi_1", "status": "lost",
+                 "amount": 100},
+                {"id": "dp_open", "charge": "ch_multi_1",
+                 "status": "needs_response", "amount": 400},
+            ])
+        if url.endswith("/checkout/sessions"):
+            return FakeResp([_session("cs_multi_1", pi="pi_multi")])
+        return FakeResp([])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 200
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 200
+        assert dispute["status"] == "lost"
+        assert dispute["open_disputed_cents"] == 100
+        assert dispute["open_gross_disputed_cents"] == 400
+        assert dispute["open_status"] == "needs_response"
+        assert "100¢" in dispute["note"]
+        assert "400¢ gross open" in dispute["note"]
+
+
+def test_zero_reversible_open_dispute_still_warned(
+        recon_env, monkeypatch):
+    """PR #112 Codex P2 regression (zero-reversible case): a 500
+    charge with a 300 refund, a 200 lost dispute and a 400
+    needs_response dispute deducts 200, all of it already
+    exhausted by the lost dispute — so nothing can reverse — but
+    the open dispute still needs a response and must NOT vanish
+    from the record. The entry keeps open_status and the 400
+    gross, carries no open_disputed_cents, and its note warns
+    about the outstanding dispute without claiming the deduction
+    may reverse. Money math stays 200."""
+    from app import payment_reconcile as pr
+    import httpx
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, data):
+            self._data = data
+
+        def json(self):
+            return {"data": self._data, "has_more": False}
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        if url.endswith("/charges"):
+            return FakeResp([_charge("ch_multi_1", 500, pi="pi_multi",
+                                     refunded=300, disputed=True)])
+        if url.endswith("/disputes"):
+            return FakeResp([
+                {"id": "dp_lost", "charge": "ch_multi_1", "status": "lost",
+                 "amount": 200},
+                {"id": "dp_open", "charge": "ch_multi_1",
+                 "status": "needs_response", "amount": 400},
+            ])
+        if url.endswith("/checkout/sessions"):
+            return FakeResp([_session("cs_multi_1", pi="pi_multi")])
+        return FakeResp([])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 200
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 200
+        assert dispute["status"] == "lost"
+        assert "open_disputed_cents" not in dispute
+        assert dispute["open_gross_disputed_cents"] == 400
+        assert dispute["open_status"] == "needs_response"
+        assert "needs_response" in dispute["note"]
+        assert "still outstanding" in dispute["note"]
+        assert "no amount reversible" in dispute["note"]
+        assert "may reverse" not in dispute["note"]
+
+
+def test_double_open_disputes_capped_at_charge(
+        recon_env, monkeypatch):
+    """PR #112 Codex P2 regression (double-open case): two open 500
+    disputes on one 500 charge deduct 500, so the reversible open
+    component is 500 — not the 1000 gross, which is kept distinctly."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_a", "charge": "ch_multi_1",
+         "status": "needs_response", "amount": 500},
+        {"id": "dp_b", "charge": "ch_multi_1",
+         "status": "needs_response", "amount": 500},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        assert run.per_pack["starter"]["stripe_dispute_cents"] == 500
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 500
+        assert dispute["open_disputed_cents"] == 500
+        assert dispute["open_gross_disputed_cents"] == 1000
+        assert dispute["open_status"] == "needs_response"
+
+
+def test_lost_only_group_carries_no_open_warning(recon_env, monkeypatch):
+    """P2(b) scope guard: a lost-only charge must not gain a
+    spurious open clause — the note stays the plain lost note and
+    no open_* fields appear on the entry."""
+    from app import payment_reconcile as pr
+    _dispute_fake(monkeypatch, [
+        {"id": "dp_a", "charge": "ch_multi_1", "status": "lost",
+         "amount": 500},
+    ])
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, date(2026, 10, 20), session_id="cs_multi_1")
+        run = pr.reconcile_day(db, date(2026, 10, 20), stripe_get=None)
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["status"] == "lost"
+        assert "open_disputed_cents" not in dispute
+        assert dispute["note"] == "negative entry; dispute status lost"
+
+
+def test_aggregate_disputes_open_component(recon_env):
+    """Unit-level P2(b) check: _aggregate_disputes reports the open
+    component (summed open cents, newest open status) alongside
+    the lost aggregate status, and reports zero/None when there is
+    no open dispute in the group."""
+    from app import payment_reconcile as pr
+    mixed = pr._aggregate_disputes([
+        {"status": "lost", "amount": 100},
+        {"status": "needs_response", "amount": 400},
+        {"status": "won", "amount": 500},
+    ])
+    assert mixed["status"] == "lost"
+    assert mixed["amount"] == 500
+    assert mixed["open_amount"] == 400
+    assert mixed["open_status"] == "needs_response"
+    lost_only = pr._aggregate_disputes([
+        {"status": "lost", "amount": 500},
+    ])
+    assert lost_only["open_amount"] == 0
+    assert lost_only["open_status"] is None
+
+
+def test_error_recovery_preserves_alert_history(recon_env, monkeypatch):
+    """PR #108 Codex Finding 2 regression: a mismatch row whose alert
+    was already delivered, then failed by a window re-run (Stripe
+    down), keeps its id AND alert_sent=True through the error row,
+    and its non-force recovery sends no second alert."""
+    from app import models, payment_reconcile as pr
+    from app import email as email_module
+    sent = []
+    monkeypatch.setattr(email_module, "send_email",
+                        lambda to, subject, html: sent.append((to, subject)) or True)
+    monkeypatch.setenv("RECON_ALERT_EMAIL", "ops@example.com")
+    day = date(2026, 10, 20)
+    sess = _session("cs_recover_1")
+    failing = {"fail": False}
+
+    def get(kind, day):
+        if failing["fail"] and day == date(2026, 10, 20):
+            raise pr.ReconcileError("stripe down")
+        return {"sessions": [sess] if day == date(2026, 10, 20) else [],
+                "charges": [], "wide_sessions": [],
+                "prior_sessions": []}[kind]
+
+    with recon_env.sessions() as db:
+        run = pr.reconcile_day(db, day, stripe_get=get)
+        assert run.status == "mismatch"
+        assert run.alert_sent is True
+        assert len(sent) == 1
+        row_id, created_at = run.id, run.created_at
+        # Window re-run fails: the row becomes 'error' in place.
+        failing["fail"] = True
+        pr.reconcile_missing_days(db, stripe_get=get, today=date(2026, 10, 23))
+        db.expire_all()
+        row = _run(db, day)
+        assert row.status == "error"
+        assert row.id == row_id
+        assert row.created_at == created_at
+        assert row.alert_sent is True
+        assert len(sent) == 1
+        # Recovery: non-force retry of the error row, same id, no
+        # second alert, exactly one row for the day.
+        failing["fail"] = False
+        pr.reconcile_missing_days(db, stripe_get=get, today=date(2026, 10, 23))
+        db.expire_all()
+        row = _run(db, day)
+        assert row.status == "mismatch"
+        assert row.id == row_id
+        assert row.created_at == created_at
+        assert row.alert_sent is True
+        assert row.alert_pending is False
+        assert len(sent) == 1
+        rows = db.execute(select(models.PaymentReconciliation).where(
+            models.PaymentReconciliation.recon_date == day)).scalars().all()
+        assert len(rows) == 1
+
+
+# --- Issue #101: #72 pre-activation reconciliation fixes ---
+
+def test_cross_midnight_session_settles_next_day(recon_env):
+    """Finding 1a: a session created day D settling (webhook) on day D+1
+    is clean on both days — excluded on D (matched, completed
+    elsewhere), included via prior_sessions on D+1 and paired with the
+    purchase. Old code mismatched both days, permanently."""
+    from app import payment_reconcile as pr
+    day_d = date(2026, 10, 20)
+    day_d1 = date(2026, 10, 21)
+    sess = _session("cs_xmid_1")
+    table = {
+        day_d: {"sessions": [sess], "charges": [], "wide_sessions": [],
+                "prior_sessions": []},
+        day_d1: {"sessions": [], "charges": [], "wide_sessions": [],
+                 "prior_sessions": [sess]},
+    }
+
+    def get(kind, day):
+        return list(table[day][kind])
+
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, day_d1, session_id="cs_xmid_1")
+        run_d = pr.reconcile_day(db, day_d, stripe_get=get)
+        assert run_d.status == "clean"
+        assert run_d.differences == []
+        run_d1 = pr.reconcile_day(db, day_d1, stripe_get=get)
+        assert run_d1.status == "clean"
+        assert run_d1.stripe_gross_cents == 500
+        assert run_d1.ledger_gross_cents == 500
+        assert run_d1.differences == []
+
+
+def test_late_webhook_healed_by_window_rerun(recon_env):
+    """Finding 1b: a row computed as mismatch before a late webhook
+    lands flips to clean on the window re-run, keeping its id, and the
+    window pass does not appear in the scan's returned runs list."""
+    from app import models, payment_reconcile as pr
+    day = date(2026, 10, 20)
+    sess = _session("cs_late_1")
+
+    def get(kind, day):
+        return {"sessions": [sess] if day == date(2026, 10, 20) else [],
+                "charges": [], "wide_sessions": [],
+                "prior_sessions": []}[kind]
+
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        first = pr.reconcile_day(db, day, stripe_get=get)
+        assert first.status == "mismatch"
+        first_id = first.id
+        # Late webhook lands: the purchase settles on the same day.
+        _purchase(db, uid, day, session_id="cs_late_1")
+        runs = pr.reconcile_missing_days(db, stripe_get=get,
+                                         today=date(2026, 10, 23))
+        assert "2026-10-20" not in [str(r.recon_date) for r in runs]
+        row = _run(db, day)
+        assert row.id == first_id
+        assert row.status == "clean"
+        assert row.differences == []
+        rows = db.execute(select(models.PaymentReconciliation).where(
+            models.PaymentReconciliation.recon_date == day)).scalars().all()
+        assert len(rows) == 1
+
+
+def test_window_rerun_does_not_resend_alert(recon_env, monkeypatch):
+    """Finding 1b alert rule: a mismatch row with alert_sent=True that
+    flips to clean and back to mismatch sends exactly one email total."""
+    from app import payment_reconcile as pr
+    from app import email as email_module
+    sent = []
+    monkeypatch.setattr(email_module, "send_email",
+                        lambda to, subject, html: sent.append((to, subject)) or True)
+    monkeypatch.setenv("RECON_ALERT_EMAIL", "ops@example.com")
+    day = date(2026, 10, 20)
+    sess = _session("cs_alert_1")
+    fixture = {"sessions": [sess]}
+
+    def get(kind, day):
+        if day == date(2026, 10, 20):
+            return {"sessions": list(fixture["sessions"]), "charges": [],
+                    "wide_sessions": [], "prior_sessions": []}[kind]
+        return {"sessions": [], "charges": [], "wide_sessions": [],
+                "prior_sessions": []}[kind]
+
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        # Mismatch with the alert delivered.
+        run = pr.reconcile_day(db, day, stripe_get=get)
+        assert run.status == "mismatch"
+        assert run.alert_sent is True
+        assert len(sent) == 1
+        # Webhook lands; the window re-run heals the row to clean.
+        _purchase(db, uid, day, session_id="cs_alert_1")
+        pr.reconcile_missing_days(db, stripe_get=get, today=date(2026, 10, 23))
+        row = _run(db, day)
+        assert row.status == "clean"
+        assert len(sent) == 1
+        # Fixture changes: the session disappears while the purchase
+        # remains — back to mismatch, but no second email.
+        fixture["sessions"] = []
+        pr.reconcile_missing_days(db, stripe_get=get, today=date(2026, 10, 23))
+        row = _run(db, day)
+        assert row.status == "mismatch"
+        assert row.alert_sent is True
+        assert row.alert_pending is False
+        assert len(sent) == 1
+
+
+def test_window_rerun_heals_final_row_after_persistent_error_day(recon_env):
+    """Follow-up fix to Finding 1b: a final mismatch row later in the
+    window than a persistent error day must still heal on the window
+    re-run. The main loop starts at the earliest error day and merely
+    visits the later final row (reconcile_day without force returns it
+    untouched), so the old `wday < start_day` window filter skipped it
+    too — the late-webhook row never healed until the error day
+    cleared. The window pass must force-re-run pre-scan final rows
+    inside the window, not just rows before start_day."""
+    from app import payment_reconcile as pr
+    err_day = date(2026, 10, 20)
+    later_day = date(2026, 10, 21)
+    sess = _session("cs_errlate_1")
+
+    def boom(kind, day):
+        raise pr.ReconcileError("stripe down")
+
+    def get(kind, day):
+        if day == err_day:
+            raise pr.ReconcileError("stripe down")
+        return {
+            "sessions": [sess] if day == later_day else [],
+            "charges": [],
+            "wide_sessions": [],
+            "prior_sessions": [],
+        }[kind]
+
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        assert pr.reconcile_day(db, err_day, stripe_get=boom).status == "error"
+        # Later day first computed as mismatch (session, no purchase yet).
+        first = pr.reconcile_day(db, later_day, stripe_get=get)
+        assert first.status == "mismatch"
+        first_id = first.id
+        # Late webhook lands for the later day.
+        _purchase(db, uid, later_day, session_id="cs_errlate_1")
+        runs = pr.reconcile_missing_days(db, stripe_get=get,
+                                         today=date(2026, 10, 23))
+        assert runs[0].status == "error"  # the outage persists
+        db.expire_all()
+        row = _run(db, later_day)
+        assert row.id == first_id
+        assert row.status == "clean"
+        assert row.differences == []
+
+
+def test_force_rerun_preserves_row_identity(recon_env):
+    """Finding 1b: a force re-run updates the row in place — same id
+    and created_at, exactly one row for the day afterward."""
+    from app import models, payment_reconcile as pr
+    day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, day, session_id="cs_ident_1")
+        run = pr.reconcile_day(db, day, stripe_get=_fake(
+            sessions=[_session("cs_ident_1")]))
+        assert run.status == "clean"
+        row_id, created_at = run.id, run.created_at
+        rerun = pr.reconcile_day(db, day, stripe_get=_fake(
+            sessions=[_session("cs_ident_1")]), force=True)
+        assert rerun.id == row_id
+        db.expire_all()
+        row = _run(db, day)
+        assert row.id == row_id
+        assert row.created_at == created_at
+        rows = db.execute(select(models.PaymentReconciliation).where(
+            models.PaymentReconciliation.recon_date == day)).scalars().all()
+        assert len(rows) == 1
+
+
+def test_won_dispute_subtracts_nothing(recon_env):
+    """Finding 2: a won dispute subtracts nothing and appends no
+    difference entry, so a fully paired day stays clean."""
+    from app import payment_reconcile as pr
+    day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, day, session_id="cs_won_1")
+        run = pr.reconcile_day(db, day, stripe_get=_fake(
+            sessions=[_session("cs_won_1", pi="pi_won")],
+            charges=[_charge("ch_won_1", 500, pi="pi_won", disputed=True,
+                             dispute={"status": "won", "amount": 500})]))
+        assert run.status == "clean"
+        pp = run.per_pack["starter"]
+        assert pp["stripe_dispute_cents"] == 0
+        assert pp["stripe_net_cents"] == 500
+        assert run.differences == []
+
+
+def test_lost_dispute_plus_full_refund_counts_once(recon_env):
+    """Finding 2: a fully refunded + lost-disputed charge counts once —
+    old code subtracted refund 500 + dispute 500 for a net of -500."""
+    from app import payment_reconcile as pr
+    day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, day, session_id="cs_lfr_1")
+        run = pr.reconcile_day(db, day, stripe_get=_fake(
+            sessions=[_session("cs_lfr_1", pi="pi_lfr")],
+            charges=[_charge("ch_lfr_1", 500, pi="pi_lfr", refunded=500,
+                             disputed=True,
+                             dispute={"status": "lost", "amount": 500})]))
+        pp = run.per_pack["starter"]
+        assert pp["stripe_refund_cents"] == 500
+        assert pp["stripe_dispute_cents"] == 0
+        assert pp["stripe_net_cents"] == 0
+
+
+def test_partial_refund_plus_lost_dispute(recon_env):
+    """Finding 2: partial refund 400 + lost dispute 600 on a 1000
+    charge nets to 0 against a 1000 gross (portion capped at the
+    unrefunded remainder)."""
+    from app import payment_reconcile as pr
+    day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, day, session_id="cs_prd_1", pack_id="growth")
+        run = pr.reconcile_day(db, day, stripe_get=_fake(
+            sessions=[_session("cs_prd_1", pack_id="growth", pi="pi_prd")],
+            charges=[_charge("ch_prd_1", 1000, pi="pi_prd", refunded=400,
+                             disputed=True,
+                             dispute={"status": "lost", "amount": 600})]))
+        pp = run.per_pack["growth"]
+        assert pp["stripe_gross_cents"] == 1000
+        assert pp["stripe_refund_cents"] == 400
+        assert pp["stripe_dispute_cents"] == 600
+        assert pp["stripe_net_cents"] == 0
+
+
+def test_open_dispute_counts_but_notes_status(recon_env):
+    """Finding 2: an open dispute subtracts (funds held) and its
+    difference entry carries the open status note."""
+    from app import payment_reconcile as pr
+    day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, day, session_id="cs_open_1")
+        run = pr.reconcile_day(db, day, stripe_get=_fake(
+            sessions=[_session("cs_open_1", pi="pi_open")],
+            charges=[_charge("ch_open_1", 500, pi="pi_open", disputed=True,
+                             dispute={"status": "needs_response",
+                                      "amount": 500})]))
+        pp = run.per_pack["starter"]
+        assert pp["stripe_dispute_cents"] == 500
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 500
+        assert "needs_response" in dispute["note"]
+        assert "may reverse" in dispute["note"]
+
+
+def test_disputed_without_expanded_object_falls_back(recon_env):
+    """Finding 2 fallback pin: disputed=True with no expanded dispute
+    object keeps the old conservative behavior (full amount subtracted,
+    entry present, status unknown)."""
+    from app import payment_reconcile as pr
+    day = date(2026, 10, 20)
+    with recon_env.sessions() as db:
+        uid = _user_id(db)
+        _purchase(db, uid, day, session_id="cs_fb_1")
+        run = pr.reconcile_day(db, day, stripe_get=_fake(
+            sessions=[_session("cs_fb_1", pi="pi_fb")],
+            charges=[_charge("ch_fb_1", 500, pi="pi_fb", disputed=True)]))
+        pp = run.per_pack["starter"]
+        assert pp["stripe_dispute_cents"] == 500
+        assert pp["stripe_net_cents"] == 0
+        dispute = [d for d in run.differences
+                   if d["kind"] == "stripe_dispute"][0]
+        assert dispute["disputed_cents"] == 500
+        assert "unknown" in dispute["note"]
+
+
+def _paginated(monkeypatch, pages):
+    """Fake httpx.get serving one page per call, capturing params."""
+    import httpx
+    captured = []
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    def fake_get(url, params=None, auth=None, timeout=None):
+        captured.append(dict(params or {}))
+        return FakeResp(pages[len(captured) - 1])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    return captured
+
+
+def test_pagination_merges_two_pages_in_order(monkeypatch):
+    """Finding 3: _stripe_list merges pages in order and advances
+    starting_after to the last id of each page."""
+    from app import payment_reconcile as pr
+    captured = _paginated(monkeypatch, [
+        {"data": [{"id": "a"}, {"id": "b"}], "has_more": True},
+        {"data": [{"id": "c"}], "has_more": False},
+    ])
+    result = pr._stripe_list("sk_test_paginate", "/charges", 0, 1000)
+    assert [item["id"] for item in result] == ["a", "b", "c"]
+    assert len(captured) == 2
+    assert "starting_after" not in captured[0]
+    assert captured[1]["starting_after"] == "b"
+    assert all(params["limit"] == 100 for params in captured)
+
+
+def test_pagination_advances_starting_after_each_page(monkeypatch):
+    """Finding 3: three single-item pages advance starting_after
+    through absent, "a", "b" in order."""
+    from app import payment_reconcile as pr
+    captured = _paginated(monkeypatch, [
+        {"data": [{"id": "a"}], "has_more": True},
+        {"data": [{"id": "b"}], "has_more": True},
+        {"data": [{"id": "c"}], "has_more": False},
+    ])
+    result = pr._stripe_list("sk_test_paginate", "/charges", 0, 1000)
+    assert [item["id"] for item in result] == ["a", "b", "c"]
+    assert len(captured) == 3
+    assert "starting_after" not in captured[0]
+    assert captured[1]["starting_after"] == "a"
+    assert captured[2]["starting_after"] == "b"
+    assert all(params["limit"] == 100 for params in captured)
+
+
+def test_pagination_stops_on_empty_page(monkeypatch):
+    """Finding 3: the `or not items` guard terminates the loop even
+    when has_more lies."""
+    from app import payment_reconcile as pr
+    captured = _paginated(monkeypatch, [
+        {"data": [{"id": "a"}], "has_more": True},
+        {"data": [], "has_more": True},
+    ])
+    result = pr._stripe_list("sk_test_paginate", "/charges", 0, 1000)
+    assert [item["id"] for item in result] == ["a"]
+    assert len(captured) == 2

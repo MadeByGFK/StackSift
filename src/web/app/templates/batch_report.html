@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift batch report — {{ filename }}</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <nav class="nav-links">
+      <a href="/reports">My Reports</a>
+      <a href="/batch">New batch</a>
+    </nav>
+  </header>
+
+  <section class="report-head">
+    <h2>{{ filename }}</h2>
+    <p>{{ summary_sentence }}</p>
+    <p>One combined report across {{ summary.file_count }} files. Combined
+    issues merge patterns that match exactly across files, with per-file
+    counts; each file's own section below is its individual report. No
+    single cross-file cause is claimed.</p>
+    {% if current_user and report_id %}
+    <div class="report-actions" style="margin-top:1rem">
+      <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
+      </form>
+      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">One 2-credit charge covers the whole combined report — never 2 credits per file. Re-downloads are free.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  <section>
+    <h3>Combined summary</h3>
+    <ul>
+      <li>Files: {{ summary.file_count }}</li>
+      <li>Total lines: {{ summary.total_lines }}</li>
+      <li>Parsed lines: {{ summary.parsed_lines }}</li>
+      <li>Malformed lines: {{ summary.malformed_lines }}</li>
+      <li>Unique issue patterns: {{ summary.unique_issue_patterns }}</li>
+      {% if summary.first_seen %}<li>First seen: {{ summary.first_seen }}</li>{% endif %}
+      {% if summary.last_seen %}<li>Last seen: {{ summary.last_seen }}</li>{% endif %}
+    </ul>
+  </section>
+
+  <section>
+    <h3>Combined issues ({{ combined_issues|length }})</h3>
+    {% for entry in combined_issues %}
+    <div>
+      <strong>(x{{ entry.count }})</strong> {{ entry.template }}<br>
+      {% for f in entry.files %}
+      <span>File {{ f.ordinal }} ({{ f.filename }}): x{{ f.count }}{% if f.level %} [{{ f.level }}]{% endif %}</span>{% if not loop.last %}; {% endif %}
+      {% endfor %}
+    </div>
+    {% else %}<p>No warnings, errors, or critical entries found.</p>{% endfor %}
+  </section>
+
+  {% for section in files %}
+  <section>
+    <h3>File {{ section.ordinal }}: {{ section.filename }}</h3>
+    {% set report = section.report %}
+    <div>
+      <span class="badge {{ report.health.color }}">{{ report.health.label }}</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="num">{{ report.results.total_lines }}</div><div class="lbl">Total lines</div></div>
+      <div class="stat"><div class="num">{{ report.results.parsed_lines }}</div><div class="lbl">Parsed</div></div>
+      <div class="stat"><div class="num">{{ report.results.malformed_lines }}</div><div class="lbl">Malformed</div></div>
+      <div class="stat"><div class="num">{{ report.sorted_issues|length }}</div><div class="lbl">Unique issues</div></div>
+    </div>
+    {% if report.complexity_truncated %}
+    <div class="complexity-notice"><strong>Analysis limited:</strong> {{ report.complexity_notice }}</div>
+    {% endif %}
+    {% if report.diagnostic_issue %}
+    <div class="callout">
+      <div class="k">Investigate first</div>
+      <div class="v">[{{ report.diagnostic_issue[1].level }}] {{ report.diagnostic_issue[0] }} <span style="color:var(--muted);font-weight:400">x {{ report.diagnostic_issue[1].count }}</span></div>
+      {% if report.diagnostic_explanation %}
+      <div class="why">{{ report.diagnostic_explanation|join(' · ') }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+    {% if report.timeline and report.timeline|length > 1 %}
+    <h4>Incident timeline <span style="color:var(--muted);font-weight:400">— warnings + errors per 5 min</span></h4>
+    {% if report.results.first_seen and report.results.last_seen %}
+    <div class="meta" style="margin-bottom:8px">First event: {{ report.results.first_seen }} · Last event: {{ report.results.last_seen }}</div>
+    {% endif %}
+    {% set tmax = report.timeline|map(attribute='total')|max %}
+    <div class="timeline">
+      {% for b in report.timeline %}
+      {% set issues = b.warn + b.error + b.critical %}
+      <div class="tbar" title="{{ b.label }} — {{ b.critical }} critical, {{ b.error }} errors, {{ b.warn }} warnings">
+        <div class="tcount">{{ issues if issues > 0 else '' }}</div>
+        <div class="tstack" style="height: {{ (issues / tmax * 100) if tmax else 0 }}%">
+          {% if b.critical > 0 %}<div class="tseg seg-critical" style="height: {{ (b.critical / issues * 100) }}%"></div>{% endif %}
+          {% if b.error > 0 %}<div class="tseg seg-error" style="height: {{ (b.error / issues * 100) }}%"></div>{% endif %}
+          {% if b.warn > 0 %}<div class="tseg seg-warn" style="height: {{ (b.warn / issues * 100) }}%"></div>{% endif %}
+        </div>
+        <div class="tbar-label">{{ b.label if loop.index0 % 2 == 0 else '' }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="tlegend">
+      <span><i class="sw seg-critical"></i>Critical</span>
+      <span><i class="sw seg-error"></i>Error</span>
+      <span><i class="sw seg-warn"></i>Warning</span>
+    </div>
+    {% endif %}
+    <h4>Issues</h4>
+    {% if report.sorted_issues %}
+    <table class="issues">
+      <thead><tr><th>Severity</th><th>Message</th><th style="text-align:right">Count</th></tr></thead>
+      <tbody>
+      {% for issue, data in report.sorted_issues %}
+        <tr>
+          <td><span class="pill {{ data.level }}">{{ data.level }}</span></td>
+          <td>{{ issue }}</td>
+          <td style="text-align:right;color:var(--muted)">x {{ data.count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No warnings, errors, or critical entries found in this file.</p>
+    {% endif %}
+    {% if report.results.malformed_lines > 0 %}
+    <div class="notice">{{ report.results.malformed_lines }} lines in this file could not be parsed and were excluded.</div>
+    {% endif %}
+    {% if report.adapted %}
+    <div class="notice">This file was detected as JSON-lines and converted automatically.</div>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  <p class="privacy">Uploads may be spooled to disk before redaction. Temporary files are cleaned up during normal processing. Redaction may miss sensitive data; review this report before sharing.</p>
+</div>
+</body>
+</html>

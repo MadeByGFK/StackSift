@@ -13,9 +13,9 @@ def fingerprint(filename, content):
     return C.hash_input(filename.encode() + b'\0' + content)
 
 
-def lookup(db, user_id, anonymous_hash, key, digest, ip=None):
+def lookup(db, user_id, anonymous_hash, key, digest, ip=None, operation_type="additional_analysis"):
     if user_id:
-        op = C.find_operation(db, user_id, 'additional_analysis', key, digest)
+        op = C.find_operation(db, user_id, operation_type, key, digest)
         if op:
             return op
     fr = db.get(M.FreeRequest, key, populate_existing=True)
@@ -47,15 +47,29 @@ def admit(db, user_id, anonymous_hash, key, digest, ip, worker, consent_id=None)
     consent = C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1) if consent_id else None
     now = C._utcnow()
     # Keep the existing rolling hour and two-per-minute policy, including failed attempts.
+    # Issue #103 (trim B2): batch operations that claimed the free
+    # allowance for their first file count toward the SAME rolling hour
+    # (no second FreeRequest exists for them), and ALL batch attempts
+    # count toward the burst window, so alternating single/batch routes
+    # is not a quota bypass.
     def count_free(since):
         return db.scalar(select(func.count()).select_from(M.FreeRequest).where(
             M.FreeRequest.quota_bucket_trusted_ip == ip, M.FreeRequest.created_at > since))
+    def count_batch_claims(since):
+        return db.scalar(select(func.count()).select_from(M.Operation).where(
+            M.Operation.type == 'batch', M.Operation.input_manifest == ip,
+            M.Operation.free_allowance_claim.is_(True),
+            M.Operation.created_at > since)) or 0
+    def count_batch_attempts(since):
+        return db.scalar(select(func.count()).select_from(M.Operation).where(
+            M.Operation.type == 'batch', M.Operation.input_manifest == ip,
+            M.Operation.created_at > since)) or 0
     burst = count_free(now - timedelta(minutes=1)) + db.scalar(select(func.count()).select_from(M.Operation).where(
         M.Operation.type == 'additional_analysis', M.Operation.input_manifest == ip,
-        M.Operation.created_at > now - timedelta(minutes=1)))
+        M.Operation.created_at > now - timedelta(minutes=1))) + count_batch_attempts(now - timedelta(minutes=1))
     if burst >= 2:
         raise C.AdmissionError('Too many requests. Please wait a minute and try again.')
-    if count_free(now - timedelta(hours=1)) >= 10:
+    if count_free(now - timedelta(hours=1)) + count_batch_claims(now - timedelta(hours=1)) >= 10:
         if consent_id is None:
             return None, False
         op = C.admit_paid_operation(db, user_id, 'additional_analysis', key, digest, 1, consent_id, worker,

@@ -278,3 +278,238 @@ def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
     buf = BytesIO()
     pdf.output(buf)
     return buf.getvalue()
+
+
+def generate_batch_pdf(manifest_json: str, filename: str = "batch") -> bytes:
+    """Generate a PDF for a stored batch payload (issue #103, trim B5).
+
+    ONE export covers the whole combined artifact (COST_PDF charged
+    once by the route, never per file). Every file section is rendered;
+    the per-file issue list honors MAX_ISSUES PER SECTION and discloses
+    the omitted count for that section — whole sections are never
+    silently omitted, and neither are the combined-issue attributions
+    beyond the same disclosed cap.
+    """
+    from fpdf import FPDF
+
+    try:
+        data = json.loads(manifest_json)
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    pdf = FPDF()
+    pdf.set_compression(False)
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+
+    def heading(text):
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_text_color(*NAVY)
+        pdf.cell(0, 10, _s(text), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*BLACK)
+
+    def line(text, size=11, style="", height=7):
+        pdf.set_font("Helvetica", style, size)
+        pdf.cell(0, height, _s(text), new_x="LMARGIN", new_y="NEXT")
+
+    def para(text, size=10, style=""):
+        pdf.set_font("Helvetica", style, size)
+        pdf.multi_cell(0, 6, _s(text))
+        pdf.ln(1)
+
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_text_color(*NAVY)
+    pdf.cell(0, 12, "StackSift Batch Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(*GRAY)
+    pdf.cell(0, 8, _s(f"Batch: {filename}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(*BLACK)
+    pdf.ln(3)
+
+    summary = data.get("summary") or {}
+    heading("Combined Summary")
+    line(f"Files: {summary.get('file_count', len(data.get('files') or []))}")
+    line(f"Total Lines: {summary.get('total_lines', 0)}")
+    line(f"Parsed Lines: {summary.get('parsed_lines', 0)}")
+    line(f"Malformed Lines: {summary.get('malformed_lines', 0)}")
+    line(f"Unique Issue Patterns: {summary.get('unique_issue_patterns', 0)}")
+    if data.get("summary_sentence"):
+        para(data["summary_sentence"])
+    levels = summary.get("level_counts") or {}
+    for level in ("CRITICAL", "ERROR", "WARN", "INFO"):
+        if level in levels:
+            line(f"{level}: {levels[level]}", size=10)
+
+    combined = data.get("combined_issues") or []
+    heading(f"Combined Issues ({len(combined)})")
+    if not combined:
+        para("No warnings, errors, or critical entries found.")
+    for entry in combined[:MAX_ISSUES]:
+        line(f"(x{entry.get('count', 0)})", size=10, style="B")
+        para(str(entry.get("template", "")))
+        for attribution in entry.get("files") or []:
+            line(f"  File {attribution.get('ordinal')}: {attribution.get('filename', '')} "
+                 f"(x{attribution.get('count', 0)})", size=9)
+    if len(combined) > MAX_ISSUES:
+        para(f"... and {len(combined) - MAX_ISSUES} more combined issue patterns "
+             f"not shown.", style="I")
+
+    for section in data.get("files") or []:
+        report = section.get("report") or {}
+        results = report.get("results") or {}
+        heading(f"File {section.get('ordinal')}: {section.get('filename', '')}")
+        if report.get("health"):
+            line(f"Health: {(report['health'] or {}).get('label', '')}", size=10)
+        line(f"Total Lines: {results.get('total_lines', 0)}", size=10)
+        line(f"Parsed Lines: {results.get('parsed_lines', 0)}", size=10)
+        line(f"Malformed Lines: {results.get('malformed_lines', 0)}", size=10)
+        if report.get("complexity_truncated") and report.get("complexity_notice"):
+            para(report["complexity_notice"], style="I")
+        diagnostic = report.get("diagnostic_issue")
+        if diagnostic:
+            detail = diagnostic[1] or {}
+            line(f"Investigate first: [{detail.get('level', '')}] "
+                 f"{diagnostic[0]} (x{detail.get('count', '')})",
+                 size=10, style="B")
+            for point in report.get("diagnostic_explanation") or []:
+                para(f"- {point}")
+        timeline = report.get("timeline") or []
+        if len(timeline) > 1:
+            line("Timeline: warnings + errors per 5 min — "
+                 f"{sum(b.get('critical', 0) or 0 for b in timeline)} critical, "
+                 f"{sum(b.get('error', 0) or 0 for b in timeline)} errors, "
+                 f"{sum(b.get('warn', 0) or 0 for b in timeline)} warnings "
+                 f"across {len(timeline)} buckets", size=10)
+            if len(timeline) <= 12:
+                for bucket in timeline:
+                    line(f"{bucket.get('label', '')}: "
+                         f"{bucket.get('critical', 0)} critical, "
+                         f"{bucket.get('error', 0)} errors, "
+                         f"{bucket.get('warn', 0)} warnings", size=10)
+        issues = report.get("sorted_issues") or []
+        if issues:
+            for template, detail in issues[:MAX_ISSUES]:
+                detail = detail or {}
+                line(f"[{detail.get('level', '')}] (x{detail.get('count', '')})",
+                     size=10, style="B")
+                para(str(template))
+            if len(issues) > MAX_ISSUES:
+                para(f"... and {len(issues) - MAX_ISSUES} more issue patterns "
+                     f"in this file not shown.", style="I")
+        else:
+            para("No warnings, errors, or critical entries found in this file.")
+
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.set_text_color(*GRAY)
+    pdf.cell(0, 8, "Generated by StackSift (stacksift.goodfolkdigital.com)",
+             new_x="LMARGIN", new_y="NEXT", align="C")
+
+    buf = BytesIO()
+    pdf.output(buf)
+    return buf.getvalue()
+
+
+def generate_comparison_pdf(manifest_json: str, filename: str = "comparison") -> bytes:
+    """Generate a PDF for a stored comparison payload (issue #102).
+
+    Approved spec trim C4: NO silent truncation — every change entry in
+    every section is rendered (fpdf paginates automatically). The shared
+    section is summarized by counts only: shared groups are, by
+    definition, not changes, and listing hundreds of unchanged groups
+    would bury the diff; the summary states the shared count honestly.
+    No diagnostic scores or internal labels appear in the output.
+    """
+    from fpdf import FPDF
+
+    try:
+        data = json.loads(manifest_json)
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    pdf = FPDF()
+    # Uncompressed so the diff text is directly searchable in the file
+    # (and in tests); comparison PDFs are small.
+    pdf.set_compression(False)
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+
+    def heading(text):
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_text_color(*NAVY)
+        pdf.cell(0, 10, _s(text), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*BLACK)
+
+    def line(text, size=11, style="", height=7):
+        pdf.set_font("Helvetica", style, size)
+        pdf.cell(0, height, _s(text), new_x="LMARGIN", new_y="NEXT")
+
+    def para(text, size=10, style=""):
+        pdf.set_font("Helvetica", style, size)
+        pdf.multi_cell(0, 6, _s(text))
+        pdf.ln(1)
+
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_text_color(*NAVY)
+    pdf.cell(0, 12, "StackSift Comparison Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(*GRAY)
+    pdf.cell(0, 8, _s(f"Files: {filename}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(*BLACK)
+    pdf.ln(3)
+
+    inputs = data.get("inputs") or {}
+    a_in = inputs.get("a") or {}
+    b_in = inputs.get("b") or {}
+    heading("Summary")
+    summary = data.get("summary") or {}
+    line(f"New in B: {summary.get('new', len(data.get('new') or []))}")
+    line(f"Resolved (absent from B): {summary.get('resolved', len(data.get('resolved') or []))}")
+    line(f"Volume changed: {summary.get('volume_changed', len(data.get('volume_changes') or []))}")
+    line(f"Severity shifted: {summary.get('severity_shifted', len(data.get('severity_shifts') or []))}")
+    line(f"Shared (unchanged identity): {len(data.get('shared') or [])}")
+    if data.get("no_material_differences"):
+        para("No material differences were found between the two logs.")
+    if data.get("resolved_note"):
+        para(data["resolved_note"], style="I")
+    if a_in or b_in:
+        para(f"A (before): {a_in.get('filename', '')} — "
+             f"{a_in.get('total_lines', 0)} lines, {a_in.get('parsed_lines', 0)} parsed. "
+             f"B (after): {b_in.get('filename', '')} — "
+             f"{b_in.get('total_lines', 0)} lines, {b_in.get('parsed_lines', 0)} parsed.")
+
+    def entry_line(entry):
+        sev = entry.get("b_highest_severity") or entry.get("a_highest_severity") or ""
+        line(f"[{sev}] {entry.get('a_count', 0)} -> {entry.get('b_count', 0)}",
+             size=10, style="B")
+        para(str(entry.get("template", "")))
+
+    for title, key in (("New in B", "new"), ("Resolved", "resolved"),
+                       ("Volume Changes", "volume_changes"),
+                       ("Severity Shifts", "severity_shifts")):
+        entries = data.get(key) or []
+        heading(f"{title} ({len(entries)})")
+        if not entries:
+            para("None.")
+        for entry in entries:
+            entry_line(entry)
+
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.set_text_color(*GRAY)
+    pdf.cell(0, 8, "Generated by StackSift (stacksift.goodfolkdigital.com)",
+             new_x="LMARGIN", new_y="NEXT", align="C")
+
+    buf = BytesIO()
+    pdf.output(buf)
+    return buf.getvalue()
