@@ -54,7 +54,23 @@ def _as_aware(dt: datetime | None) -> datetime | None:
 PRICING_VERSION = 1
 COST_ADDITIONAL_ANALYSIS = 1  # CONFIRMED
 COST_PDF = 2  # Proposed (Phase 2B)
-COST_BATCH = 5  # Proposed (gated)
+# Issue #103 (trim B1): the obsolete fixed COST_BATCH = 5 proposal is
+# REMOVED. Founder-ruled batch pricing (2026-10-24) is per-file: the
+# first file under the normal rules (free hourly allowance if available,
+# otherwise COST_ADDITIONAL_ANALYSIS) plus 1 credit per additional file.
+COST_BATCH_ADDITIONAL_FILE = 1
+
+
+def batch_total_cost(file_count: int, free_first_available: bool) -> int:
+    """Server-side batch price (issue #103): totals 1..5 for N=2..5.
+
+    total = (0 if free_first_available else COST_ADDITIONAL_ANALYSIS)
+            + (file_count - 1) * COST_BATCH_ADDITIONAL_FILE
+    """
+    if not 2 <= file_count <= 5:
+        raise ValueError("batch file count out of range")
+    first = 0 if free_first_available else COST_ADDITIONAL_ANALYSIS
+    return first + (file_count - 1) * COST_BATCH_ADDITIONAL_FILE
 # Issue #104: founder-ruled price (2026-10-24) — 3 credits per oversize
 # run, charged only on success (reserve during execution, net -3 on
 # success, full reversal on failure; never re-debit a committed completion).
@@ -469,6 +485,7 @@ def admit_paid_operation(
     worker_id: str,
     input_manifest: str | None = None,
     extra_scopes: list[tuple[str, int]] | None = None,
+    free_allowance_claim: bool = False,
 ) -> models.Operation:
     """Atomically admit a paid operation.
 
@@ -542,6 +559,7 @@ def admit_paid_operation(
             request_hash=request_hash,
             input_manifest=input_manifest,
             cost=cost,
+            free_allowance_claim=bool(free_allowance_claim),
             pricing_version=PRICING_VERSION,
             consent_id=consent.id,
             status="reserved",

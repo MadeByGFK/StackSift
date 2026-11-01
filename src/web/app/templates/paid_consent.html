@@ -30,6 +30,13 @@
   <h1>{{ heading }}</h1>
   <p>{{ intro }}</p>
   <div class="file">{{ filename }}</div>
+  {% if file_list %}
+  <div class="file-list">
+    {% for entry in file_list %}
+    <div class="file">{{ entry }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% if size_line %}<p>{{ size_line }}</p>{% endif %}
   {% if limits_line %}<p>{{ limits_line }}</p>{% endif %}
   <div class="cost">{{ cost_label }}</div>

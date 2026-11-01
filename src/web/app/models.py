@@ -250,6 +250,12 @@ class Operation(Base):
     request_hash = Column(String(64), nullable=False)  # canonical input/options hash
     input_manifest = Column(Text, nullable=True)  # JSON describing inputs
     cost = Column(Integer, nullable=False)  # immutable snapshotted cost
+    # Issue #103 (trim B2): True when a batch operation claimed the shared
+    # free hourly allowance for its first file. The claim lives on the
+    # operation (no second FreeRequest is created) and is counted by
+    # analysis_admission alongside FreeRequest rows, so alternating
+    # single/batch routes cannot claim the tenth allowance twice.
+    free_allowance_claim = Column(Boolean, nullable=False, default=False)
     pricing_version = Column(Integer, nullable=False, default=1)
     consent_id = Column(GUID(), ForeignKey("consents.id", use_alter=True, name="fk_operations_consent_id"), nullable=True)
     status = Column(String(20), nullable=False, default="reserved")  # reserved|completed|failed|expired
