@@ -109,6 +109,137 @@ def test_oversize_streaming_unicode_small_still_analyzes():
     assert out["results"]["level_counts"]["INFO"] == 5
 
 
+# --- Codex review findings on PR #121 (all verified, all remediated) --------
+#
+# The first streaming draft redacted strictly per splitlines() line,
+# which diverged from whole-text redact_secrets() in four ways. The
+# shipped implementation streams PHYSICAL lines through a redaction
+# state machine (_redacted_chunks) instead; these tests pin each
+# finding's case.
+
+EQUIVALENCE_TEXTS = [
+    "plain log line\nanother line\n",
+    "2024-01-01 10:00:00 INFO password=hunter2 login\n",
+    "Bearer abcdefghijklmnopqrstuvwx\nnext line\n",
+    "Bearer\nabcdefghijklmnopqrstuvwx\nnext line\n",          # cross-line Bearer
+    "password=\nhunter2\nnext line\n",                        # cross-line labeled
+    "password=\n\n\nhunter2\n",                               # labeled, blank lines between
+    "the password\nis not a credential\n",                    # prose label, no separator
+    "-----BEGIN PRIVATE KEY-----\nMIIabc\nMIIdef\n-----END PRIVATE KEY-----\n",
+    "pre -----BEGIN PRIVATE KEY-----\nBODY1\n-----END PRIVATE KEY----- post\n",
+    ("-----BEGIN PRIVATE KEY-----\nAAA\n"
+     "-----END PRIVATE KEY----- -----BEGIN PRIVATE KEY-----\n"
+     "SECONDBODY\n-----END PRIVATE KEY-----\ntail\n"),        # finding 1: BEGIN on END line
+    "api_key = 'zzz123456789'\n",
+    "token is ghp_abcdefghijklmnopqrstuvwx1234567890 ok\n",
+    "a\rb\r\nc\nd",
+    "unicode \U0001F600 and\u2028separators\x85here\n",
+]
+
+
+def test_redacted_chunks_match_whole_text_redaction():
+    from app.redact import redact_secrets
+    for text in EQUIVALENCE_TEXTS:
+        streamed = "".join(service._redacted_chunks(text.encode("utf-8")))
+        assert streamed == redact_secrets(text), text
+
+
+def test_pem_end_line_suffix_is_reprocessed_not_dropped():
+    # Finding 1, content side: text after an END marker on the same line
+    # is reprocessed as fresh input, exactly as whole-text redaction
+    # leaves it (appended to the [REDACTED] line the block collapses
+    # to) — and the streaming result equals the legacy standard path's.
+    content = (
+        "-----BEGIN PRIVATE KEY-----\nAAA\n"
+        "-----END PRIVATE KEY----- 2024-01-01 10:00:00 ERROR after the block\n"
+    ).encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    assert "AAA" not in json.dumps(out["results"], default=str)
+    legacy = analyze_upload("s.log", content)
+    assert "error" not in legacy, legacy
+    assert out["results"]["level_counts"] == legacy["results"]["level_counts"]
+    assert out["results"]["total_lines"] == legacy["results"]["total_lines"]
+    assert out["results"]["parsed_lines"] == legacy["results"]["parsed_lines"]
+
+
+def test_second_pem_begin_on_end_line_does_not_leak():
+    # Finding 1, leak side: a second BEGIN marker sharing the first
+    # block's END line starts a new block; its body must be dropped,
+    # not written. The body here is an ERROR line, so a leak would be
+    # retained in the result as an issue — fully observable.
+    content = (
+        "-----BEGIN PRIVATE KEY-----\nAAA\n"
+        "-----END PRIVATE KEY----- -----BEGIN PRIVATE KEY-----\n"
+        "2024-01-01 10:00:00 ERROR SECRETMARKER\n"
+        "-----END PRIVATE KEY-----\n"
+        "2024-01-01 11:00:00 INFO ok\n"
+    ).encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    blob = json.dumps(out, default=str)
+    assert "SECRETMARKER" not in blob
+    assert out["results"]["level_counts"].get("ERROR", 0) == 0
+    legacy = analyze_upload("s.log", content)
+    assert out["results"]["level_counts"] == legacy["results"]["level_counts"]
+    assert out["results"]["total_lines"] == legacy["results"]["total_lines"]
+
+
+def test_cross_line_credentials_do_not_leak():
+    # Finding 2: Bearer and labeled credentials split across lines.
+    # Whole-text redaction matches across the newline (\\s+ / \\s*),
+    # merging the pair into one redacted line; per-line redaction
+    # leaked the value as its own line (observable as an extra line
+    # and, for the ERROR cases, a retained unredacted issue).
+    content = (
+        "2024-01-01 10:00:00 ERROR Bearer\n"
+        "abcdefghijklmnopqrstuvwx\n"
+        "2024-01-01 10:01:00 ERROR password=\n"
+        "hunter2\n"
+        "2024-01-01 10:02:00 INFO ok\n"
+    ).encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    blob = json.dumps(out, default=str)
+    assert "abcdefghijklmnopqrstuvwx" not in blob
+    assert "hunter2" not in blob
+    legacy = analyze_upload("s.log", content)
+    assert "error" not in legacy, legacy
+    assert out["results"]["level_counts"] == legacy["results"]["level_counts"]
+    assert out["results"]["total_lines"] == legacy["results"]["total_lines"]
+
+
+def test_jsonlines_sampling_uses_redacted_stream_window():
+    # Finding 3: a >200-line PEM block collapses to one redacted line,
+    # so JSON records after it fall inside the 200-line sample window
+    # of the redacted stream (legacy behavior) and are adapted.
+    pem = ("-----BEGIN PRIVATE KEY-----\n"
+           + "BODYLINE\n" * 205
+           + "-----END PRIVATE KEY-----\n")
+    rows = [
+        {"time": "2024-01-01T10:00:00Z", "severity": "error", "msg": "disk full"},
+        {"time": "2024-01-01T10:01:00Z", "severity": "error", "msg": "disk full"},
+    ]
+    content = (pem + "\n".join(json.dumps(r) for r in rows) + "\n").encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    assert out["detected_format"] == "jsonlines"
+    assert out["results"]["level_counts"]["ERROR"] == 2
+
+
+def test_literal_u2028_inside_json_record_preserved():
+    # Finding 4: unadapted text is written verbatim; a literal U+2028
+    # inside a JSON record must not split the record into two lines.
+    record = {"timestamp": "2024-01-01T10:00:00Z", "level": "error",
+              "message": "boom\u2028rest"}
+    content = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    assert out["results"]["total_lines"] == 1
+    assert out["results"]["level_counts"]["ERROR"] == 1
+    assert out["results"]["malformed_lines"] == 0
+
+
 # --- the acceptance fixture: ~90 MB class, non-BMP heavy --------------------
 
 def test_nonbmp_heavy_90mb_class_passes_supervised_worker():

@@ -11,6 +11,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import re
 import signal
 import tempfile
 import time
@@ -106,18 +107,59 @@ def count_original_lines(content: bytes) -> int:
 # materialized a splitlines() list and a redacted copy of that str. For
 # valid UTF-8 containing non-BMP characters (e.g. emoji), CPython stores
 # the entire decoded string at 4 bytes per character, so a ~92 MB upload
-# needed ~368 MB for the decoded str alone — plus the resident byte
-# buffer, the splitlines copies, and the redaction copy — and the
+# needed ~368 MB for the decoded str alone \u2014 plus the resident byte
+# buffer, the splitlines copies, and the redaction copy \u2014 and the
 # supervised worker died with MemoryError at decode under its 512 MiB
-# address-space ceiling before analysis started. The helpers below stream
-# the oversize path instead: the upload is decoded incrementally in
-# chunks and processed one line at a time, so peak preprocessing memory
-# is bounded by the longest single line (times the fixed per-line
-# redaction transient), never by the decoded size of the whole upload.
-# The standard (free) path is unchanged: at the 10 MB ceiling the legacy
+# address-space ceiling before analysis started.
+#
+# The oversize path now streams, in three passes over the resident byte
+# buffer, and never materializes the decoded upload:
+#   1. count the ORIGINAL decoded lines (splitlines() semantics, T6);
+#   2. detect JSON-lines over the REDACTED stream (below);
+#   3. write the analysis file from the redacted stream \u2014 verbatim for
+#      plain text (original line separators preserved), or adapted line
+#      by line for JSON-lines input, exactly like the legacy flow.
+# Peak preprocessing memory is bounded by the longest physical line plus
+# a bounded deferred tail, never by the decoded size of the upload. The
+# standard (free) path is unchanged: at the 10 MB ceiling the legacy
 # whole-text flow fits comfortably.
+#
+# The redacted stream (_redacted_chunks) reproduces whole-text
+# redact_secrets() semantics without holding the whole text:
+# - Text is carried as PHYSICAL lines (split only on \r, \n, \r\n \u2014
+#   the boundaries text-file iteration uses), terminators included, so
+#   characters like U+2028 inside a record are preserved intact and the
+#   analyzer sees exactly the lines it would have seen before.
+# - A segment is emitted through redact_secrets() only once its tail
+#   cannot extend a match into later text. The patterns whose matches
+#   can cross a line boundary are exactly: the PEM block (handled
+#   statefully), Bearer\\s+token, and the labeled-credential pattern
+#   (\\s* around the separator and value). A pending tail ending in
+#   "Bearer" + optional whitespace, or in a credential label +
+#   optional separator + optional whitespace, is therefore deferred
+#   until the next line completes (or kills) the match; every other
+#   pattern is line-local because its character classes exclude
+#   whitespace, so a value running to a line end is already final.
+# - PEM blocks: the begin line emits everything before the marker
+#   (redacted) plus REDACTED; body lines are dropped until the end
+#   marker line; the suffix AFTER an end marker is reprocessed as
+#   fresh input (it may itself contain text, or another begin marker).
+#   One disclosed tightening: an UNTERMINATED PEM block at end of
+#   input is dropped, where whole-text redaction (which requires the
+#   end marker to match) would have left it in place \u2014 key material
+#   is never emitted either way the block was headed.
 
 _DECODE_CHUNK_BYTES = 1024 * 1024
+
+
+def _decoded_chunks(content: bytes):
+    """Yield the incremental UTF-8-with-replacement decoding of *content*
+    in _DECODE_CHUNK_BYTES pieces (multi-byte characters straddling a
+    chunk boundary decode correctly)."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    for start in range(0, len(content), _DECODE_CHUNK_BYTES):
+        yield decoder.decode(content[start:start + _DECODE_CHUNK_BYTES])
+    yield decoder.decode(b"", final=True)
 
 
 def _strip_line_break(line: str) -> str:
@@ -129,23 +171,11 @@ def _strip_line_break(line: str) -> str:
     return line
 
 
-def _iter_decoded_lines(content: bytes):
-    """Yield the decoded lines of *content*, one at a time.
-
-    Equivalent to ``content.decode("utf-8", errors="replace").splitlines()``
-    (same incremental UTF-8-with-replacement decoding, same line-break
-    set, CRLF counted once even when it straddles a chunk boundary), but
-    only one line plus one decoded chunk is resident at a time.
-    """
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-
-    def _decoded_chunks():
-        for start in range(0, len(content), _DECODE_CHUNK_BYTES):
-            yield decoder.decode(content[start:start + _DECODE_CHUNK_BYTES])
-        yield decoder.decode(b"", final=True)
-
+def _splitlines_from_chunks(chunks):
+    """Yield splitlines() lines (breaks removed) from an iterable of str
+    chunks, holding only one partial line plus one chunk at a time."""
     buf = ""
-    for text_chunk in _decoded_chunks():
+    for text_chunk in chunks:
         if not text_chunk:
             continue  # chunk was the first half of a multi-byte character
         parts = (buf + text_chunk).splitlines(True)
@@ -162,67 +192,159 @@ def _iter_decoded_lines(content: bytes):
         yield _strip_line_break(buf)
 
 
-def _oversize_preflight(content: bytes) -> tuple[int, bool]:
-    """Streaming pass 1 for the oversize path.
+def _iter_decoded_lines(content: bytes):
+    """Yield the decoded lines of *content*, one at a time.
 
-    Returns (original_line_count, is_jsonlines): the ORIGINAL decoded
-    line count, pre-redaction (T6 — redaction must not shrink an
-    over-ceiling upload under the limit), and the JSON-lines verdict,
-    computed with the same sampling rule as _looks_like_jsonlines over
-    the redacted first _SAMPLE_LINES lines, without retaining them.
+    Equivalent to ``content.decode("utf-8", errors="replace").splitlines()``
+    (same incremental decoding, same line-break set, CRLF counted once
+    even when it straddles a chunk boundary).
     """
-    count = 0
+    yield from _splitlines_from_chunks(_decoded_chunks(content))
+
+
+def _physical_lines_from_chunks(chunks):
+    """Yield physical lines WITH their terminators from str chunks.
+
+    Splits only on \r, \n, and \r\n \u2014 the boundaries text-file
+    iteration (and therefore analyze_log_file) uses \u2014 so a line
+    containing U+2028, U+0085, or other splitlines()-only breaks stays
+    one physical line, exactly as the legacy whole-text file write
+    presented it to the analyzer.
+    """
+    buf = ""
+    for text_chunk in chunks:
+        if not text_chunk:
+            continue
+        buf += text_chunk
+        start = 0
+        while True:
+            idx_n = buf.find("\n", start)
+            idx_r = buf.find("\r", start)
+            if idx_n == -1 and idx_r == -1:
+                break
+            if idx_r == -1:
+                p = idx_n
+            elif idx_n == -1:
+                p = idx_r
+            else:
+                p = min(idx_n, idx_r)
+            if buf[p] == "\r" and p == len(buf) - 1:
+                break  # possible \r\n split across chunks \u2014 wait for more
+            end = p + 2 if buf[p] == "\r" and buf[p + 1] == "\n" else p + 1
+            yield buf[start:end]
+            start = end
+        buf = buf[start:]
+    if buf:
+        yield buf
+
+
+def _split_first_physical_line(text: str) -> tuple[str, str]:
+    """Split *text* into (first physical line incl. terminator, rest)."""
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            return text[:i + 1], text[i + 1:]
+        if ch == "\r":
+            if i + 1 < len(text) and text[i + 1] == "\n":
+                return text[:i + 2], text[i + 2:]
+            return text[:i + 1], text[i + 1:]
+    return text, ""
+
+
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+# A pending tail that could still grow into a cross-line credential
+# match: "Bearer" + whitespace-so-far, or a credential label with an
+# optional separator and whitespace-so-far (the labeled pattern is
+# case-insensitive; "Bearer" is not).
+_EXTENDABLE_TAIL_RE = re.compile(
+    r"(?:(?i:api[_-]?key|apikey|auth[_-]?token|access[_-]?token|"
+    r"client[_-]?secret|aws[_-]?secret|secret[_-]?key|"
+    r"password|passwd|pwd|db[_-]?password)(?:\s*[:=])?\s*"
+    r"|Bearer\s*)$"
+)
+
+
+def _redacted_chunks(content: bytes):
+    """Yield the redacted text of *content* in segments, streaming.
+
+    Reproduces redact_secrets() applied to the whole decoded text (see
+    the section comment for the equivalence argument and the one
+    disclosed unterminated-PEM tightening). Only one physical line plus
+    a deferred extendable tail (or one in-progress PEM line) is held.
+    """
+    pending = ""
+    in_pem_block = False
+    for physical_line in _physical_lines_from_chunks(_decoded_chunks(content)):
+        pending += physical_line
+        while pending:
+            if in_pem_block:
+                line, rest = _split_first_physical_line(pending)
+                end_match = _PEM_END_RE.search(line)
+                if end_match is None:
+                    pending = rest  # block body line: dropped
+                    continue
+                in_pem_block = False
+                # Reprocess whatever follows the end marker as fresh
+                # input: it may be ordinary text or another begin marker.
+                pending = line[end_match.end():] + rest
+                continue
+            begin_match = _PEM_BEGIN_RE.search(pending)
+            if begin_match is not None:
+                if begin_match.start():
+                    yield redact_secrets(pending[:begin_match.start()])
+                yield REDACTED
+                pending = pending[begin_match.end():]
+                in_pem_block = True
+                continue
+            if _EXTENDABLE_TAIL_RE.search(pending):
+                break  # a credential match may complete on the next line
+            yield redact_secrets(pending)
+            pending = ""
+    if pending and not in_pem_block:
+        yield redact_secrets(pending)
+
+
+def _count_streamed_lines(content: bytes) -> int:
+    """ORIGINAL decoded line count, pre-redaction (T6), streamed."""
+    return sum(1 for _ in _iter_decoded_lines(content))
+
+
+def _detect_jsonlines_streaming(content: bytes) -> bool:
+    """JSON-lines verdict over the REDACTED stream, streamed.
+
+    Same sampling rule as _looks_like_jsonlines (first _SAMPLE_LINES
+    lines of the redacted text, splitlines() semantics, >=50% JSON
+    objects) \u2014 sampling the redacted stream matters: a multi-line
+    PEM block collapses to one redacted line, shifting the window.
+    """
     checked = 0
     hits = 0
-    for index, line in enumerate(_iter_decoded_lines(content)):
-        count += 1
-        if index < _SAMPLE_LINES:
-            sample = redact_secrets(line).strip()
-            if not sample:
-                continue
-            checked += 1
-            try:
-                if isinstance(json.loads(sample), dict):
-                    hits += 1
-            except (json.JSONDecodeError, ValueError):
-                pass
-    return count, (checked > 0 and hits / checked >= 0.5)
-
-
-_PEM_BEGIN_MARKER = "-----BEGIN "
-_PEM_END_MARKER = "PRIVATE KEY-----"
+    lines = _splitlines_from_chunks(_redacted_chunks(content))
+    for index, line in enumerate(lines):
+        if index >= _SAMPLE_LINES:
+            break
+        sample = line.strip()
+        if not sample:
+            continue
+        checked += 1
+        try:
+            if isinstance(json.loads(sample), dict):
+                hits += 1
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return checked > 0 and hits / checked >= 0.5
 
 
 def _write_streamed_analysis_file(content: bytes, adapt_jsonlines: bool, out) -> None:
-    """Streaming pass 2 for the oversize path: write the redacted (and,
-    for JSON-lines input, adapted) analysis file one line at a time.
-
-    Redaction is per line, matching redact_secrets() semantics for every
-    pattern that lives within a line. The one multi-line pattern — a PEM
-    private-key block — is handled statefully: the begin line is emitted
-    with everything from the marker onward replaced by REDACTED, and the
-    following lines are dropped until the end marker line, so key
-    material never reaches the analysis file (the whole-text flow
-    collapses the block to a single REDACTED token in place; the
-    streamed flow keeps the surrounding lines separate — the secret
-    itself is removed identically).
-    """
-    in_pem_block = False
-    for line in _iter_decoded_lines(content):
-        if in_pem_block:
-            if _PEM_END_MARKER in line and "-----END " in line:
-                in_pem_block = False
-            continue
-        begin = line.find(_PEM_BEGIN_MARKER)
-        if (begin != -1 and _PEM_END_MARKER in line
-                and "-----END " not in line[begin:]):
-            out.write(redact_secrets(line[:begin]) + REDACTED + "\n")
-            in_pem_block = True
-            continue
-        redacted = redact_secrets(line)
-        if adapt_jsonlines:
-            redacted = _jsonline_to_text(redacted)
-        out.write(redacted + "\n")
+    """Write the analysis file for the oversize path from the redacted
+    stream: verbatim (separators preserved) for plain text, or the
+    JSON-lines adaptation line by line, as the legacy flow did."""
+    if not adapt_jsonlines:
+        for chunk in _redacted_chunks(content):
+            out.write(chunk)
+        return
+    for line in _splitlines_from_chunks(_redacted_chunks(content)):
+        out.write(_jsonline_to_text(line) + "\n")
 
 
 def classify_upload_size(nbytes: int, nlines: int) -> str:
@@ -441,7 +563,7 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
     if streaming:
         # T6: count ORIGINAL decoded lines pre-redaction. Redaction must
         # not shrink an over-ceiling upload under the limit.
-        original_line_count, is_jsonlines = _oversize_preflight(content)
+        original_line_count = _count_streamed_lines(content)
         if original_line_count > line_limit:
             return {
                 "error": "too_many_lines",
@@ -449,6 +571,7 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
                            "For larger files, consider splitting by time range.",
                 "filename": filename,
             }
+        is_jsonlines = _detect_jsonlines_streaming(content)
         detected_format = "jsonlines" if is_jsonlines else "text"
         adapted = is_jsonlines
     else:
