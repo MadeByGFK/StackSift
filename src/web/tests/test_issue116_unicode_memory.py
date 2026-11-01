@@ -134,6 +134,16 @@ EQUIVALENCE_TEXTS = [
     "token is ghp_abcdefghijklmnopqrstuvwx1234567890 ok\n",
     "a\rb\r\nc\nd",
     "unicode \U0001F600 and\u2028separators\x85here\n",
+    # PR #121 head-2 review corpus (findings 1\u20132):
+    "2024-01-01 10:00:00 INFO something password\n" * 3,   # label-ending lines
+    "password=password\nnext line\n",          # label word as a sealed value
+    "password password\nnext line\n",          # label word as a sealed value
+    "password=Bearer\nnext line\n",            # Bearer word as a sealed value
+    'password=\n"hunter2"\nnext line\n',       # quoted value on the next line
+    'password="\nhunter2"\nnext line\n',       # quote before the break: no match
+    "pre -----BEGIN PRIVATE KEY----- BODY -----END PRIVATE KEY----- post\n",
+    ('password="-----BEGIN PRIVATE KEY-----\nBODY\n'
+     '-----END PRIVATE KEY-----hunter2"\nnext line\n'),    # finding 2
 ]
 
 
@@ -238,6 +248,90 @@ def test_literal_u2028_inside_json_record_preserved():
     assert out["results"]["total_lines"] == 1
     assert out["results"]["level_counts"]["ERROR"] == 1
     assert out["results"]["malformed_lines"] == 0
+
+
+# --- Codex review findings on PR #121 head 2 (all verified) -----------------
+#
+# Head 2 fixed the per-line redaction divergences but introduced a
+# state machine that (1) deferred the WHOLE pending buffer whenever
+# its tail looked extendable, (2) emitted a PEM block's prefix and
+# replacement separately, breaking a labeled credential whose value
+# contained the block, and (3) wrote adapted JSON-lines with a
+# trailing newline per line instead of join semantics.
+
+
+def test_pem_block_inside_labeled_credential_value_redacted():
+    # Finding 2: whole-text redaction runs the PEM pattern BEFORE the
+    # labeled-credential pattern, so password="<PEM block>hunter2"
+    # collapses to password=[REDACTED]. Emitting the prefix, the PEM
+    # replacement, and the suffix as separate segments leaked hunter2.
+    content = (
+        '2024-01-01 10:00:00 ERROR password="-----BEGIN PRIVATE KEY-----\n'
+        "BODY\n"
+        '-----END PRIVATE KEY-----hunter2"\n'
+        "2024-01-01 10:01:00 INFO ok\n"
+    ).encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    blob = json.dumps(out, default=str)
+    assert "hunter2" not in blob
+    assert "BODY" not in blob
+    legacy = analyze_upload("s.log", content)
+    assert "error" not in legacy, legacy
+    assert out["results"]["level_counts"] == legacy["results"]["level_counts"]
+    assert out["results"]["total_lines"] == legacy["results"]["total_lines"]
+
+
+def test_jsonlines_trailing_blank_line_matches_legacy_counts():
+    # Finding 3 (P3): the legacy adaptation is "\n".join(lines); a
+    # record followed by a blank line is ONE line to the analyzer.
+    # Appending "\n" after every adapted line made it two lines, the
+    # second counted malformed.
+    record = {"timestamp": "2024-01-01T10:00:00Z", "level": "error",
+              "message": "disk full"}
+    content = (json.dumps(record) + "\n\n").encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    assert out["detected_format"] == "jsonlines"
+    assert out["results"]["total_lines"] == 1
+    assert out["results"]["malformed_lines"] == 0
+    legacy = analyze_upload("s.log", content)
+    assert "error" not in legacy, legacy
+    assert out["results"]["total_lines"] == legacy["results"]["total_lines"]
+    assert out["results"]["malformed_lines"] == legacy["results"]["malformed_lines"]
+
+
+def test_label_ending_lines_do_not_accumulate_pending(monkeypatch):
+    # Finding 1 (P2): lines ending in a bare label word make the tail
+    # "extendable" on every line. Head 2 deferred the entire pending
+    # buffer each time, so the decoded upload accumulated (and was
+    # rescanned) whole \u2014 a 92 MB fixture of such lines timed out the
+    # supervised worker at 60s. Head 3 emits the finalized prefix and
+    # holds only the unresolved suffix: peak preprocessing memory
+    # stays in the one-line class, and the output still equals
+    # whole-text redaction exactly.
+    import hashlib
+    import tracemalloc
+
+    from app.redact import redact_secrets
+
+    monkeypatch.setattr(service, "_DECODE_CHUNK_BYTES", 65536)
+    line = "2024-01-01 10:00:00 INFO " + "x" * 50000 + " password\n"
+    text = line * 80  # ~4 MB of label-ending lines
+    content = text.encode()
+    expected = hashlib.sha256(redact_secrets(text).encode()).hexdigest()
+    digest = hashlib.sha256()
+    tracemalloc.start()
+    try:
+        # Consume segment by segment: the test itself must not
+        # accumulate the output it is measuring.
+        for segment in service._redacted_chunks(content):
+            digest.update(segment.encode())
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert digest.hexdigest() == expected
+    assert peak < 2_000_000, peak
 
 
 # --- the acceptance fixture: ~90 MB class, non-BMP heavy --------------------

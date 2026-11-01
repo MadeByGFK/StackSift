@@ -17,7 +17,7 @@ import tempfile
 import time
 
 from app.vendor.analyzer import analyze_log_file
-from app.redact import redact_secrets, REDACTED
+from app.redact import redact_secrets, REDACTED, _PATTERNS as _REDACT_PATTERNS
 from app.vendor.insights import (
     build_timeline,
     determine_health,
@@ -134,20 +134,30 @@ def count_original_lines(content: bytes) -> int:
 #   cannot extend a match into later text. The patterns whose matches
 #   can cross a line boundary are exactly: the PEM block (handled
 #   statefully), Bearer\\s+token, and the labeled-credential pattern
-#   (\\s* around the separator and value). A pending tail ending in
-#   "Bearer" + optional whitespace, or in a credential label +
-#   optional separator + optional whitespace, is therefore deferred
-#   until the next line completes (or kills) the match; every other
-#   pattern is line-local because its character classes exclude
-#   whitespace, so a value running to a line end is already final.
-# - PEM blocks: the begin line emits everything before the marker
-#   (redacted) plus REDACTED; body lines are dropped until the end
-#   marker line; the suffix AFTER an end marker is reprocessed as
-#   fresh input (it may itself contain text, or another begin marker).
-#   One disclosed tightening: an UNTERMINATED PEM block at end of
-#   input is dropped, where whole-text redaction (which requires the
-#   end marker to match) would have left it in place \u2014 key material
-#   is never emitted either way the block was headed.
+#   (\\s* around the separator and value). Only the genuinely
+#   unresolved SUFFIX is deferred \u2014 a tail ending in "Bearer" +
+#   optional whitespace, or in a credential label + optional
+#   separator + optional whitespace + optional opening quote \u2014
+#   while the finalized prefix before it is emitted as soon as it is
+#   known final (_flush_split): deferring the whole buffer would let
+#   ordinary lines ending in a label word accumulate and rescan the
+#   entire upload. A suffix candidate that is itself the value of an
+#   already-sealed earlier match is consumed by that match, not held.
+#   Every other pattern is line-local because its character classes
+#   exclude whitespace, so a value running to a line end is final.
+# - PEM blocks: body lines are dropped until the end marker line, and
+#   the block is replaced IN PLACE in the pending text \u2014 the prefix
+#   before the begin marker is NOT emitted separately, so a labeled
+#   credential whose value contains a PEM block still redacts as one
+#   match once the replacement and the suffix after the end marker
+#   pass through the remaining patterns together (whole-text order:
+#   the PEM pattern runs before the labeled-credential pattern). The
+#   suffix after an end marker is reprocessed as fresh input (it may
+#   itself contain text, or another begin marker). One disclosed
+#   tightening: an UNTERMINATED PEM block at end of input is dropped,
+#   where whole-text redaction (which requires the end marker to
+#   match) would have left it in place \u2014 key material is never
+#   emitted either way the block was headed.
 
 _DECODE_CHUNK_BYTES = 1024 * 1024
 
@@ -238,30 +248,72 @@ def _physical_lines_from_chunks(chunks):
         yield buf
 
 
-def _split_first_physical_line(text: str) -> tuple[str, str]:
-    """Split *text* into (first physical line incl. terminator, rest)."""
-    for i, ch in enumerate(text):
-        if ch == "\n":
-            return text[:i + 1], text[i + 1:]
-        if ch == "\r":
-            if i + 1 < len(text) and text[i + 1] == "\n":
-                return text[:i + 2], text[i + 2:]
-            return text[:i + 1], text[i + 1:]
-    return text, ""
-
-
 _PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
 # A pending tail that could still grow into a cross-line credential
 # match: "Bearer" + whitespace-so-far, or a credential label with an
-# optional separator and whitespace-so-far (the labeled pattern is
-# case-insensitive; "Bearer" is not).
+# optional separator, whitespace-so-far, and an optional opening quote
+# (the labeled pattern is case-insensitive; "Bearer" is not).
 _EXTENDABLE_TAIL_RE = re.compile(
     r"(?:(?i:api[_-]?key|apikey|auth[_-]?token|access[_-]?token|"
     r"client[_-]?secret|aws[_-]?secret|secret[_-]?key|"
-    r"password|passwd|pwd|db[_-]?password)(?:\s*[:=])?\s*"
+    r"password|passwd|pwd|db[_-]?password)(?:\s*[:=])?\s*[\"']?"
     r"|Bearer\s*)$"
 )
+
+# The PEM pattern is excluded from the sealed-match scan in
+# _flush_split: complete PEM blocks are substituted before the flush
+# decision, and an in-progress block is carried by the PEM state.
+_PEM_PATTERN_PREFIX = "-----BEGIN"
+
+
+def _extendable_suffix_start(text: str):
+    """Start index of the suffix of *text* that could still extend a
+    cross-line credential match with future input, or None."""
+    match = _EXTENDABLE_TAIL_RE.search(text)
+    return match.start() if match is not None else None
+
+
+def _flush_split(text: str) -> int:
+    """Index up to which *text* is final and may be emitted through
+    redact_secrets() now; text[result:] is the held unresolved suffix
+    (empty when the whole text is final).
+
+    The held suffix starts at the earliest extendable tail (see
+    _EXTENDABLE_TAIL_RE), except when that candidate is itself inside
+    an already-sealed redaction match \u2014 e.g. the word "password"
+    serving as the VALUE of "password=password": the earlier match
+    consumed it under whole-text left-to-right scanning, it is sealed
+    by the character that terminated its value inside *text*, and the
+    scan resumes after it. (A candidate inside a match that reaches
+    the very end of *text* unsealed is held from the match's start \u2014
+    that can only be the unterminated final line, flushed whole at
+    end of input anyway.)
+    """
+    candidate = _extendable_suffix_start(text)
+    if candidate is None:
+        return len(text)
+    while candidate > 0:
+        covering = None
+        for pattern, _replacement in _REDACT_PATTERNS:
+            if pattern.pattern.startswith(_PEM_PATTERN_PREFIX):
+                continue
+            for match in pattern.finditer(text):
+                if match.start() < candidate < match.end():
+                    covering = match
+                    break
+            if covering is not None:
+                break
+        if covering is None:
+            break
+        if covering.end() >= len(text):
+            candidate = covering.start()
+            break
+        rest_candidate = _extendable_suffix_start(text[covering.end():])
+        if rest_candidate is None:
+            return len(text)
+        candidate = covering.end() + rest_candidate
+    return candidate
 
 
 def _redacted_chunks(content: bytes):
@@ -270,37 +322,53 @@ def _redacted_chunks(content: bytes):
     Reproduces redact_secrets() applied to the whole decoded text (see
     the section comment for the equivalence argument and the one
     disclosed unterminated-PEM tightening). Only one physical line plus
-    a deferred extendable tail (or one in-progress PEM line) is held.
+    a deferred extendable suffix (or one in-progress PEM begin line's
+    prefix) is held.
     """
     pending = ""
-    in_pem_block = False
+    pem_prefix = None  # not None while inside a PEM block: the text
+    # before the begin marker, retained so the block's replacement is
+    # redacted together with its surrounding context.
     for physical_line in _physical_lines_from_chunks(_decoded_chunks(content)):
-        pending += physical_line
+        if pem_prefix is not None:
+            end_match = _PEM_END_RE.search(physical_line)
+            if end_match is None:
+                continue  # block body line: dropped
+            # Replace the block in place: prefix + REDACTED + whatever
+            # follows the end marker, reprocessed as fresh input below.
+            pending = pem_prefix + REDACTED + physical_line[end_match.end():]
+            pem_prefix = None
+        else:
+            pending += physical_line
         while pending:
-            if in_pem_block:
-                line, rest = _split_first_physical_line(pending)
-                end_match = _PEM_END_RE.search(line)
-                if end_match is None:
-                    pending = rest  # block body line: dropped
-                    continue
-                in_pem_block = False
-                # Reprocess whatever follows the end marker as fresh
-                # input: it may be ordinary text or another begin marker.
-                pending = line[end_match.end():] + rest
-                continue
             begin_match = _PEM_BEGIN_RE.search(pending)
             if begin_match is not None:
-                if begin_match.start():
-                    yield redact_secrets(pending[:begin_match.start()])
-                yield REDACTED
-                pending = pending[begin_match.end():]
-                in_pem_block = True
-                continue
-            if _EXTENDABLE_TAIL_RE.search(pending):
-                break  # a credential match may complete on the next line
-            yield redact_secrets(pending)
-            pending = ""
-    if pending and not in_pem_block:
+                after_begin = pending[begin_match.end():]
+                end_match = _PEM_END_RE.search(after_begin)
+                if end_match is not None:
+                    # Complete block inside the pending text: substitute
+                    # in place and reprocess (another block, or an
+                    # extendable tail, may follow in the same text).
+                    pending = (pending[:begin_match.start()] + REDACTED
+                               + after_begin[end_match.end():])
+                    continue
+                # Block continues past this text: retain only the
+                # prefix; the begin marker and any body text already
+                # in pending are block material and are dropped.
+                pem_prefix = pending[:begin_match.start()]
+                pending = ""
+                break
+            split = _flush_split(pending)
+            if split == 0:
+                break  # the whole text is one unresolved suffix
+            yield redact_secrets(pending[:split])
+            pending = pending[split:]
+            break  # any remainder is the held unresolved suffix
+    if pem_prefix is not None:
+        if pem_prefix:
+            yield redact_secrets(pem_prefix)
+        yield REDACTED
+    elif pending:
         yield redact_secrets(pending)
 
 
@@ -343,8 +411,16 @@ def _write_streamed_analysis_file(content: bytes, adapt_jsonlines: bool, out) ->
         for chunk in _redacted_chunks(content):
             out.write(chunk)
         return
+    # Legacy semantics are "\n".join(adapted lines): separators go
+    # BETWEEN lines, never after the last one. Appending "\n" after
+    # every line turned a trailing blank line into an extra malformed
+    # line in the analyzer's counts (PR #121 review, finding 3).
+    first = True
     for line in _splitlines_from_chunks(_redacted_chunks(content)):
-        out.write(_jsonline_to_text(line) + "\n")
+        if not first:
+            out.write("\n")
+        first = False
+        out.write(_jsonline_to_text(line))
 
 
 def classify_upload_size(nbytes: int, nlines: int) -> str:
