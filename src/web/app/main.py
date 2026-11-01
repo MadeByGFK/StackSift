@@ -900,7 +900,7 @@ def _store_paid_pending(file_hash: str, filename: str, content: bytes, meta: dic
     path = _paid_pending_path(file_hash)
     with _PENDING_LOCK:
         cleanup_pending_uploads()
-        if sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin")) + len(content) > _PAID_PENDING_BUDGET:
+        if _pending_usage_bytes() + len(content) > _PAID_PENDING_BUDGET:
             raise RuntimeError("Pending upload capacity exhausted")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as f:
@@ -958,15 +958,36 @@ def cleanup_pending_uploads():
             pass
 
 
+def _pending_usage_bytes() -> int:
+    """Aggregate size of live pending uploads, race-safe by construction.
+
+    Issue #118: a pending file may be unlinked (worker completion,
+    TTL expiry, cleanup) after the glob discovers it but before stat
+    runs. A vanished file contributes 0 instead of raising
+    FileNotFoundError into consent creation.
+    """
+    total = 0
+    for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin"):
+        try:
+            total += p.stat().st_size
+        except FileNotFoundError:
+            continue
+    return total
+
+
 def _delete_paid_pending(file_hash: str) -> None:
-    try:
-        os.unlink(_paid_pending_path(file_hash))
-    except OSError:
-        pass
-    try:
-        os.unlink(_paid_pending_meta_path(file_hash))
-    except OSError:
-        pass
+    # Issue #118: deletions are serialized on _PENDING_LOCK so they
+    # cannot interleave with the budget scans in the _store_*_pending
+    # functions, which hold the lock across glob + stat + write.
+    with _PENDING_LOCK:
+        try:
+            os.unlink(_paid_pending_path(file_hash))
+        except OSError:
+            pass
+        try:
+            os.unlink(_paid_pending_meta_path(file_hash))
+        except OSError:
+            pass
 
 
 # Issue #102: pair-pending storage for a comparison consent. The two
@@ -981,7 +1002,7 @@ def _store_compare_pending(consent_id: str, filename_a: str, content_a: bytes,
     path = _paid_pending_path(consent_id)
     with _PENDING_LOCK:
         cleanup_pending_uploads()
-        if (sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin"))
+        if (_pending_usage_bytes()
                 + len(content_a) + len(content_b) > _PAID_PENDING_BUDGET):
             raise RuntimeError("Pending upload capacity exhausted")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1879,7 +1900,7 @@ def _store_batch_pending(consent_id: str, files, counts) -> None:
     path = _paid_pending_path(consent_id)
     with _PENDING_LOCK:
         cleanup_pending_uploads()
-        if (sum(p.stat().st_size for p in Path(_PAID_PENDING_DIR).glob("pending-*.bin"))
+        if (_pending_usage_bytes()
                 + envelope_size > _PAID_PENDING_BUDGET):
             raise RuntimeError("Pending upload capacity exhausted")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
