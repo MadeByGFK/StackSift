@@ -80,6 +80,35 @@
     <div class="callout">
       <div class="k">Investigate first</div>
       <div class="v">[{{ report.diagnostic_issue[1].level }}] {{ report.diagnostic_issue[0] }} <span style="color:var(--muted);font-weight:400">x {{ report.diagnostic_issue[1].count }}</span></div>
+      {% if report.diagnostic_explanation %}
+      <div class="why">{{ report.diagnostic_explanation|join(' · ') }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+    {% if report.timeline and report.timeline|length > 1 %}
+    <h4>Incident timeline <span style="color:var(--muted);font-weight:400">— warnings + errors per 5 min</span></h4>
+    {% if report.results.first_seen and report.results.last_seen %}
+    <div class="meta" style="margin-bottom:8px">First event: {{ report.results.first_seen }} · Last event: {{ report.results.last_seen }}</div>
+    {% endif %}
+    {% set tmax = report.timeline|map(attribute='total')|max %}
+    <div class="timeline">
+      {% for b in report.timeline %}
+      {% set issues = b.warn + b.error + b.critical %}
+      <div class="tbar" title="{{ b.label }} — {{ b.critical }} critical, {{ b.error }} errors, {{ b.warn }} warnings">
+        <div class="tcount">{{ issues if issues > 0 else '' }}</div>
+        <div class="tstack" style="height: {{ (issues / tmax * 100) if tmax else 0 }}%">
+          {% if b.critical > 0 %}<div class="tseg seg-critical" style="height: {{ (b.critical / issues * 100) }}%"></div>{% endif %}
+          {% if b.error > 0 %}<div class="tseg seg-error" style="height: {{ (b.error / issues * 100) }}%"></div>{% endif %}
+          {% if b.warn > 0 %}<div class="tseg seg-warn" style="height: {{ (b.warn / issues * 100) }}%"></div>{% endif %}
+        </div>
+        <div class="tbar-label">{{ b.label if loop.index0 % 2 == 0 else '' }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="tlegend">
+      <span><i class="sw seg-critical"></i>Critical</span>
+      <span><i class="sw seg-error"></i>Error</span>
+      <span><i class="sw seg-warn"></i>Warning</span>
     </div>
     {% endif %}
     <h4>Issues</h4>

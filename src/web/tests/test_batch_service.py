@@ -304,3 +304,54 @@ def test_batch_pdf_discloses_per_file_omissions_and_keeps_sections():
     assert b"more issue patterns in this file not shown" in pdf
     assert b"rare failure" in pdf  # second section NOT silently omitted
     assert b"File 2: small.log" in pdf
+
+
+# --- Per-file diagnostic context rendering (Codex P2 on PR #114) ----------
+# The combined artifacts must render the per-file diagnostic explanation
+# and timeline retained in the payload, like the single-file report does;
+# reducing each file to its headline + issue counts loses paid context.
+
+def _context_payload():
+    a = _payload("a.log", {"db failed": _group(10)})
+    a["diagnostic_issue"] = ("db failed", {"level": "ERROR", "count": 10})
+    a["diagnostic_explanation"] = [
+        "Errors cluster in a single burst", "First seen at startup"]
+    a["timeline"] = [
+        {"label": "10:00", "warn": 1, "error": 4, "critical": 0, "total": 5},
+        {"label": "10:05", "warn": 0, "error": 6, "critical": 1, "total": 7},
+    ]
+    b = _payload("b.log", {"auth expired": _group(7, "WARN")})
+    return build_batch_payload(
+        [(1, "a.log", a), (2, "b.log", b)],
+        pricing={"file_count": 2, "first_file_cost": 0,
+                 "additional_file_cost": 1, "total_cost": 1})
+
+
+def test_batch_pdf_renders_per_file_diagnostic_context():
+    payload = _context_payload()
+    pdf = generate_batch_pdf(json.dumps(payload, default=str), payload["filename"])
+    assert pdf.startswith(b"%PDF")
+    assert b"Errors cluster in a single burst" in pdf
+    assert b"Investigate first: [ERROR] db failed" in pdf
+    assert b"Timeline: warnings + errors per 5 min" in pdf
+    assert b"10:05: 1 critical, 6 errors, 0 warnings" in pdf
+
+
+def test_batch_html_renders_per_file_diagnostic_context():
+    from pathlib import Path
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    templates_dir = Path(__file__).parents[1] / "app" / "templates"
+    env = Environment(loader=FileSystemLoader(str(templates_dir)),
+                      autoescape=select_autoescape(["html"]))
+    payload = _context_payload()
+    html = env.get_template("batch_report.html").render(
+        filename=payload["filename"],
+        summary_sentence=payload["summary_sentence"],
+        summary=payload["summary"],
+        combined_issues=payload["combined_issues"],
+        files=payload["files"],
+        current_user=None, report_id=None, csrf_token="")
+    assert "Errors cluster in a single burst" in html
+    assert "First seen at startup" in html
+    assert "Incident timeline" in html
+    assert "10:05" in html

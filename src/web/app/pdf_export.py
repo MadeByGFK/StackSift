@@ -370,6 +370,27 @@ def generate_batch_pdf(manifest_json: str, filename: str = "batch") -> bytes:
         line(f"Malformed Lines: {results.get('malformed_lines', 0)}", size=10)
         if report.get("complexity_truncated") and report.get("complexity_notice"):
             para(report["complexity_notice"], style="I")
+        diagnostic = report.get("diagnostic_issue")
+        if diagnostic:
+            detail = diagnostic[1] or {}
+            line(f"Investigate first: [{detail.get('level', '')}] "
+                 f"{diagnostic[0]} (x{detail.get('count', '')})",
+                 size=10, style="B")
+            for point in report.get("diagnostic_explanation") or []:
+                para(f"- {point}")
+        timeline = report.get("timeline") or []
+        if len(timeline) > 1:
+            line("Timeline: warnings + errors per 5 min — "
+                 f"{sum(b.get('critical', 0) or 0 for b in timeline)} critical, "
+                 f"{sum(b.get('error', 0) or 0 for b in timeline)} errors, "
+                 f"{sum(b.get('warn', 0) or 0 for b in timeline)} warnings "
+                 f"across {len(timeline)} buckets", size=10)
+            if len(timeline) <= 12:
+                for bucket in timeline:
+                    line(f"{bucket.get('label', '')}: "
+                         f"{bucket.get('critical', 0)} critical, "
+                         f"{bucket.get('error', 0)} errors, "
+                         f"{bucket.get('warn', 0)} warnings", size=10)
         issues = report.get("sorted_issues") or []
         if issues:
             for template, detail in issues[:MAX_ISSUES]:
