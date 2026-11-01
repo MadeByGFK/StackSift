@@ -16,7 +16,7 @@ import tempfile
 import time
 
 from app.vendor.analyzer import analyze_log_file
-from app.redact import redact_secrets
+from app.redact import redact_secrets, REDACTED
 from app.vendor.insights import (
     build_timeline,
     determine_health,
@@ -98,6 +98,131 @@ def count_original_lines(content: bytes) -> int:
         if count > MAX_OVERSIZE_UPLOAD_LINES:
             return MAX_OVERSIZE_UPLOAD_LINES + 1
     return count
+
+
+# --- Issue #116: bounded-memory preprocessing for the oversize path -------
+#
+# The pre-#116 oversize path decoded the WHOLE upload into one str, then
+# materialized a splitlines() list and a redacted copy of that str. For
+# valid UTF-8 containing non-BMP characters (e.g. emoji), CPython stores
+# the entire decoded string at 4 bytes per character, so a ~92 MB upload
+# needed ~368 MB for the decoded str alone — plus the resident byte
+# buffer, the splitlines copies, and the redaction copy — and the
+# supervised worker died with MemoryError at decode under its 512 MiB
+# address-space ceiling before analysis started. The helpers below stream
+# the oversize path instead: the upload is decoded incrementally in
+# chunks and processed one line at a time, so peak preprocessing memory
+# is bounded by the longest single line (times the fixed per-line
+# redaction transient), never by the decoded size of the whole upload.
+# The standard (free) path is unchanged: at the 10 MB ceiling the legacy
+# whole-text flow fits comfortably.
+
+_DECODE_CHUNK_BYTES = 1024 * 1024
+
+
+def _strip_line_break(line: str) -> str:
+    """Remove the single trailing line break splitlines() semantics imply."""
+    if line.endswith("\r\n"):
+        return line[:-2]
+    if line and line[-1] in _LINE_BREAK_CHARS:
+        return line[:-1]
+    return line
+
+
+def _iter_decoded_lines(content: bytes):
+    """Yield the decoded lines of *content*, one at a time.
+
+    Equivalent to ``content.decode("utf-8", errors="replace").splitlines()``
+    (same incremental UTF-8-with-replacement decoding, same line-break
+    set, CRLF counted once even when it straddles a chunk boundary), but
+    only one line plus one decoded chunk is resident at a time.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def _decoded_chunks():
+        for start in range(0, len(content), _DECODE_CHUNK_BYTES):
+            yield decoder.decode(content[start:start + _DECODE_CHUNK_BYTES])
+        yield decoder.decode(b"", final=True)
+
+    buf = ""
+    for text_chunk in _decoded_chunks():
+        if not text_chunk:
+            continue  # chunk was the first half of a multi-byte character
+        parts = (buf + text_chunk).splitlines(True)
+        if not parts:
+            buf = ""
+            continue
+        # Every part but the last ends with a line break, so it is a
+        # complete line. The last part is held: it may be a partial line,
+        # or end in "\r" whose "\n" half arrives in the next chunk.
+        for part in parts[:-1]:
+            yield _strip_line_break(part)
+        buf = parts[-1]
+    if buf:
+        yield _strip_line_break(buf)
+
+
+def _oversize_preflight(content: bytes) -> tuple[int, bool]:
+    """Streaming pass 1 for the oversize path.
+
+    Returns (original_line_count, is_jsonlines): the ORIGINAL decoded
+    line count, pre-redaction (T6 — redaction must not shrink an
+    over-ceiling upload under the limit), and the JSON-lines verdict,
+    computed with the same sampling rule as _looks_like_jsonlines over
+    the redacted first _SAMPLE_LINES lines, without retaining them.
+    """
+    count = 0
+    checked = 0
+    hits = 0
+    for index, line in enumerate(_iter_decoded_lines(content)):
+        count += 1
+        if index < _SAMPLE_LINES:
+            sample = redact_secrets(line).strip()
+            if not sample:
+                continue
+            checked += 1
+            try:
+                if isinstance(json.loads(sample), dict):
+                    hits += 1
+            except (json.JSONDecodeError, ValueError):
+                pass
+    return count, (checked > 0 and hits / checked >= 0.5)
+
+
+_PEM_BEGIN_MARKER = "-----BEGIN "
+_PEM_END_MARKER = "PRIVATE KEY-----"
+
+
+def _write_streamed_analysis_file(content: bytes, adapt_jsonlines: bool, out) -> None:
+    """Streaming pass 2 for the oversize path: write the redacted (and,
+    for JSON-lines input, adapted) analysis file one line at a time.
+
+    Redaction is per line, matching redact_secrets() semantics for every
+    pattern that lives within a line. The one multi-line pattern — a PEM
+    private-key block — is handled statefully: the begin line is emitted
+    with everything from the marker onward replaced by REDACTED, and the
+    following lines are dropped until the end marker line, so key
+    material never reaches the analysis file (the whole-text flow
+    collapses the block to a single REDACTED token in place; the
+    streamed flow keeps the surrounding lines separate — the secret
+    itself is removed identically).
+    """
+    in_pem_block = False
+    for line in _iter_decoded_lines(content):
+        if in_pem_block:
+            if _PEM_END_MARKER in line and "-----END " in line:
+                in_pem_block = False
+            continue
+        begin = line.find(_PEM_BEGIN_MARKER)
+        if (begin != -1 and _PEM_END_MARKER in line
+                and "-----END " not in line[begin:]):
+            out.write(redact_secrets(line[:begin]) + REDACTED + "\n")
+            in_pem_block = True
+            continue
+        redacted = redact_secrets(line)
+        if adapt_jsonlines:
+            redacted = _jsonline_to_text(redacted)
+        out.write(redacted + "\n")
 
 
 def classify_upload_size(nbytes: int, nlines: int) -> str:
@@ -256,6 +381,12 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
     whose parent process enforces the deadline instead (T5: SIGALRM is never
     moved into a thread; the standard path keeps its 25-second SIGALRM).
 
+    Issue #116: with allow_oversize=True the preprocessing (line counting,
+    JSON-lines sampling, redaction, analysis-file writing) streams line
+    by line via _iter_decoded_lines, so a supported upload whose decoded
+    form expands (non-BMP characters store at 4 bytes/char) cannot exceed
+    the supervised worker's memory ceiling merely by being decoded.
+
     original_byte_count (issue #104 follow-up, PR #111 finding 6): when the
     supervised worker analyzes REDACTED bytes for a confirmed oversize run,
     the byte ceiling must be checked against the SERVER-measured original
@@ -300,37 +431,51 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
                        "ensure it's saved as plain text (UTF-8).",
             "filename": filename,
         }
-    text = content.decode("utf-8", errors="replace")
-    # T6: count ORIGINAL decoded lines pre-redaction. Redaction must not
-    # shrink an over-ceiling upload under the limit.
-    original_line_count = len(text.splitlines())
-    # Redact recognized patterns before creating the analysis file.
-    # This does not cover the framework's earlier raw-upload spool.
-    text = redact_secrets(text)
-    lines = text.splitlines()
-    checked_lines = original_line_count if allow_oversize else len(lines)
-    if checked_lines > line_limit:
-        if allow_oversize:
+    # Issue #116: the oversize path never materializes the whole decoded
+    # text (see _iter_decoded_lines). It counts original lines and samples
+    # the format in one streaming pass here, and writes the redacted
+    # analysis file in a second streaming pass below. The standard path
+    # keeps the legacy whole-text flow exactly.
+    streaming = allow_oversize
+    text = None
+    if streaming:
+        # T6: count ORIGINAL decoded lines pre-redaction. Redaction must
+        # not shrink an over-ceiling upload under the limit.
+        original_line_count, is_jsonlines = _oversize_preflight(content)
+        if original_line_count > line_limit:
             return {
                 "error": "too_many_lines",
                 "message": f"Too many lines ({original_line_count:,}). Maximum is 500,000 lines. "
                            "For larger files, consider splitting by time range.",
                 "filename": filename,
             }
-        return {
-            "error": "too_many_lines",
-            "message": f"Too many lines ({len(lines):,}). Maximum is 50,000 lines. "
-                       "For larger files, consider splitting by time range.",
-            "filename": filename,
-        }
+        detected_format = "jsonlines" if is_jsonlines else "text"
+        adapted = is_jsonlines
+    else:
+        text = content.decode("utf-8", errors="replace")
+        # T6: count ORIGINAL decoded lines pre-redaction. Redaction must
+        # not shrink an over-ceiling upload under the limit.
+        original_line_count = len(text.splitlines())
+        # Redact recognized patterns before creating the analysis file.
+        # This does not cover the framework's earlier raw-upload spool.
+        text = redact_secrets(text)
+        lines = text.splitlines()
+        checked_lines = original_line_count if allow_oversize else len(lines)
+        if checked_lines > line_limit:
+            return {
+                "error": "too_many_lines",
+                "message": f"Too many lines ({len(lines):,}). Maximum is 50,000 lines. "
+                           "For larger files, consider splitting by time range.",
+                "filename": filename,
+            }
 
-    detected_format = "text"
-    adapted = False
-    if _looks_like_jsonlines(lines):
-        detected_format = "jsonlines"
-        adapted = True
-        lines = [_jsonline_to_text(line) for line in lines]
-        text = "\n".join(lines)
+        detected_format = "text"
+        adapted = False
+        if _looks_like_jsonlines(lines):
+            detected_format = "jsonlines"
+            adapted = True
+            lines = [_jsonline_to_text(line) for line in lines]
+            text = "\n".join(lines)
 
     tmp_path = None
     start = time.perf_counter()
@@ -347,8 +492,11 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".log", delete=False, encoding="utf-8"
             ) as tmp:
-                tmp.write(text)
                 tmp_path = tmp.name
+                if streaming:
+                    _write_streamed_analysis_file(content, adapted, tmp)
+                else:
+                    tmp.write(text)
 
             # Issue #102: opt-in comparison evidence, default OFF so the
             # single-file result shape is unchanged for every other caller.
