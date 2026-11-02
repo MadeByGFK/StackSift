@@ -459,3 +459,50 @@ def test_nonbmp_heavy_90mb_class_passes_supervised_worker():
     assert "error" not in data, data
     assert data["results"]["total_lines"] == 100
     assert data["results"]["level_counts"]["INFO"] == 100
+
+
+# --- Codex review findings on PR #121 head 5 (all verified) -----------------
+#
+# Head 5's _claimed_matches discarded phantoms via finditer, whose
+# advancement past a phantom also swallows a real match that overlaps
+# the phantom's span; and its inside-a-claim test scanned every
+# previous claim, quadratic on a line holding many tokens. Head 6
+# resumes the scan at phantom.start() + 1 and indexes claims as
+# merged intervals (bisect).
+
+
+def test_phantom_discard_does_not_swallow_overlapping_real_match():
+    # Finding (4438198364): the labeled match starting inside this
+    # Bearer token is a phantom (the token pattern claimed the
+    # region), but its secret run extends past the token and covers
+    # a REAL second label. Discarding the phantom must still
+    # discover the real match as a claim.
+    from app.redact import redact_secrets
+
+    text = "ERROR Bearer aaaaaaaaapassword=va!uepassword=hunter2 done\n"
+    claims = service._claimed_matches(text)
+    labeled = [c for c in claims if c[2] == service._LABELED_ORDER]
+    assert labeled, claims
+    start, end, _order = labeled[0]
+    assert text[start:end].startswith("password=hunter2")
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    assert streamed == redact_secrets(text)
+    assert "hunter2" not in streamed
+
+
+def test_many_tokens_line_claims_not_quadratic():
+    # Finding (4438198370): Codex's exact fixture \u2014 100k ghp_
+    # tokens on one line ending in an extendable label. Head 5's
+    # per-match claim scan times the supervised worker out at 60s;
+    # the whole-text flow needs ~0.3s.
+    import time
+
+    from app.redact import redact_secrets
+
+    text = ("ghp_" + "a" * 20 + " ") * 100000 + "password=\nhunter2\n"
+    start = time.perf_counter()
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    elapsed = time.perf_counter() - start
+    assert streamed == redact_secrets(text)
+    assert "hunter2" not in streamed
+    assert elapsed < 10, elapsed
