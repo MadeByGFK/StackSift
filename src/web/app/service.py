@@ -11,12 +11,13 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import re
 import signal
 import tempfile
 import time
 
 from app.vendor.analyzer import analyze_log_file
-from app.redact import redact_secrets
+from app.redact import redact_secrets, REDACTED, _PATTERNS as _REDACT_PATTERNS
 from app.vendor.insights import (
     build_timeline,
     determine_health,
@@ -98,6 +99,489 @@ def count_original_lines(content: bytes) -> int:
         if count > MAX_OVERSIZE_UPLOAD_LINES:
             return MAX_OVERSIZE_UPLOAD_LINES + 1
     return count
+
+
+# --- Issue #116: bounded-memory preprocessing for the oversize path -------
+#
+# The pre-#116 oversize path decoded the WHOLE upload into one str, then
+# materialized a splitlines() list and a redacted copy of that str. For
+# valid UTF-8 containing non-BMP characters (e.g. emoji), CPython stores
+# the entire decoded string at 4 bytes per character, so a ~92 MB upload
+# needed ~368 MB for the decoded str alone \u2014 plus the resident byte
+# buffer, the splitlines copies, and the redaction copy \u2014 and the
+# supervised worker died with MemoryError at decode under its 512 MiB
+# address-space ceiling before analysis started.
+#
+# The oversize path now streams, in three passes over the resident byte
+# buffer, and never materializes the decoded upload:
+#   1. count the ORIGINAL decoded lines (splitlines() semantics, T6);
+#   2. detect JSON-lines over the REDACTED stream (below);
+#   3. write the analysis file from the redacted stream \u2014 verbatim for
+#      plain text (original line separators preserved), or adapted line
+#      by line for JSON-lines input, exactly like the legacy flow.
+# Peak preprocessing memory is bounded by the longest physical line plus
+# a bounded deferred tail, never by the decoded size of the upload. The
+# standard (free) path is unchanged: at the 10 MB ceiling the legacy
+# whole-text flow fits comfortably.
+#
+# The redacted stream (_redacted_chunks) reproduces whole-text
+# redact_secrets() semantics without holding the whole text:
+# - Text is carried as PHYSICAL lines (split only on \r, \n, \r\n \u2014
+#   the boundaries text-file iteration uses), terminators included, so
+#   characters like U+2028 inside a record are preserved intact and the
+#   analyzer sees exactly the lines it would have seen before.
+# - A segment is emitted through redact_secrets() only once its tail
+#   cannot extend a match into later text. The patterns whose matches
+#   can cross a line boundary are exactly: the PEM block (handled
+#   statefully), Bearer\\s+token, and the labeled-credential pattern
+#   (\\s* around the separator and value). Only the genuinely
+#   unresolved SUFFIX is deferred \u2014 a tail ending in "Bearer" +
+#   optional whitespace, or in a credential label + optional
+#   separator + optional whitespace \u2014
+#   while the finalized prefix before it is emitted as soon as it is
+#   known final (_flush_split): deferring the whole buffer would let
+#   ordinary lines ending in a label word accumulate and rescan the
+#   entire upload. A suffix candidate that is itself the value of an
+#   already-sealed earlier match is consumed by that match, not held
+#   \u2014 unless the candidate is a Bearer tail, which no later pattern
+#   can seal (Bearer runs first in redact_secrets()). A held suffix
+#   that is exactly a label plus whitespace is tracked by state, not
+#   rescanned, while whitespace-only lines keep arriving. Every
+#   other pattern is line-local because its character classes
+#   exclude whitespace, so a value running to a line end is final.
+# - PEM blocks: body lines are dropped until the end marker line, and
+#   the block is replaced IN PLACE in the pending text \u2014 the prefix
+#   before the begin marker is NOT emitted separately, so a labeled
+#   credential whose value contains a PEM block still redacts as one
+#   match once the replacement and the suffix after the end marker
+#   pass through the remaining patterns together (whole-text order:
+#   the PEM pattern runs before the labeled-credential pattern). The
+#   suffix after an end marker is reprocessed as fresh input (it may
+#   itself contain text, or another begin marker). One disclosed
+#   tightening: an UNTERMINATED PEM block at end of input is dropped,
+#   where whole-text redaction (which requires the end marker to
+#   match) would have left it in place \u2014 key material is never
+#   emitted either way the block was headed.
+
+_DECODE_CHUNK_BYTES = 1024 * 1024
+
+
+def _decoded_chunks(content: bytes):
+    """Yield the incremental UTF-8-with-replacement decoding of *content*
+    in _DECODE_CHUNK_BYTES pieces (multi-byte characters straddling a
+    chunk boundary decode correctly)."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    for start in range(0, len(content), _DECODE_CHUNK_BYTES):
+        yield decoder.decode(content[start:start + _DECODE_CHUNK_BYTES])
+    yield decoder.decode(b"", final=True)
+
+
+def _strip_line_break(line: str) -> str:
+    """Remove the single trailing line break splitlines() semantics imply."""
+    if line.endswith("\r\n"):
+        return line[:-2]
+    if line and line[-1] in _LINE_BREAK_CHARS:
+        return line[:-1]
+    return line
+
+
+def _splitlines_from_chunks(chunks):
+    """Yield splitlines() lines (breaks removed) from an iterable of str
+    chunks, holding only one partial line plus one chunk at a time."""
+    buf = ""
+    for text_chunk in chunks:
+        if not text_chunk:
+            continue  # chunk was the first half of a multi-byte character
+        parts = (buf + text_chunk).splitlines(True)
+        if not parts:
+            buf = ""
+            continue
+        # Every part but the last ends with a line break, so it is a
+        # complete line. The last part is held: it may be a partial line,
+        # or end in "\r" whose "\n" half arrives in the next chunk.
+        for part in parts[:-1]:
+            yield _strip_line_break(part)
+        buf = parts[-1]
+    if buf:
+        yield _strip_line_break(buf)
+
+
+def _iter_decoded_lines(content: bytes):
+    """Yield the decoded lines of *content*, one at a time.
+
+    Equivalent to ``content.decode("utf-8", errors="replace").splitlines()``
+    (same incremental decoding, same line-break set, CRLF counted once
+    even when it straddles a chunk boundary).
+    """
+    yield from _splitlines_from_chunks(_decoded_chunks(content))
+
+
+def _physical_lines_from_chunks(chunks):
+    """Yield physical lines WITH their terminators from str chunks.
+
+    Splits only on \r, \n, and \r\n \u2014 the boundaries text-file
+    iteration (and therefore analyze_log_file) uses \u2014 so a line
+    containing U+2028, U+0085, or other splitlines()-only breaks stays
+    one physical line, exactly as the legacy whole-text file write
+    presented it to the analyzer.
+    """
+    buf = ""
+    for text_chunk in chunks:
+        if not text_chunk:
+            continue
+        buf += text_chunk
+        start = 0
+        while True:
+            idx_n = buf.find("\n", start)
+            idx_r = buf.find("\r", start)
+            if idx_n == -1 and idx_r == -1:
+                break
+            if idx_r == -1:
+                p = idx_n
+            elif idx_n == -1:
+                p = idx_r
+            else:
+                p = min(idx_n, idx_r)
+            if buf[p] == "\r" and p == len(buf) - 1:
+                break  # possible \r\n split across chunks \u2014 wait for more
+            end = p + 2 if buf[p] == "\r" and buf[p + 1] == "\n" else p + 1
+            yield buf[start:end]
+            start = end
+        buf = buf[start:]
+    if buf:
+        yield buf
+
+
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+# A pending tail that could still grow into a cross-line credential
+# match: "Bearer" + whitespace-so-far, or a credential label with an
+# optional separator and whitespace-so-far (the labeled pattern is
+# case-insensitive; "Bearer" is not). No opening quote is admitted:
+# a labeled secret must follow its quote immediately, so at a
+# physical-line end (where a line break always intervenes) a quoted
+# tail can never complete \u2014 holding one would be pure delay.
+_LABEL_ALT = (
+    r"api[_-]?key|apikey|auth[_-]?token|access[_-]?token|"
+    r"client[_-]?secret|aws[_-]?secret|secret[_-]?key|"
+    r"password|passwd|pwd|db[_-]?password"
+)
+_EXTENDABLE_TAIL_RE = re.compile(
+    r"(?:(?i:" + _LABEL_ALT + r")(?:\s*[:=])?\s*"
+    r"|Bearer\s*)$"
+)
+# A held suffix consisting of exactly a credential label (or Bearer)
+# plus separator/whitespace: while the incoming lines are whitespace
+# only, this suffix stays in the same state, so it is tracked with a
+# flag instead of being rescanned per line (a label followed by
+# thousands of blank-ish lines otherwise rescans a growing buffer on
+# every line \u2014 quadratic in the size of the whitespace run).
+_WS_TAIL_RE = re.compile(
+    r"(?:(?i:" + _LABEL_ALT + r")(?:\s*[:=])?\s*|Bearer\s*)\Z"
+)
+_WS_ONLY_RE = re.compile(r"\s*\Z")
+
+# The PEM pattern is excluded from the sealed-match scan in
+# _flush_split: complete PEM blocks are substituted before the flush
+# decision, and an in-progress block is carried by the PEM state.
+_PEM_PATTERN_PREFIX = "-----BEGIN"
+
+
+def _extendable_suffix_start(text: str):
+    """Start index of the suffix of *text* that could still extend a
+    cross-line credential match with future input, or None."""
+    match = _EXTENDABLE_TAIL_RE.search(text)
+    return match.start() if match is not None else None
+
+
+# Non-PEM redaction patterns in redact_secrets() application order.
+_ORDERED_PATTERNS = [p for p, _r in _REDACT_PATTERNS
+                     if not p.pattern.startswith(_PEM_PATTERN_PREFIX)]
+_BEARER_ORDER = next(i for i, p in enumerate(_ORDERED_PATTERNS)
+                     if p.pattern.startswith("Bearer"))
+_LABELED_ORDER = next(i for i, p in enumerate(_ORDERED_PATTERNS)
+                      if "(?P<label>" in p.pattern)
+
+
+def _claimed_matches(text: str):
+    """Redaction matches in *text* that survive pattern order.
+
+    redact_secrets() applies its patterns sequentially over the whole
+    text, so a match whose span intersects a region an earlier
+    pattern already claimed can never form as written \u2014 the
+    earlier substitution rewrote that part of the text (e.g. a
+    "password" label inside a ghp_ token, or a Bearer token broken
+    by the ghp_ substitution inside it). Returns (start, end, order)
+    intervals with such phantom matches discarded. The PEM pattern
+    is excluded: complete blocks are substituted before the flush
+    decision, and an in-progress block is carried by the PEM state.
+
+    Implementation points, each from a Codex finding on PR #121:
+    discarding a phantom must not swallow a real match that overlaps
+    it, so the scan resumes just past the covering claim's end (a
+    real match can start there, never inside the claim); and the
+    claim index is a merged-interval list maintained by bulk merge
+    per pattern \u2014 per-match list insertion and per-match scans of
+    every previous claim are both quadratic on lines holding many
+    credentials.
+    """
+    import bisect
+
+    claims = []
+    merged_starts = []  # sorted, disjoint claimed intervals
+    merged_ends = []
+
+    def _intersecting(start, end):
+        """First claimed interval intersecting [start, end), or None."""
+        i = bisect.bisect_right(merged_starts, start) - 1
+        if i >= 0 and merged_ends[i] > start:
+            return merged_starts[i], merged_ends[i]
+        j = i + 1
+        if j < len(merged_starts) and merged_starts[j] < end:
+            return merged_starts[j], merged_ends[j]
+        return None
+
+    def _bulk_merge(accepted):
+        """Merge one pattern's accepted intervals (sorted, disjoint,
+        and non-intersecting with the index) into the index in a
+        single linear sweep."""
+        if not accepted:
+            return
+        new_starts = []
+        new_ends = []
+        i = 0
+        for s, e, _o in accepted:
+            while i < len(merged_starts) and merged_ends[i] < s:
+                new_starts.append(merged_starts[i])
+                new_ends.append(merged_ends[i])
+                i += 1
+            if i < len(merged_starts) and merged_starts[i] <= e:
+                s = min(s, merged_starts[i])
+                e = max(e, merged_ends[i])
+                i += 1
+            new_starts.append(s)
+            new_ends.append(e)
+        while i < len(merged_starts):
+            new_starts.append(merged_starts[i])
+            new_ends.append(merged_ends[i])
+            i += 1
+        merged_starts[:] = new_starts
+        merged_ends[:] = new_ends
+
+    for order, pattern in enumerate(_ORDERED_PATTERNS):
+        accepted = []
+        pos = 0
+        while pos <= len(text):
+            match = pattern.search(text, pos)
+            if match is None:
+                break
+            hit = _intersecting(match.start(), match.end())
+            if hit is not None:
+                s, e = hit
+                if s <= match.start():
+                    # The match starts inside a claimed region: no
+                    # real match can start inside it either, so skip
+                    # the whole region instead of rescanning it.
+                    pos = e
+                else:
+                    # The match starts before a claimed region and
+                    # overlaps it: the substitution inside its span
+                    # invalidates it. Step past its start and keep
+                    # looking for matches that survive.
+                    pos = match.start() + 1
+                continue
+            accepted.append((match.start(), match.end(), order))
+            pos = max(match.end(), match.start() + 1)
+        claims.extend(accepted)
+        _bulk_merge(accepted)
+    return claims
+
+
+def _flush_split(text: str) -> int:
+    """Index up to which *text* is final and may be emitted through
+    redact_secrets() now; text[result:] is the held unresolved suffix
+    (empty when the whole text is final).
+
+    The held suffix starts at the earliest extendable tail (see
+    _EXTENDABLE_TAIL_RE), adjusted by the claimed matches (see
+    _claimed_matches) that cover it, under pattern order:
+
+    - covered by an earlier-or-equal pattern's SEALED match (the
+      match is terminated inside *text*): that match consumed the
+      candidate \u2014 e.g. the word "password" serving as the VALUE of
+      "password=password" \u2014 so the scan resumes after it and only
+      a later extendable suffix can still be held;
+    - covered by a LATER pattern's match (a labeled match covering a
+      Bearer tail, password=Bearer): the earlier pattern can still
+      claim the region, so the match is unresolved and the hold
+      extends to its start;
+    - covered by a match that reaches the end of *text* unsealed:
+      hold from the match's start (only the unterminated final line
+      can do this; it is flushed whole at end of input anyway).
+
+    Finally, the cut may never fall strictly inside a claimed match:
+    emitting the prefix would decide that match on partial text, so
+    the hold extends to its start. Holding more is always safe.
+    """
+    candidate = _extendable_suffix_start(text)
+    if candidate is None:
+        return len(text)
+    claims = _claimed_matches(text)
+    cand_order = (_BEARER_ORDER
+                  if text[candidate:candidate + 6] == "Bearer"
+                  else _LABELED_ORDER)
+    cut = _split_with_claims(text, candidate, cand_order, claims)
+    moved = True
+    while moved:
+        moved = False
+        for s, e, _o in claims:
+            if s < cut < e:
+                cut = s
+                moved = True
+    return cut
+
+
+def _split_with_claims(text: str, candidate: int, cand_order: int,
+                       claims) -> int:
+    """The _flush_split adjustment for one extendable candidate."""
+    covering = [c for c in claims if c[0] < candidate < c[1]]
+    if not covering:
+        return candidate
+    s, e, o = min(covering, key=lambda c: c[2])
+    if o > cand_order or e >= len(text):
+        return s
+    # Sealed by an earlier-or-equal pattern: decide the remainder
+    # after the match as its own text.
+    return e + _flush_split(text[e:])
+
+
+def _redacted_chunks(content: bytes):
+    """Yield the redacted text of *content* in segments, streaming.
+
+    Reproduces redact_secrets() applied to the whole decoded text (see
+    the section comment for the equivalence argument and the one
+    disclosed unterminated-PEM tightening). Only one physical line plus
+    a deferred extendable suffix (or one in-progress PEM begin line's
+    prefix) is held.
+    """
+    pending = ""
+    pem_prefix = None  # not None while inside a PEM block: the text
+    # before the begin marker, retained so the block's replacement is
+    # redacted together with its surrounding context.
+    ws_tail = False  # pending is exactly a label/Bearer + whitespace
+    # (see _WS_TAIL_RE): whitespace-only lines keep it in that state.
+    for physical_line in _physical_lines_from_chunks(_decoded_chunks(content)):
+        if pem_prefix is None and ws_tail and _WS_ONLY_RE.match(physical_line):
+            # Whitespace tail, whitespace line: the state cannot
+            # change, so append without rescanning the held run.
+            pending += physical_line
+            continue
+        if pem_prefix is not None:
+            end_match = _PEM_END_RE.search(physical_line)
+            if end_match is None:
+                ws_tail = False
+                continue  # block body line: dropped
+            # Replace the block in place: prefix + REDACTED + whatever
+            # follows the end marker, reprocessed as fresh input below.
+            pending = pem_prefix + REDACTED + physical_line[end_match.end():]
+            pem_prefix = None
+        else:
+            pending += physical_line
+        while pending:
+            # Substitute every complete PEM block in ONE cursor pass:
+            # rebuilding and rescanning the buffer per block is
+            # quadratic on a line holding many blocks (100k one-line
+            # blocks timed out the supervised worker).
+            parts = []
+            pos = 0
+            block_open = False
+            while True:
+                begin_match = _PEM_BEGIN_RE.search(pending, pos)
+                if begin_match is None:
+                    parts.append(pending[pos:])
+                    break
+                end_match = _PEM_END_RE.search(pending, begin_match.end())
+                if end_match is None:
+                    # Block continues past this text: everything
+                    # before the begin marker (completed blocks
+                    # already substituted) becomes the PEM prefix; the
+                    # marker and any partial body are dropped.
+                    parts.append(pending[pos:begin_match.start()])
+                    pem_prefix = "".join(parts)
+                    pending = ""
+                    block_open = True
+                    break
+                parts.append(pending[pos:begin_match.start()])
+                parts.append(REDACTED)
+                pos = end_match.end()
+            if block_open:
+                break
+            pending = "".join(parts)
+            split = _flush_split(pending)
+            if split == 0:
+                break  # the whole text is one unresolved suffix
+            yield redact_secrets(pending[:split])
+            pending = pending[split:]
+            break  # any remainder is the held unresolved suffix
+        ws_tail = (pem_prefix is None and bool(pending)
+                   and _WS_TAIL_RE.match(pending) is not None)
+    if pem_prefix is not None:
+        if pem_prefix:
+            yield redact_secrets(pem_prefix)
+        yield REDACTED
+    elif pending:
+        yield redact_secrets(pending)
+
+
+def _count_streamed_lines(content: bytes) -> int:
+    """ORIGINAL decoded line count, pre-redaction (T6), streamed."""
+    return sum(1 for _ in _iter_decoded_lines(content))
+
+
+def _detect_jsonlines_streaming(content: bytes) -> bool:
+    """JSON-lines verdict over the REDACTED stream, streamed.
+
+    Same sampling rule as _looks_like_jsonlines (first _SAMPLE_LINES
+    lines of the redacted text, splitlines() semantics, >=50% JSON
+    objects) \u2014 sampling the redacted stream matters: a multi-line
+    PEM block collapses to one redacted line, shifting the window.
+    """
+    checked = 0
+    hits = 0
+    lines = _splitlines_from_chunks(_redacted_chunks(content))
+    for index, line in enumerate(lines):
+        if index >= _SAMPLE_LINES:
+            break
+        sample = line.strip()
+        if not sample:
+            continue
+        checked += 1
+        try:
+            if isinstance(json.loads(sample), dict):
+                hits += 1
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return checked > 0 and hits / checked >= 0.5
+
+
+def _write_streamed_analysis_file(content: bytes, adapt_jsonlines: bool, out) -> None:
+    """Write the analysis file for the oversize path from the redacted
+    stream: verbatim (separators preserved) for plain text, or the
+    JSON-lines adaptation line by line, as the legacy flow did."""
+    if not adapt_jsonlines:
+        for chunk in _redacted_chunks(content):
+            out.write(chunk)
+        return
+    # Legacy semantics are "\n".join(adapted lines): separators go
+    # BETWEEN lines, never after the last one. Appending "\n" after
+    # every line turned a trailing blank line into an extra malformed
+    # line in the analyzer's counts (PR #121 review, finding 3).
+    first = True
+    for line in _splitlines_from_chunks(_redacted_chunks(content)):
+        if not first:
+            out.write("\n")
+        first = False
+        out.write(_jsonline_to_text(line))
 
 
 def classify_upload_size(nbytes: int, nlines: int) -> str:
@@ -256,6 +740,12 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
     whose parent process enforces the deadline instead (T5: SIGALRM is never
     moved into a thread; the standard path keeps its 25-second SIGALRM).
 
+    Issue #116: with allow_oversize=True the preprocessing (line counting,
+    JSON-lines sampling, redaction, analysis-file writing) streams line
+    by line via _iter_decoded_lines, so a supported upload whose decoded
+    form expands (non-BMP characters store at 4 bytes/char) cannot exceed
+    the supervised worker's memory ceiling merely by being decoded.
+
     original_byte_count (issue #104 follow-up, PR #111 finding 6): when the
     supervised worker analyzes REDACTED bytes for a confirmed oversize run,
     the byte ceiling must be checked against the SERVER-measured original
@@ -300,37 +790,52 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
                        "ensure it's saved as plain text (UTF-8).",
             "filename": filename,
         }
-    text = content.decode("utf-8", errors="replace")
-    # T6: count ORIGINAL decoded lines pre-redaction. Redaction must not
-    # shrink an over-ceiling upload under the limit.
-    original_line_count = len(text.splitlines())
-    # Redact recognized patterns before creating the analysis file.
-    # This does not cover the framework's earlier raw-upload spool.
-    text = redact_secrets(text)
-    lines = text.splitlines()
-    checked_lines = original_line_count if allow_oversize else len(lines)
-    if checked_lines > line_limit:
-        if allow_oversize:
+    # Issue #116: the oversize path never materializes the whole decoded
+    # text (see _iter_decoded_lines). It counts original lines and samples
+    # the format in one streaming pass here, and writes the redacted
+    # analysis file in a second streaming pass below. The standard path
+    # keeps the legacy whole-text flow exactly.
+    streaming = allow_oversize
+    text = None
+    if streaming:
+        # T6: count ORIGINAL decoded lines pre-redaction. Redaction must
+        # not shrink an over-ceiling upload under the limit.
+        original_line_count = _count_streamed_lines(content)
+        if original_line_count > line_limit:
             return {
                 "error": "too_many_lines",
                 "message": f"Too many lines ({original_line_count:,}). Maximum is 500,000 lines. "
                            "For larger files, consider splitting by time range.",
                 "filename": filename,
             }
-        return {
-            "error": "too_many_lines",
-            "message": f"Too many lines ({len(lines):,}). Maximum is 50,000 lines. "
-                       "For larger files, consider splitting by time range.",
-            "filename": filename,
-        }
+        is_jsonlines = _detect_jsonlines_streaming(content)
+        detected_format = "jsonlines" if is_jsonlines else "text"
+        adapted = is_jsonlines
+    else:
+        text = content.decode("utf-8", errors="replace")
+        # T6: count ORIGINAL decoded lines pre-redaction. Redaction must
+        # not shrink an over-ceiling upload under the limit.
+        original_line_count = len(text.splitlines())
+        # Redact recognized patterns before creating the analysis file.
+        # This does not cover the framework's earlier raw-upload spool.
+        text = redact_secrets(text)
+        lines = text.splitlines()
+        checked_lines = original_line_count if allow_oversize else len(lines)
+        if checked_lines > line_limit:
+            return {
+                "error": "too_many_lines",
+                "message": f"Too many lines ({len(lines):,}). Maximum is 50,000 lines. "
+                           "For larger files, consider splitting by time range.",
+                "filename": filename,
+            }
 
-    detected_format = "text"
-    adapted = False
-    if _looks_like_jsonlines(lines):
-        detected_format = "jsonlines"
-        adapted = True
-        lines = [_jsonline_to_text(line) for line in lines]
-        text = "\n".join(lines)
+        detected_format = "text"
+        adapted = False
+        if _looks_like_jsonlines(lines):
+            detected_format = "jsonlines"
+            adapted = True
+            lines = [_jsonline_to_text(line) for line in lines]
+            text = "\n".join(lines)
 
     tmp_path = None
     start = time.perf_counter()
@@ -347,8 +852,11 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".log", delete=False, encoding="utf-8"
             ) as tmp:
-                tmp.write(text)
                 tmp_path = tmp.name
+                if streaming:
+                    _write_streamed_analysis_file(content, adapted, tmp)
+                else:
+                    tmp.write(text)
 
             # Issue #102: opt-in comparison evidence, default OFF so the
             # single-file result shape is unchanged for every other caller.
