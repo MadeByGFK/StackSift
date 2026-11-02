@@ -289,9 +289,41 @@ _PEM_PATTERN_PREFIX = "-----BEGIN"
 
 def _extendable_suffix_start(text: str):
     """Start index of the suffix of *text* that could still extend a
-    cross-line credential match with future input, or None."""
-    match = _EXTENDABLE_TAIL_RE.search(text)
-    return match.start() if match is not None else None
+    cross-line credential match with future input, or None.
+
+    Root-cause fix (#116 reopened): the tail is by definition at the
+    END of *text*, but an unanchored search scans the whole text —
+    on a 60 MB single line that scan alone cost seconds per pass.
+    Search only a trailing window, expanding it (doubling) whenever
+    the window cannot rule out an earlier start:
+    - a match starting more than 32 chars into the window is the
+      true leftmost match: any earlier match reaching the end would
+      have to span this match's label letters with its post-label
+      part (whitespace / one separator only — impossible), except a
+      longer label alternative overlapping this match's label
+      (longest alternative is 13 chars, so 32 is a safe margin);
+    - no match in the window rules out a match crossing the window
+      start only when the window holds a character that cannot
+      appear in a post-label part (anything but whitespace/':'/'=');
+      an all-post-label window may hide a label before the window,
+      so it expands.
+    Windows double from 1024 chars, so ruling-out costs O(window),
+    and a genuinely long whitespace tail degrades to the old full
+    scan only in that case.
+    """
+    window = 1024
+    while True:
+        start = max(0, len(text) - window)
+        chunk = text[start:]
+        match = _EXTENDABLE_TAIL_RE.search(chunk)
+        if match is not None:
+            if start == 0 or match.start() > 32:
+                return start + match.start()
+        elif start == 0:
+            return None
+        elif not all(c.isspace() or c in ":=" for c in chunk):
+            return None
+        window *= 2
 
 
 # Non-PEM redaction patterns in redact_secrets() application order.
@@ -478,6 +510,83 @@ def _claimed_matches_flat(text: str):
         cols[2].append(0)
         cols[3].append(len(text))
     for order, (pattern, replacement) in enumerate(_ORDERED_PAIRS):
+        # Fast stage (root-cause fix, #116 reopened): when the segment
+        # map is a single linear piece covering the whole current text
+        # with an identity mapping (position p <-> original p) — the
+        # state before any replacement, and after stages whose
+        # replacements were all identity — position mapping and slice
+        # appending are trivially the identity/gap operations. Running
+        # the general helpers per match (bisect + function calls +
+        # per-piece loops) made a single streamed pass ~10x the cost
+        # of whole-text redact_secrets() on credential-dense lines
+        # (3M labeled matches on C5). This branch performs exactly
+        # the same bookkeeping with those operations inlined; the
+        # general path below is unchanged for multi-piece maps.
+        if (len(cols[0]) == 1 and cols[1][0] and cols[2][0] == 0
+                and cols[3][0] == cols[0][0]):
+            new_cols = _new_cols()
+            n_lens, n_lin, n_ostart, n_oend = new_cols
+            prev_end = 0
+            found = False
+            all_identity = True
+            for match in pattern.finditer(current):
+                found = True
+                s = match.start()
+                e = match.end()
+                claims_flat.extend((s, e, order))
+                if s > prev_end:
+                    # Gap piece [prev_end, s): linear, contiguous.
+                    if (n_lens and n_lin[-1]
+                            and n_ostart[-1] + n_lens[-1] == prev_end):
+                        n_lens[-1] += s - prev_end
+                        n_oend[-1] = s
+                    else:
+                        n_lens.append(s - prev_end)
+                        n_lin.append(1)
+                        n_ostart.append(prev_end)
+                        n_oend.append(s)
+                repl = (replacement(match) if callable(replacement)
+                        else replacement)
+                if repl:
+                    identity = (len(repl) == e - s
+                                and current[s:e] == repl)
+                    if not identity:
+                        all_identity = False
+                    if (identity and n_lens and n_lin[-1]
+                            and n_ostart[-1] + n_lens[-1] == s):
+                        n_lens[-1] += len(repl)
+                        n_oend[-1] = e
+                    else:
+                        n_lens.append(len(repl))
+                        n_lin.append(1 if identity else 0)
+                        n_ostart.append(s)
+                        n_oend.append(e)
+                elif e > s:
+                    all_identity = False  # empty replacement = deletion
+                prev_end = e
+            if not found:
+                continue
+            if all_identity:
+                # Every replacement reproduces its matched span
+                # exactly: the stage's substitution is the identity
+                # on this text, so the segment map is unchanged and
+                # pattern.sub (which would re-invoke the replacement
+                # for every match to rebuild the same string) is
+                # skipped. Claims above are already recorded.
+                continue
+            if len(current) > prev_end:
+                if (n_lens and n_lin[-1]
+                        and n_ostart[-1] + n_lens[-1] == prev_end):
+                    n_lens[-1] += len(current) - prev_end
+                    n_oend[-1] = len(current)
+                else:
+                    n_lens.append(len(current) - prev_end)
+                    n_lin.append(1)
+                    n_ostart.append(prev_end)
+                    n_oend.append(len(current))
+            current = pattern.sub(replacement, current)
+            cols = new_cols
+            continue
         starts, total = _starts_of(cols[0])
         new_cols = _new_cols()
         prev_end = 0
@@ -545,10 +654,108 @@ def _flush_split(text: str) -> int:
     candidate = _extendable_suffix_start(text)
     if candidate is None:
         return len(text)
-    claims = _claimed_matches_flat(text)
     cand_order = (_BEARER_ORDER
                   if text[candidate:candidate + 6] == "Bearer"
                   else _LABELED_ORDER)
+    if len(text) <= _FLUSH_WINDOW_CHARS:
+        claims = _claimed_matches_flat(text)
+        return _cut_from_claims(text, candidate, cand_order, claims)
+    # Windowed claims (root-cause fix, #116 reopened): the cut depends
+    # only on claims covering/straddling points at or after the
+    # candidate's neighbourhood, yet the full simulation walks every
+    # match in the text (3M on C5). Simulate only a trailing window
+    # whose start is a verified barrier (see _flush_window_start):
+    # no match in any pattern stage can cross that start — token
+    # patterns contain no whitespace, and Bearer/labeled matches
+    # cross a whitespace run only in their head-to-value gap, which
+    # the barrier check excludes — so by induction over stages the
+    # window's intermediate texts coincide with the full text's from
+    # the barrier onward, and its claims covering the candidate are
+    # exactly the full simulation's. At the limit the barrier is 0,
+    # where the window simulation IS the full simulation.
+    start = _flush_window_start(text, max(0, candidate
+                                          - _FLUSH_WINDOW_CHARS))
+    window_claims = _claimed_matches_flat(text[start:])
+    from array import array
+    claims = array("q", bytes(8 * len(window_claims)))
+    for i in range(0, len(window_claims), 3):
+        claims[i] = window_claims[i] + start
+        claims[i + 1] = window_claims[i + 1] + start
+        claims[i + 2] = window_claims[i + 2]
+    return _cut_from_claims(text, candidate, cand_order, claims)
+
+
+# Window for the _flush_split claims simulation on long texts.
+_FLUSH_WINDOW_CHARS = 16384
+
+# The barrier's label recognition must cover _LABELED exactly,
+# under the labeled pattern's own case-matching semantics. An ASCII
+# word list checked against .lower() missed first the hyphen /
+# no-separator forms ("api-key", "authtoken" — Codex P1 on PR #124
+# head 1) and then the Unicode case variants re.IGNORECASE admits
+# ("paſſword" with U+017F, "apı_key" with U+0131, "apİ_key" with
+# U+0130 — Codex P1 on PR #124 head 2): .lower()/.casefold() do not
+# map ſ/ı/İ onto s/i, so the barrier could still land inside a live
+# credential match. Matching the previous token with a regex built
+# from _LABEL_ALT itself (the same alternatives _EXTENDABLE_TAIL_RE
+# uses) under re.IGNORECASE delegates case matching to the regex
+# engine, which is the semantics _LABELED actually applies.
+# "bearer" is included under IGNORECASE as before: the Bearer
+# pattern itself is case-sensitive, so retreating for a case variant
+# of the token is an over-approximation — holding more is always
+# safe (see _flush_split).
+_LABEL_END_RE = re.compile(
+    r"(?:" + _LABEL_ALT + r"|bearer)$", re.IGNORECASE)
+
+
+def _flush_window_start(text: str, desired: int) -> int:
+    """A start index <= *desired* that no redaction match can cross.
+
+    The start is moved back to a token boundary. A match crossing a
+    token boundary must contain the whitespace run before the token
+    in its interior; among the patterns, only Bearer and the labeled
+    pattern contain whitespace, and only in the gap between their
+    head (the word Bearer / a credential label) and their value — so
+    crossing is possible only when the token before the whitespace
+    run ends with Bearer or a label (allowing a trailing separator).
+    When it does, the start retreats past that token and rechecks.
+    """
+    pos = desired
+    while pos > 0:
+        while pos > 0 and not text[pos - 1].isspace():
+            pos -= 1
+        # pos is a token start; examine the token before the
+        # whitespace run that precedes it. A separator-only token
+        # ("password = value": the "=" is its own token) is skipped —
+        # the head token is the one before it.
+        run_start = pos
+        while run_start > 0 and text[run_start - 1].isspace():
+            run_start -= 1
+        tok_start = run_start
+        while tok_start > 0 and not text[tok_start - 1].isspace():
+            tok_start -= 1
+        prev = text[tok_start:run_start].rstrip(":= '\",")
+        if not prev:
+            # Separator-only (or empty) token: look one token further.
+            run2 = tok_start
+            while run2 > 0 and text[run2 - 1].isspace():
+                run2 -= 1
+            tok2 = run2
+            while tok2 > 0 and not text[tok2 - 1].isspace():
+                tok2 -= 1
+            prev = text[tok2:run2].rstrip(":= '\",")
+            tok_start = tok2
+        if _LABEL_END_RE.search(prev):
+            pos = tok_start
+            continue
+        return pos
+    return 0
+
+
+def _cut_from_claims(text: str, candidate: int, cand_order: int,
+                     claims) -> int:
+    """The cut for one extendable candidate given its claims (flat
+    array('q') of (start, end, order) triples in text coordinates)."""
     cut = _split_with_claims(text, candidate, cand_order, claims)
     moved = True
     while moved:
@@ -580,14 +787,21 @@ def _split_with_claims(text: str, candidate: int, cand_order: int,
     return e + _flush_split(text[e:])
 
 
+# Bounded batch size for _redacted_chunks processing (see the
+# batching note in the loop): large enough to amortize per-line
+# call overhead, small enough that a batch plus its redaction
+# copies stay a negligible share of the worker limit.
+_REDACTED_BATCH_CHARS = 256 * 1024
+
+
 def _redacted_chunks(content: bytes):
     """Yield the redacted text of *content* in segments, streaming.
 
     Reproduces redact_secrets() applied to the whole decoded text (see
     the section comment for the equivalence argument and the one
-    disclosed unterminated-PEM tightening). Only one physical line plus
-    a deferred extendable suffix (or one in-progress PEM begin line's
-    prefix) is held.
+    disclosed unterminated-PEM tightening). Only a bounded batch of
+    physical lines plus a deferred extendable suffix (or one
+    in-progress PEM begin line's prefix) is held.
     """
     pending = ""
     pem_prefix = None  # not None while inside a PEM block: the text
@@ -612,6 +826,25 @@ def _redacted_chunks(content: bytes):
             pem_prefix = None
         else:
             pending += physical_line
+            if (len(pending) < _REDACTED_BATCH_CHARS
+                    and "-----BEGIN" not in physical_line):
+                # Batching (root-cause fix, #116 reopened): per-line
+                # processing pays redact_secrets' ten pattern calls
+                # per line — on a 400k-line realistic log (corpus
+                # C1) that per-line overhead alone put the candidate
+                # over the baseline gate. Accumulate a bounded batch
+                # and process it with the same state machine: the
+                # processing below is whole-text-correct on any
+                # pending length (PEM cursor pass, _flush_split
+                # holdback at the batch's end), so batching changes
+                # only chunking, never semantics. A line carrying a
+                # PEM begin marker always processes immediately, so
+                # the unterminated-PEM tightening at end of input is
+                # preserved (the final flush below is a plain
+                # redact_secrets, which would leave such a block in
+                # place if it had never entered the PEM state).
+                ws_tail = False
+                continue
         while pending:
             # Substitute every complete PEM block in ONE cursor pass:
             # rebuilding and rescanning the buffer per block is
@@ -703,6 +936,71 @@ def _write_streamed_analysis_file(content: bytes, adapt_jsonlines: bool, out) ->
     # line in the analyzer's counts (PR #121 review, finding 3).
     first = True
     for line in _splitlines_from_chunks(_redacted_chunks(content)):
+        if not first:
+            out.write("\n")
+        first = False
+        out.write(_jsonline_to_text(line))
+
+
+def _spool_redacted_stream(content: bytes, out) -> bool:
+    """ONE redaction pass over *content* (root-cause fix, #116
+    reopened): write the redacted stream to *out* verbatim while
+    sampling the JSON-lines verdict from its head, and return the
+    verdict.
+
+    The pre-fix oversize flow ran _redacted_chunks TWICE — once for
+    format detection and once to write the analysis file — replaying
+    every finalized match's bookkeeping both times. Here the chunk
+    iterator is shared: chunks are written as the line sampler pulls
+    them, and once the sample window (first _SAMPLE_LINES lines) is
+    decided, the remaining chunks are drained write-only. The
+    sampler's held partial line is already written at that point, so
+    discarding it loses nothing. Same sampling rule and verdict as
+    _detect_jsonlines_streaming.
+    """
+    chunks = iter(_redacted_chunks(content))
+
+    def _tee():
+        for chunk in chunks:
+            out.write(chunk)
+            yield chunk
+
+    checked = 0
+    hits = 0
+    for index, line in enumerate(_splitlines_from_chunks(_tee())):
+        if index >= _SAMPLE_LINES:
+            break
+        sample = line.strip()
+        if not sample:
+            continue
+        checked += 1
+        try:
+            if isinstance(json.loads(sample), dict):
+                hits += 1
+        except (json.JSONDecodeError, ValueError):
+            pass
+    for chunk in chunks:
+        out.write(chunk)
+    return checked > 0 and hits / checked >= 0.5
+
+
+def _adapt_spooled_file(spool_path: str, out) -> None:
+    """Write the JSON-lines adaptation of an already-redacted spool
+    file to *out*, streaming in blocks (splitlines() semantics, same
+    "\\n"-between-lines joining as _write_streamed_analysis_file's
+    adapted branch). No redaction runs here — the spool is final
+    redacted text, so this pass is file I/O plus per-line JSON
+    parsing only."""
+    def _blocks():
+        with open(spool_path, encoding="utf-8", newline="") as spool:
+            while True:
+                block = spool.read(1024 * 1024)
+                if not block:
+                    return
+                yield block
+
+    first = True
+    for line in _splitlines_from_chunks(_blocks()):
         if not first:
             out.write("\n")
         first = False
@@ -933,9 +1231,11 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
                            "For larger files, consider splitting by time range.",
                 "filename": filename,
             }
-        is_jsonlines = _detect_jsonlines_streaming(content)
-        detected_format = "jsonlines" if is_jsonlines else "text"
-        adapted = is_jsonlines
+        # Format detection now happens inside the single redaction
+        # pass that writes the analysis file (see
+        # _spool_redacted_stream); these are set there.
+        detected_format = "text"
+        adapted = False
     else:
         text = content.decode("utf-8", errors="replace")
         # T6: count ORIGINAL decoded lines pre-redaction. Redaction must
@@ -979,7 +1279,37 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
             ) as tmp:
                 tmp_path = tmp.name
                 if streaming:
-                    _write_streamed_analysis_file(content, adapted, tmp)
+                    # Single-pass (#116 root-cause fix): redact ONCE,
+                    # spooling the redacted stream to a scratch file
+                    # while the JSON-lines verdict is sampled from
+                    # its head; then produce the analysis file from
+                    # the spool (verbatim for text, adapted for
+                    # JSON-lines) with no second redaction pass.
+                    spool_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".log", delete=False,
+                            encoding="utf-8", newline="",
+                        ) as spool:
+                            spool_path = spool.name
+                            is_jsonlines = _spool_redacted_stream(
+                                content, spool)
+                        detected_format = ("jsonlines" if is_jsonlines
+                                           else "text")
+                        adapted = is_jsonlines
+                        if adapted:
+                            _adapt_spooled_file(spool_path, tmp)
+                        else:
+                            with open(spool_path, encoding="utf-8",
+                                      newline="") as spool_in:
+                                while True:
+                                    block = spool_in.read(1024 * 1024)
+                                    if not block:
+                                        break
+                                    tmp.write(block)
+                    finally:
+                        if spool_path and os.path.exists(spool_path):
+                            os.unlink(spool_path)
                 else:
                     tmp.write(text)
 

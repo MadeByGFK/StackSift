@@ -748,3 +748,202 @@ def test_already_redacted_dense_line_within_worker_memory_limit():
         capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+# --- Root-cause reopen (PR #122 second hold): replay + per-pass cost -------
+#
+# After PR #123 fixed the 40 MB memory case, PR #122's whole-diff
+# review found the 60 MB sibling (corpus case C5) returning
+# analysis_timeout: the oversize flow ran the redaction simulation
+# TWICE (format detection + analysis-file write), and each pass cost
+# ~10x whole-text redaction (per-match Python bookkeeping in
+# _claimed_matches_flat plus a whole-text scan for the extendable
+# tail). The root-cause fix: (1) analyze_upload redacts ONCE via
+# _spool_redacted_stream (verdict sampled from the spool head;
+# adaptation reads the spool, never the upload); (2) a fast segment
+# stage for single-linear-piece maps in _claimed_matches_flat;
+# (3) _extendable_suffix_start searches a trailing window with
+# provable expansion rules instead of scanning the whole text.
+
+
+def test_extendable_suffix_start_matches_full_scan():
+    import random
+
+    def full_scan(text):
+        m = service._EXTENDABLE_TAIL_RE.search(text)
+        return m.start() if m else None
+
+    rng = random.Random(116)
+    frags = ["password", "passwd", "db_password", "Bearer", "api_key",
+             " ", "  ", "\n", "=", ":", "abc", "[REDACTED] ", "db_",
+             "client_secret", "\t", "pass", "word", "x"]
+    for _ in range(3000):
+        text = "".join(rng.choice(frags)
+                       for _ in range(rng.randint(1, 25)))
+        assert service._extendable_suffix_start(text) == full_scan(text), text
+    # Long post-label whitespace runs must force window expansion and
+    # still find the label; long non-matching text must rule out fast.
+    assert service._extendable_suffix_start("password" + " " * 5000) == 0
+    assert service._extendable_suffix_start("x" * 3000 + "password") == 3000
+    assert service._extendable_suffix_start("db_password" + " " * 3000) is not None
+    assert service._extendable_suffix_start("z" * 5000) is None
+    assert service._extendable_suffix_start(" " * 5000) is None
+
+
+def test_spool_single_pass_matches_legacy_two_pass(tmp_path):
+    import io
+
+    samples = [
+        b"INFO start\nERROR password=hunter2 failed\nINFO done\n",
+        b'{"level":"error","msg":"boom"}\n{"level":"info","msg":"ok"}\n' * 3,
+        "unicode \U0001F600 line password=abc\nsecond\r\nthird\rend".encode(),
+        b"trailing blank\n\n",
+        b"password=" + b"A" * 5000 + b"\nnext line\n",
+    ]
+    for content in samples:
+        legacy_verdict = service._detect_jsonlines_streaming(content)
+        legacy_buf = io.StringIO()
+        service._write_streamed_analysis_file(content, False, legacy_buf)
+        spool_path = tmp_path / "spool.log"
+        with open(spool_path, "w", encoding="utf-8", newline="") as spool:
+            verdict = service._spool_redacted_stream(content, spool)
+        assert verdict == legacy_verdict
+        with open(spool_path, encoding="utf-8", newline="") as f:
+            assert f.read() == legacy_buf.getvalue()
+        legacy_adapted = io.StringIO()
+        service._write_streamed_analysis_file(content, True, legacy_adapted)
+        adapted = io.StringIO()
+        service._adapt_spooled_file(str(spool_path), adapted)
+        assert adapted.getvalue() == legacy_adapted.getvalue()
+
+
+def test_c5_dense_line_completes_fast_within_worker_memory_limit():
+    # Subprocess with the worker's 512 MiB limit, like the other
+    # dense tests. The in-script elapsed bound is the teeth: the
+    # pre-fix tree needs ~58s of redaction replay alone on this
+    # class of machine (and timed out outright on the reviewer's),
+    # the built tree ~6s; 30s discriminates with margin both ways.
+    import subprocess
+
+    script = (
+        "import resource, time\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)\n"
+        "from app.service import analyze_upload\n"
+        "content = b'password=[REDACTED] ' * 3000000 + b'password\\n'\n"
+        "assert len(content) == 60000009\n"
+        "t0 = time.perf_counter()\n"
+        "out = analyze_upload('big.log', content, allow_oversize=True,"
+        " use_alarm=False)\n"
+        "elapsed = time.perf_counter() - t0\n"
+        "assert 'error' not in out, out\n"
+        "assert elapsed < 30, f'C5 took {elapsed:.1f}s'\n"
+        "print(f'{elapsed:.1f}s')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).parents[1]),
+        capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+
+
+def test_flush_split_windowed_matches_full_simulation(monkeypatch):
+    # The windowed claims path (long texts) must return exactly the
+    # full simulation's cut. Pin the window tiny so ordinary texts
+    # exercise it, and compare against the window forced wide (the
+    # full simulation) on adversarial fragments, including the
+    # separator-as-its-own-token labeled case.
+    import random
+
+    def flush_with_window(text, window):
+        monkeypatch.setattr(service, "_FLUSH_WINDOW_CHARS", window)
+        return service._flush_split(text)
+
+    cases = [
+        "password = xpassword",
+        "filler " * 20 + "password = xpassword",
+        "x " * 30 + "Bearer " + "t" * 30 + " password",
+        "a " * 30 + "db_password = secretpassword",
+        "d " * 30 + "ghp_" + "g" * 25 + " password",
+    ]
+    rng = random.Random(116)
+    frags = ["password=hunter2 ", "password=[REDACTED] ", "password = x ",
+             "password = hunter2 ", "Bearer " + "t" * 20 + " ",
+             "ghp_" + "a" * 25 + " ", "plain log words ", "password",
+             "Bearer", "= ", ": ", "db_password=x ", "xpassword "]
+    for _ in range(500):
+        cases.append("".join(rng.choice(frags)
+                             for _ in range(rng.randint(5, 40))))
+    for text in cases:
+        assert flush_with_window(text, 40) == flush_with_window(
+            text, 10 ** 9), text
+
+
+def test_redacted_chunks_batching_matches_whole_text(monkeypatch):
+    # Processing in bounded batches must not change the streamed
+    # output: with the batch threshold forced tiny, the state
+    # machine runs mid-stream on every few lines and the result
+    # still equals whole-text redaction.
+    from app.redact import redact_secrets
+
+    monkeypatch.setattr(service, "_REDACTED_BATCH_CHARS", 64)
+    for text in EQUIVALENCE_TEXTS:
+        streamed = "".join(service._redacted_chunks(text.encode()))
+        assert streamed == redact_secrets(text), text
+    # An unterminated PEM block in a late batch is still dropped
+    # (the disclosed tightening): its BEGIN line forces processing.
+    text = ("INFO ok\n" * 30
+            + "-----BEGIN PRIVATE KEY-----\nSECRETBODY\n")
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    assert "SECRETBODY" not in streamed
+
+
+def test_flush_barrier_recognizes_every_label_variant():
+    # Codex P1 on PR #124 head 1 (4445137150, verified): the barrier's
+    # label set omitted the hyphen / no-separator forms the labeled
+    # pattern admits (api-key, authtoken, ...), so the window could
+    # start inside a live credential match and the streamed output
+    # diverged — a secret suffix survived unredacted. Every label
+    # form, with a value long enough to force the windowed path,
+    # must stream exactly as whole-text redaction.
+    from app.redact import redact_secrets
+
+    labels = [
+        "api_key", "api-key", "apikey", "auth_token", "auth-token",
+        "authtoken", "access_token", "access-token", "accesstoken",
+        "client_secret", "client-secret", "clientsecret", "aws_secret",
+        "aws-secret", "awssecret", "secret_key", "secret-key",
+        "secretkey", "password", "passwd", "pwd", "db_password",
+        "db-password", "dbpassword",
+    ]
+    for label in labels:
+        text = f"{label}= " + "x" * 300000 + "password\nhunter2\n"
+        streamed = "".join(service._redacted_chunks(text.encode()))
+        assert streamed == redact_secrets(text), label
+
+
+def test_flush_barrier_recognizes_unicode_case_variant_labels():
+    # Codex P1 on PR #124 head 2 (4445417731, verified): _LABELED is
+    # compiled with re.IGNORECASE, which in Unicode mode also matches
+    # ſ (U+017F) for s and ı (U+0131) / İ (U+0130) for i, but the
+    # barrier checked the previous token with .lower() + an ASCII
+    # suffix set, which maps none of those onto s/i — the barrier
+    # could still land inside a live credential match (e.g.
+    # "paſſword"). The barrier now matches the token with a regex
+    # built from the pattern's own alternatives under re.IGNORECASE.
+    # Every Unicode-variant label, at window-forcing length and with
+    # both attached and separator-as-own-token separators, must
+    # stream exactly as whole-text redaction.
+    from app.redact import redact_secrets
+
+    labels = [
+        "paſſword", "PAſſWORD", "paſſwd", "acceſſ_token",
+        "acceſſtoken", "ſecret_key", "db_paſſword",
+        "apı_key", "apıkey", "clıent_secret", "clıentsecret",
+        "apİ_key", "apİkey", "clİent_secret", "clİentsecret",
+    ]
+    for label in labels:
+        for sep in ("= ", " = "):
+            text = f"{label}{sep}" + "x" * 300000 + "password\nhunter2\n"
+            streamed = "".join(service._redacted_chunks(text.encode()))
+            assert streamed == redact_secrets(text), (label, sep)
