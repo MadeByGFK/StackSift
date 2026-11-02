@@ -688,10 +688,21 @@ def _flush_split(text: str) -> int:
 # Window for the _flush_split claims simulation on long texts.
 _FLUSH_WINDOW_CHARS = 16384
 
+# Every surface form of the labeled pattern's alternatives: each
+# [_-]? separator expands to underscore / hyphen / nothing. This set
+# must cover _LABELED exactly — a missed variant (e.g. "api-key",
+# "authtoken") lets the barrier land inside a live credential match
+# (Codex P1 on PR #124 head 1, with a reproduced secret leak).
 _LABEL_WORDS = frozenset({
-    "api_key", "apikey", "auth_token", "access_token", "client_secret",
-    "aws_secret", "secret_key", "password", "passwd", "pwd",
-    "db_password", "bearer",
+    "api_key", "api-key", "apikey",
+    "auth_token", "auth-token", "authtoken",
+    "access_token", "access-token", "accesstoken",
+    "client_secret", "client-secret", "clientsecret",
+    "aws_secret", "aws-secret", "awssecret",
+    "secret_key", "secret-key", "secretkey",
+    "password", "passwd", "pwd",
+    "db_password", "db-password", "dbpassword",
+    "bearer",
 })
 
 

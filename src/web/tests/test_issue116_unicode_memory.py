@@ -896,3 +896,27 @@ def test_redacted_chunks_batching_matches_whole_text(monkeypatch):
             + "-----BEGIN PRIVATE KEY-----\nSECRETBODY\n")
     streamed = "".join(service._redacted_chunks(text.encode()))
     assert "SECRETBODY" not in streamed
+
+
+def test_flush_barrier_recognizes_every_label_variant():
+    # Codex P1 on PR #124 head 1 (4445137150, verified): the barrier's
+    # label set omitted the hyphen / no-separator forms the labeled
+    # pattern admits (api-key, authtoken, ...), so the window could
+    # start inside a live credential match and the streamed output
+    # diverged — a secret suffix survived unredacted. Every label
+    # form, with a value long enough to force the windowed path,
+    # must stream exactly as whole-text redaction.
+    from app.redact import redact_secrets
+
+    labels = [
+        "api_key", "api-key", "apikey", "auth_token", "auth-token",
+        "authtoken", "access_token", "access-token", "accesstoken",
+        "client_secret", "client-secret", "clientsecret", "aws_secret",
+        "aws-secret", "awssecret", "secret_key", "secret-key",
+        "secretkey", "password", "passwd", "pwd", "db_password",
+        "db-password", "dbpassword",
+    ]
+    for label in labels:
+        text = f"{label}= " + "x" * 300000 + "password\nhunter2\n"
+        streamed = "".join(service._redacted_chunks(text.encode()))
+        assert streamed == redact_secrets(text), label
