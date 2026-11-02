@@ -149,6 +149,10 @@ EQUIVALENCE_TEXTS = [
     "password=\n   \n\t\n  \nhunter2\nnext line\n",            # whitespace-run tail
     "password=\nBearer\nnext line\n",              # Bearer word as the label's value
     "password=\nBearer\nabcdefghijklmnopqrstuvwx\n",  # ... then Bearer claims a token
+    # PR #121 head-4 review corpus:
+    "Bearer abcdefghijpassword=Bearer\nabcdefghijklmnopqrstuvwx\n",  # cut inside a token
+    "ghp_" + "a" * 20 + "password=password=\nhunter2\nnext line\n",  # phantom label in a token
+    "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY----- " * 3 + "tail\n",
 ]
 
 
@@ -387,6 +391,58 @@ def test_whitespace_tail_after_label_is_not_rescanned():
     elapsed = time.perf_counter() - start
     assert streamed == redact_secrets(content.decode())
     assert "hunter2" not in streamed
+    assert elapsed < 10, elapsed
+
+
+# --- Codex review findings on PR #121 head 4 (all verified) -----------------
+#
+# Head 4's order-aware sealing still decided cuts from raw-text
+# matches: a cut at a labeled match's start could split an earlier
+# Bearer token, and a labeled match starting inside a ghp_ token
+# (consumed by the earlier token substitution) phantom-sealed a real
+# candidate. Head 5 decides from pattern-order CLAIMED intervals and
+# guards every cut against claimed matches. Separately, complete PEM
+# blocks on one line were substituted one rebuild-and-rescan at a
+# time (quadratic); head 5 substitutes in a single cursor pass.
+
+
+def test_cut_must_not_split_earlier_bearer_token():
+    # Finding (4437955155): the labeled match "password=Bearer" starts
+    # INSIDE a Bearer token; cutting at its start left a 10-char token
+    # fragment in the emitted prefix, below the Bearer pattern's
+    # threshold, leaking it into the report.
+    content = (
+        "2024-01-01 10:00:00 ERROR Bearer abcdefghijpassword=Bearer\n"
+        "abcdefghijklmnopqrstuvwx\n"
+        "2024-01-01 10:01:00 INFO ok\n"
+    ).encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    blob = json.dumps(out, default=str)
+    assert "abcdefghijpassword" not in blob
+    assert "abcdefghijklmnopqrstuvwx" not in blob
+    legacy = analyze_upload("s.log", content)
+    assert "error" not in legacy, legacy
+    assert out["results"]["level_counts"] == legacy["results"]["level_counts"]
+    assert out["results"]["total_lines"] == legacy["results"]["total_lines"]
+
+
+def test_many_pem_blocks_on_one_line_single_pass():
+    # Finding (4437955165): one physical line holding many complete
+    # PEM blocks must be substituted in one pass, not rebuilt and
+    # rescanned per block (quadratic). This is Codex's exact fixture:
+    # 100k blocks, 5.7 MB, one line \u2014 head 4 timed the supervised
+    # worker out at 60s on it; the whole-text flow needs ~0.34s.
+    import time
+
+    from app.redact import redact_secrets
+
+    text = "-----BEGIN PRIVATE KEY-----body-----END PRIVATE KEY----- " * 100000
+    start = time.perf_counter()
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    elapsed = time.perf_counter() - start
+    assert streamed == redact_secrets(text)
+    assert "body" not in streamed
     assert elapsed < 10, elapsed
 
 

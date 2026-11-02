@@ -294,82 +294,92 @@ def _extendable_suffix_start(text: str):
     return match.start() if match is not None else None
 
 
+# Non-PEM redaction patterns in redact_secrets() application order.
+_ORDERED_PATTERNS = [p for p, _r in _REDACT_PATTERNS
+                     if not p.pattern.startswith(_PEM_PATTERN_PREFIX)]
+_BEARER_ORDER = next(i for i, p in enumerate(_ORDERED_PATTERNS)
+                     if p.pattern.startswith("Bearer"))
+_LABELED_ORDER = next(i for i, p in enumerate(_ORDERED_PATTERNS)
+                      if "(?P<label>" in p.pattern)
+
+
+def _claimed_matches(text: str):
+    """Redaction matches in *text* that survive pattern order.
+
+    redact_secrets() applies its patterns sequentially over the whole
+    text, so a match that starts inside a region an earlier pattern
+    already claimed can never form \u2014 the earlier substitution
+    consumed that text (e.g. a "password" label inside a ghp_ token).
+    Returns (start, end, order) intervals with such phantom matches
+    discarded. The PEM pattern is excluded: complete blocks are
+    substituted before the flush decision, and an in-progress block
+    is carried by the PEM state.
+    """
+    claims = []
+    for order, pattern in enumerate(_ORDERED_PATTERNS):
+        for match in pattern.finditer(text):
+            if any(s <= match.start() < e for s, e, _o in claims):
+                continue  # phantom: an earlier pattern claimed this
+            claims.append((match.start(), match.end(), order))
+    return claims
+
+
 def _flush_split(text: str) -> int:
     """Index up to which *text* is final and may be emitted through
     redact_secrets() now; text[result:] is the held unresolved suffix
     (empty when the whole text is final).
 
     The held suffix starts at the earliest extendable tail (see
-    _EXTENDABLE_TAIL_RE), except when that candidate is itself inside
-    an already-sealed redaction match \u2014 e.g. the word "password"
-    serving as the VALUE of "password=password": the earlier match
-    consumed it under whole-text left-to-right scanning, it is sealed
-    by the character that terminated its value inside *text*, and the
-    scan resumes after it. Pattern order qualifies this: a Bearer
-    tail candidate covered by a labeled match is not sealed (Bearer
-    runs first and can still claim the next line, password=Bearer +
-    token), so the hold extends to that match's start; a Bearer tail
-    covered only by earlier patterns (token formats) is sealed by
-    them. (A candidate inside a match that reaches
-    the very end of *text* unsealed is held from the match's start \u2014
-    that can only be the unterminated final line, flushed whole at
-    end of input anyway.)
+    _EXTENDABLE_TAIL_RE), adjusted by the claimed matches (see
+    _claimed_matches) that cover it, under pattern order:
+
+    - covered by an earlier-or-equal pattern's SEALED match (the
+      match is terminated inside *text*): that match consumed the
+      candidate \u2014 e.g. the word "password" serving as the VALUE of
+      "password=password" \u2014 so the scan resumes after it and only
+      a later extendable suffix can still be held;
+    - covered by a LATER pattern's match (a labeled match covering a
+      Bearer tail, password=Bearer): the earlier pattern can still
+      claim the region, so the match is unresolved and the hold
+      extends to its start;
+    - covered by a match that reaches the end of *text* unsealed:
+      hold from the match's start (only the unterminated final line
+      can do this; it is flushed whole at end of input anyway).
+
+    Finally, the cut may never fall strictly inside a claimed match:
+    emitting the prefix would decide that match on partial text, so
+    the hold extends to its start. Holding more is always safe.
     """
     candidate = _extendable_suffix_start(text)
     if candidate is None:
         return len(text)
-    if text[candidate:candidate + 6] == "Bearer":
-        # The candidate is a Bearer tail, and pattern order decides:
-        # redact_secrets() applies Bearer BEFORE the labeled pattern.
-        # - Covered by a labeled match (the word is that match's
-        #   value, e.g. password=Bearer): the labeled match is NOT
-        #   sealed \u2014 Bearer may still claim the next line's token,
-        #   and if it dies the label claims the word instead. Hold
-        #   from the labeled match's start; flushing anything inside
-        #   it would decide the match on partial text.
-        # - Covered by an earlier pattern's match (a token format, or
-        #   a Bearer match itself): that pattern runs first and has
-        #   already claimed the region, so sealing below is valid.
-        for pattern, _replacement in _REDACT_PATTERNS:
-            if "(?P<label>" not in pattern.pattern:
-                continue
-            for match in pattern.finditer(text):
-                if match.start() < candidate < match.end():
-                    return match.start()
-        # No labeled cover: fall through to the sealing scan, which
-        # only consults the patterns that run before Bearer.
-        patterns = [p for p, _r in _REDACT_PATTERNS
-                    if "(?P<label>" not in p.pattern]
-        return _sealed_split(text, candidate, patterns)
-    return _sealed_split(text, candidate,
-                         [p for p, _r in _REDACT_PATTERNS])
+    claims = _claimed_matches(text)
+    cand_order = (_BEARER_ORDER
+                  if text[candidate:candidate + 6] == "Bearer"
+                  else _LABELED_ORDER)
+    cut = _split_with_claims(text, candidate, cand_order, claims)
+    moved = True
+    while moved:
+        moved = False
+        for s, e, _o in claims:
+            if s < cut < e:
+                cut = s
+                moved = True
+    return cut
 
 
-def _sealed_split(text: str, candidate: int, patterns) -> int:
-    """Advance a hold candidate past any SEALED match (from *patterns*)
-    that covers it: the match consumed the candidate under whole-text
-    scanning and is terminated inside *text*, so the scan resumes
-    after it and only a later extendable suffix can still be held."""
-    while candidate > 0:
-        covering = None
-        for pattern in patterns:
-            if pattern.pattern.startswith(_PEM_PATTERN_PREFIX):
-                continue
-            for match in pattern.finditer(text):
-                if match.start() < candidate < match.end():
-                    covering = match
-                    break
-            if covering is not None:
-                break
-        if covering is None:
-            break
-        if covering.end() >= len(text):
-            candidate = covering.start()
-            break
-        # Sealed: the scan resumes after this match. Decide the rest
-        # as its own text (no match spans a sealed match's end).
-        return covering.end() + _flush_split(text[covering.end():])
-    return candidate
+def _split_with_claims(text: str, candidate: int, cand_order: int,
+                       claims) -> int:
+    """The _flush_split adjustment for one extendable candidate."""
+    covering = [c for c in claims if c[0] < candidate < c[1]]
+    if not covering:
+        return candidate
+    s, e, o = min(covering, key=lambda c: c[2])
+    if o > cand_order or e >= len(text):
+        return s
+    # Sealed by an earlier-or-equal pattern: decide the remainder
+    # after the match as its own text.
+    return e + _flush_split(text[e:])
 
 
 def _redacted_chunks(content: bytes):
@@ -405,23 +415,35 @@ def _redacted_chunks(content: bytes):
         else:
             pending += physical_line
         while pending:
-            begin_match = _PEM_BEGIN_RE.search(pending)
-            if begin_match is not None:
-                after_begin = pending[begin_match.end():]
-                end_match = _PEM_END_RE.search(after_begin)
-                if end_match is not None:
-                    # Complete block inside the pending text: substitute
-                    # in place and reprocess (another block, or an
-                    # extendable tail, may follow in the same text).
-                    pending = (pending[:begin_match.start()] + REDACTED
-                               + after_begin[end_match.end():])
-                    continue
-                # Block continues past this text: retain only the
-                # prefix; the begin marker and any body text already
-                # in pending are block material and are dropped.
-                pem_prefix = pending[:begin_match.start()]
-                pending = ""
+            # Substitute every complete PEM block in ONE cursor pass:
+            # rebuilding and rescanning the buffer per block is
+            # quadratic on a line holding many blocks (100k one-line
+            # blocks timed out the supervised worker).
+            parts = []
+            pos = 0
+            block_open = False
+            while True:
+                begin_match = _PEM_BEGIN_RE.search(pending, pos)
+                if begin_match is None:
+                    parts.append(pending[pos:])
+                    break
+                end_match = _PEM_END_RE.search(pending, begin_match.end())
+                if end_match is None:
+                    # Block continues past this text: everything
+                    # before the begin marker (completed blocks
+                    # already substituted) becomes the PEM prefix; the
+                    # marker and any partial body are dropped.
+                    parts.append(pending[pos:begin_match.start()])
+                    pem_prefix = "".join(parts)
+                    pending = ""
+                    block_open = True
+                    break
+                parts.append(pending[pos:begin_match.start()])
+                parts.append(REDACTED)
+                pos = end_match.end()
+            if block_open:
                 break
+            pending = "".join(parts)
             split = _flush_split(pending)
             if split == 0:
                 break  # the whole text is one unresolved suffix
