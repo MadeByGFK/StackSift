@@ -314,13 +314,55 @@ def _claimed_matches(text: str):
     discarded. The PEM pattern is excluded: complete blocks are
     substituted before the flush decision, and an in-progress block
     is carried by the PEM state.
+
+    Two implementation points, both from Codex findings on PR #121:
+    discarding a phantom must not swallow a real match that overlaps
+    it, so after a phantom the scan resumes at phantom.start() + 1
+    rather than past the phantom's end; and the "starts inside a
+    claim" test uses a merged-interval index (bisect), not a scan of
+    every previous claim \u2014 a line holding many tokens otherwise
+    makes the check quadratic in the number of claims.
     """
+    import bisect
+
     claims = []
+    merged_starts = []  # sorted, disjoint claimed intervals
+    merged_ends = []
+
+    def _inside_claim(pos):
+        i = bisect.bisect_right(merged_starts, pos) - 1
+        return i >= 0 and pos < merged_ends[i]
+
+    def _add_claim(start, end):
+        i = bisect.bisect_right(merged_starts, start) - 1
+        first = i + 1
+        lo, hi = start, end
+        if i >= 0 and merged_ends[i] >= start:
+            lo = merged_starts[i]
+            hi = max(hi, merged_ends[i])
+            first = i
+        last = first
+        while last < len(merged_starts) and merged_starts[last] <= hi:
+            hi = max(hi, merged_ends[last])
+            last += 1
+        merged_starts[first:last] = [lo]
+        merged_ends[first:last] = [hi]
+
     for order, pattern in enumerate(_ORDERED_PATTERNS):
-        for match in pattern.finditer(text):
-            if any(s <= match.start() < e for s, e, _o in claims):
-                continue  # phantom: an earlier pattern claimed this
+        pos = 0
+        while pos <= len(text):
+            match = pattern.search(text, pos)
+            if match is None:
+                break
+            if _inside_claim(match.start()):
+                # Phantom: an earlier pattern claimed this region.
+                # Resume just past its start so a real match that
+                # overlaps the phantom is still discovered.
+                pos = match.start() + 1
+                continue
             claims.append((match.start(), match.end(), order))
+            _add_claim(match.start(), match.end())
+            pos = max(match.end(), match.start() + 1)
     return claims
 
 
