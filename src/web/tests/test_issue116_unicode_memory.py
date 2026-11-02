@@ -920,3 +920,30 @@ def test_flush_barrier_recognizes_every_label_variant():
         text = f"{label}= " + "x" * 300000 + "password\nhunter2\n"
         streamed = "".join(service._redacted_chunks(text.encode()))
         assert streamed == redact_secrets(text), label
+
+
+def test_flush_barrier_recognizes_unicode_case_variant_labels():
+    # Codex P1 on PR #124 head 2 (4445417731, verified): _LABELED is
+    # compiled with re.IGNORECASE, which in Unicode mode also matches
+    # ſ (U+017F) for s and ı (U+0131) / İ (U+0130) for i, but the
+    # barrier checked the previous token with .lower() + an ASCII
+    # suffix set, which maps none of those onto s/i — the barrier
+    # could still land inside a live credential match (e.g.
+    # "paſſword"). The barrier now matches the token with a regex
+    # built from the pattern's own alternatives under re.IGNORECASE.
+    # Every Unicode-variant label, at window-forcing length and with
+    # both attached and separator-as-own-token separators, must
+    # stream exactly as whole-text redaction.
+    from app.redact import redact_secrets
+
+    labels = [
+        "paſſword", "PAſſWORD", "paſſwd", "acceſſ_token",
+        "acceſſtoken", "ſecret_key", "db_paſſword",
+        "apı_key", "apıkey", "clıent_secret", "clıentsecret",
+        "apİ_key", "apİkey", "clİent_secret", "clİentsecret",
+    ]
+    for label in labels:
+        for sep in ("= ", " = "):
+            text = f"{label}{sep}" + "x" * 300000 + "password\nhunter2\n"
+            streamed = "".join(service._redacted_chunks(text.encode()))
+            assert streamed == redact_secrets(text), (label, sep)

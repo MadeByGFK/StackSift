@@ -688,22 +688,24 @@ def _flush_split(text: str) -> int:
 # Window for the _flush_split claims simulation on long texts.
 _FLUSH_WINDOW_CHARS = 16384
 
-# Every surface form of the labeled pattern's alternatives: each
-# [_-]? separator expands to underscore / hyphen / nothing. This set
-# must cover _LABELED exactly — a missed variant (e.g. "api-key",
-# "authtoken") lets the barrier land inside a live credential match
-# (Codex P1 on PR #124 head 1, with a reproduced secret leak).
-_LABEL_WORDS = frozenset({
-    "api_key", "api-key", "apikey",
-    "auth_token", "auth-token", "authtoken",
-    "access_token", "access-token", "accesstoken",
-    "client_secret", "client-secret", "clientsecret",
-    "aws_secret", "aws-secret", "awssecret",
-    "secret_key", "secret-key", "secretkey",
-    "password", "passwd", "pwd",
-    "db_password", "db-password", "dbpassword",
-    "bearer",
-})
+# The barrier's label recognition must cover _LABELED exactly,
+# under the labeled pattern's own case-matching semantics. An ASCII
+# word list checked against .lower() missed first the hyphen /
+# no-separator forms ("api-key", "authtoken" — Codex P1 on PR #124
+# head 1) and then the Unicode case variants re.IGNORECASE admits
+# ("paſſword" with U+017F, "apı_key" with U+0131, "apİ_key" with
+# U+0130 — Codex P1 on PR #124 head 2): .lower()/.casefold() do not
+# map ſ/ı/İ onto s/i, so the barrier could still land inside a live
+# credential match. Matching the previous token with a regex built
+# from _LABEL_ALT itself (the same alternatives _EXTENDABLE_TAIL_RE
+# uses) under re.IGNORECASE delegates case matching to the regex
+# engine, which is the semantics _LABELED actually applies.
+# "bearer" is included under IGNORECASE as before: the Bearer
+# pattern itself is case-sensitive, so retreating for a case variant
+# of the token is an over-approximation — holding more is always
+# safe (see _flush_split).
+_LABEL_END_RE = re.compile(
+    r"(?:" + _LABEL_ALT + r"|bearer)$", re.IGNORECASE)
 
 
 def _flush_window_start(text: str, desired: int) -> int:
@@ -732,7 +734,7 @@ def _flush_window_start(text: str, desired: int) -> int:
         tok_start = run_start
         while tok_start > 0 and not text[tok_start - 1].isspace():
             tok_start -= 1
-        prev = text[tok_start:run_start].lower().rstrip(":= '\",")
+        prev = text[tok_start:run_start].rstrip(":= '\",")
         if not prev:
             # Separator-only (or empty) token: look one token further.
             run2 = tok_start
@@ -741,9 +743,9 @@ def _flush_window_start(text: str, desired: int) -> int:
             tok2 = run2
             while tok2 > 0 and not text[tok2 - 1].isspace():
                 tok2 -= 1
-            prev = text[tok2:run2].lower().rstrip(":= '\",")
+            prev = text[tok2:run2].rstrip(":= '\",")
             tok_start = tok2
-        if any(prev.endswith(word) for word in _LABEL_WORDS):
+        if _LABEL_END_RE.search(prev):
             pos = tok_start
             continue
         return pos
