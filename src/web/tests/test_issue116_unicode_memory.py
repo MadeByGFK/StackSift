@@ -675,3 +675,38 @@ def test_single_long_line_boundary_map_within_worker_memory_limit():
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+# --- Codex review finding on PR #121 head 10 (verified) ---------------------
+#
+# Finding 4442326135: head 10's segment map fixed the single-match
+# fixture but stored one Python tuple per segment piece (and one
+# per claim, with old and new lists held simultaneously during a
+# rewrite), so a credential-DENSE line (~1M interleaved token
+# matches on a 25M-character line) still exceeded the 512 MiB
+# limit. Head 11 stores pieces and claims in compact parallel
+# arrays and produces the rewritten text with pattern.sub itself.
+# This test FAILS on head 10 (MemoryError in the subprocess) and
+# passes on head 11 (teeth check).
+
+
+def test_credential_dense_line_boundary_map_within_worker_memory_limit():
+    import subprocess
+
+    script = (
+        "import resource\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)\n"
+        "from app import service\n"
+        "text = (('ghp_' + 'a' * 20 + ' gho_' + 'b' * 20 + ' ') * 500000"
+        " + 'password=\\nhunter2\\n')\n"
+        "streamed = ''.join(service._redacted_chunks(text.encode()))\n"
+        "assert 'hunter2' not in streamed, 'credential leaked'\n"
+        "assert 'ghp_' not in streamed and 'gho_' not in streamed\n"
+        "print(len(streamed))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).parents[1]),
+        capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]

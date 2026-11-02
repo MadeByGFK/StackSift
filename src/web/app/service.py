@@ -344,93 +344,119 @@ def _claimed_matches(text: str):
     tail the map alone exceeded the worker's 512 MiB limit (Codex
     finding 4441755934 on head 9) even though whole-text redaction
     of the same input completes. A segment map holds one entry per
-    gap/replacement piece — O(matches) entries total: a piece is
-    (length, is_linear, orig_start, orig_end); a linear (untouched)
-    piece maps position p to orig_start + offset, a replacement
-    piece maps its start and interior to orig_start and its end to
-    orig_end, exactly the per-character array's values. Lookups are
-    bisect over the pieces' cumulative starts.
+    gap/replacement piece — O(matches) entries total: a linear
+    (untouched) piece maps position p to orig_start + offset, a
+    replacement piece maps its start and interior to orig_start
+    and its end to orig_end, exactly the per-character array's
+    values. Lookups are bisect over the pieces' cumulative starts.
+
+    Head 11: the segment map and the claims are stored in compact
+    parallel arrays, not per-piece Python tuples. Head 10's tuple
+    per piece (plus a tuple per claim, plus old and new tuple lists
+    held simultaneously during a rewrite) still exceeded the
+    512 MiB limit on a credential-DENSE line — ~1M interleaved
+    token matches on a 25M-character line (Codex finding
+    4442326135 on head 10). Pieces now live in four parallel
+    array('q')/bytearray columns (25 bytes per piece) and claims
+    in one flat array('q') (24 bytes per claim), converted to the
+    returned list of tuples only after the segment columns are
+    released; the rewritten text is produced by pattern.sub itself
+    (the C implementation redact_secrets() uses), not by joining
+    per-match gap strings.
     """
+    from array import array
     from bisect import bisect_right
 
-    def _starts_of(segments):
-        starts = []
+    # Segment columns: lens, is_linear (bytearray), ostart, oend.
+    def _starts_of(lens):
+        starts = array("q", bytes(8 * len(lens)))
         pos = 0
-        for length, _lin, _os, _oe in segments:
-            starts.append(pos)
+        for i, length in enumerate(lens):
+            starts[i] = pos
             pos += length
         return starts, pos
 
-    def _map_pos(segments, starts, total, pos):
-        if not segments:
+    def _map_pos(cols, starts, total, pos):
+        lens, is_lin, ostart, oend = cols
+        if not lens:
             return pos
         if pos >= total:
-            length, is_linear, orig_start, orig_end = segments[-1]
-            return orig_start + length if is_linear else orig_end
+            if is_lin[-1]:
+                return ostart[-1] + lens[-1]
+            return oend[-1]
         idx = bisect_right(starts, pos) - 1
-        length, is_linear, orig_start, orig_end = segments[idx]
-        if is_linear:
-            return orig_start + (pos - starts[idx])
-        return orig_start
+        if is_lin[idx]:
+            return ostart[idx] + (pos - starts[idx])
+        return ostart[idx]
 
-    def _slice_segments(segments, starts, begin, end):
-        """Segment pieces covering current-text range [begin, end)."""
-        pieces = []
+    def _append_slice(cols, new_cols, starts, begin, end):
+        """Append pieces covering current-text range [begin, end)
+        from the segment columns *cols* into *new_cols*."""
         if end <= begin:
-            return pieces
+            return
+        lens, is_lin, ostart, oend = cols
+        n_lens, n_lin, n_ostart, n_oend = new_cols
         idx = bisect_right(starts, begin) - 1
-        while idx < len(segments):
+        while idx < len(lens):
             seg_start = starts[idx]
-            length, is_linear, orig_start, orig_end = segments[idx]
-            seg_end = seg_start + length
             if seg_start >= end:
                 break
+            seg_end = seg_start + lens[idx]
             lo = max(begin, seg_start)
             hi = min(end, seg_end)
             if hi > lo:
-                if is_linear:
-                    new_start = orig_start + (lo - seg_start)
-                    pieces.append((hi - lo, True, new_start,
-                                   new_start + (hi - lo)))
+                if is_lin[idx]:
+                    new_start = ostart[idx] + (lo - seg_start)
+                    n_lens.append(hi - lo)
+                    n_lin.append(1)
+                    n_ostart.append(new_start)
+                    n_oend.append(new_start + (hi - lo))
                 else:
-                    pieces.append((hi - lo, False, orig_start,
-                                   orig_end if hi == seg_end
-                                   else orig_start))
+                    n_lens.append(hi - lo)
+                    n_lin.append(0)
+                    n_ostart.append(ostart[idx])
+                    n_oend.append(oend[idx] if hi == seg_end
+                                  else ostart[idx])
             idx += 1
-        return pieces
 
-    claims = []
+    def _new_cols():
+        return (array("q"), bytearray(), array("q"), array("q"))
+
+    claims_flat = array("q")
     current = text
-    segments = [(len(text), True, 0, len(text))] if text else []
+    cols = _new_cols()
+    if text:
+        cols[0].append(len(text))
+        cols[1].append(1)
+        cols[2].append(0)
+        cols[3].append(len(text))
     for order, (pattern, replacement) in enumerate(_ORDERED_PAIRS):
         matches = list(pattern.finditer(current))
         if not matches:
             continue
-        starts, total = _starts_of(segments)
-        parts = []
-        new_segments = []
+        starts, total = _starts_of(cols[0])
+        new_cols = _new_cols()
         prev_end = 0
         for match in matches:
-            orig_start = _map_pos(segments, starts, total,
-                                  match.start())
-            orig_end = _map_pos(segments, starts, total, match.end())
-            claims.append((orig_start, orig_end, order))
-            new_segments.extend(_slice_segments(
-                segments, starts, prev_end, match.start()))
-            parts.append(current[prev_end:match.start()])
+            orig_start = _map_pos(cols, starts, total, match.start())
+            orig_end = _map_pos(cols, starts, total, match.end())
+            claims_flat.extend((orig_start, orig_end, order))
+            _append_slice(cols, new_cols, starts, prev_end,
+                          match.start())
             repl = (replacement(match) if callable(replacement)
                     else replacement)
-            parts.append(repl)
             if repl:
-                new_segments.append(
-                    (len(repl), False, orig_start, orig_end))
+                new_cols[0].append(len(repl))
+                new_cols[1].append(0)
+                new_cols[2].append(orig_start)
+                new_cols[3].append(orig_end)
             prev_end = match.end()
-        new_segments.extend(_slice_segments(
-            segments, starts, prev_end, len(current)))
-        parts.append(current[prev_end:])
-        current = "".join(parts)
-        segments = new_segments
-    return claims
+        _append_slice(cols, new_cols, starts, prev_end, len(current))
+        current = pattern.sub(replacement, current)
+        cols = new_cols
+    del cols
+    return [(claims_flat[i], claims_flat[i + 1], claims_flat[i + 2])
+            for i in range(0, len(claims_flat), 3)]
 
 
 def _flush_split(text: str) -> int:
