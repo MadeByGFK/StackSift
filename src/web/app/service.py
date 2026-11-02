@@ -305,6 +305,17 @@ _LABELED_ORDER = next(i for i, p in enumerate(_ORDERED_PATTERNS)
 
 
 def _claimed_matches(text: str):
+    """Redaction matches in *text* that survive pattern order, as a
+    list of (start, end, order) tuples in ORIGINAL coordinates.
+    Thin wrapper over _claimed_matches_flat for callers (and tests)
+    that work on small texts; the memory-bound production path
+    (_flush_split) consumes the flat array directly."""
+    flat = _claimed_matches_flat(text)
+    return [(flat[i], flat[i + 1], flat[i + 2])
+            for i in range(0, len(flat), 3)]
+
+
+def _claimed_matches_flat(text: str):
     """Redaction matches in *text* that survive pattern order.
 
     redact_secrets() applies its patterns sequentially over the whole
@@ -363,6 +374,26 @@ def _claimed_matches(text: str):
     released; the rewritten text is produced by pattern.sub itself
     (the C implementation redact_secrets() uses), not by joining
     per-match gap strings.
+
+    Promotion follow-up (PR #122 whole-diff finding): the labeled
+    pattern matching an already-redacted value ("password=[REDACTED]"
+    repeated 2,000,000 times on one 40 MB line) still exhausted the
+    limit inside this function on the head-11 tree, although
+    whole-text redact_secrets() completes the same input. Three
+    bookkeeping costs combined: the materialized list of match
+    objects, one segment piece per gap plus one per replacement,
+    and the tuple-list conversion of millions of claims. Now:
+    matches are consumed lazily from finditer; adjacent LINEAR
+    pieces with contiguous original ranges coalesce into one piece;
+    a replacement that is character-identical to the matched span
+    and lies inside a single linear piece is recorded as a linear
+    piece (its text IS the original text there, so the precise
+    mapping is exact, not the conservative replacement mapping),
+    which lets dense already-redacted runs coalesce to O(1) pieces;
+    and the claims are returned as the flat array — _flush_split
+    iterates it in place instead of materializing millions of
+    tuples. Returns the flat array('q') of (start, end, order)
+    triples in ORIGINAL coordinates.
     """
     from array import array
     from bisect import bisect_right
@@ -389,13 +420,32 @@ def _claimed_matches(text: str):
             return ostart[idx] + (pos - starts[idx])
         return ostart[idx]
 
+    def _append_piece(new_cols, length, is_linear, orig_start,
+                      orig_end):
+        """Append one piece to *new_cols*, coalescing with the last
+        piece when both are linear and their original ranges are
+        contiguous (dense runs of small gaps / identity replacements
+        then cost O(1) pieces, not one piece per match)."""
+        if length <= 0:
+            return
+        n_lens, n_lin, n_ostart, n_oend = new_cols
+        if (is_linear and n_lens and n_lin[-1]
+                and n_ostart[-1] + n_lens[-1] == orig_start
+                and orig_end == orig_start + length):
+            n_lens[-1] += length
+            n_oend[-1] = orig_end
+            return
+        n_lens.append(length)
+        n_lin.append(1 if is_linear else 0)
+        n_ostart.append(orig_start)
+        n_oend.append(orig_end)
+
     def _append_slice(cols, new_cols, starts, begin, end):
         """Append pieces covering current-text range [begin, end)
         from the segment columns *cols* into *new_cols*."""
         if end <= begin:
             return
         lens, is_lin, ostart, oend = cols
-        n_lens, n_lin, n_ostart, n_oend = new_cols
         idx = bisect_right(starts, begin) - 1
         while idx < len(lens):
             seg_start = starts[idx]
@@ -407,15 +457,12 @@ def _claimed_matches(text: str):
             if hi > lo:
                 if is_lin[idx]:
                     new_start = ostart[idx] + (lo - seg_start)
-                    n_lens.append(hi - lo)
-                    n_lin.append(1)
-                    n_ostart.append(new_start)
-                    n_oend.append(new_start + (hi - lo))
+                    _append_piece(new_cols, hi - lo, True, new_start,
+                                  new_start + (hi - lo))
                 else:
-                    n_lens.append(hi - lo)
-                    n_lin.append(0)
-                    n_ostart.append(ostart[idx])
-                    n_oend.append(oend[idx] if hi == seg_end
+                    _append_piece(new_cols, hi - lo, False,
+                                  ostart[idx],
+                                  oend[idx] if hi == seg_end
                                   else ostart[idx])
             idx += 1
 
@@ -431,13 +478,14 @@ def _claimed_matches(text: str):
         cols[2].append(0)
         cols[3].append(len(text))
     for order, (pattern, replacement) in enumerate(_ORDERED_PAIRS):
-        matches = list(pattern.finditer(current))
-        if not matches:
-            continue
         starts, total = _starts_of(cols[0])
         new_cols = _new_cols()
         prev_end = 0
-        for match in matches:
+        found = False
+        # Lazy iteration: materializing every match object first
+        # (head 11) costs hundreds of MiB on credential-dense lines.
+        for match in pattern.finditer(current):
+            found = True
             orig_start = _map_pos(cols, starts, total, match.start())
             orig_end = _map_pos(cols, starts, total, match.end())
             claims_flat.extend((orig_start, orig_end, order))
@@ -446,17 +494,26 @@ def _claimed_matches(text: str):
             repl = (replacement(match) if callable(replacement)
                     else replacement)
             if repl:
-                new_cols[0].append(len(repl))
-                new_cols[1].append(0)
-                new_cols[2].append(orig_start)
-                new_cols[3].append(orig_end)
+                # A replacement identical to the matched text, where
+                # the span lies inside a single linear piece, leaves
+                # the original text in place: record it as linear so
+                # it coalesces with its neighbouring gaps.
+                idx = bisect_right(starts, match.start()) - 1
+                identity_linear = (
+                    len(repl) == match.end() - match.start()
+                    and 0 <= idx < len(cols[0]) and cols[1][idx]
+                    and starts[idx] + cols[0][idx] >= match.end()
+                    and current[match.start():match.end()] == repl)
+                _append_piece(new_cols, len(repl), identity_linear,
+                              orig_start, orig_end)
             prev_end = match.end()
+        if not found:
+            continue
         _append_slice(cols, new_cols, starts, prev_end, len(current))
         current = pattern.sub(replacement, current)
         cols = new_cols
     del cols
-    return [(claims_flat[i], claims_flat[i + 1], claims_flat[i + 2])
-            for i in range(0, len(claims_flat), 3)]
+    return claims_flat
 
 
 def _flush_split(text: str) -> int:
@@ -488,7 +545,7 @@ def _flush_split(text: str) -> int:
     candidate = _extendable_suffix_start(text)
     if candidate is None:
         return len(text)
-    claims = _claimed_matches(text)
+    claims = _claimed_matches_flat(text)
     cand_order = (_BEARER_ORDER
                   if text[candidate:candidate + 6] == "Bearer"
                   else _LABELED_ORDER)
@@ -496,7 +553,8 @@ def _flush_split(text: str) -> int:
     moved = True
     while moved:
         moved = False
-        for s, e, _o in claims:
+        for i in range(0, len(claims), 3):
+            s, e = claims[i], claims[i + 1]
             if s < cut < e:
                 cut = s
                 moved = True
@@ -505,11 +563,16 @@ def _flush_split(text: str) -> int:
 
 def _split_with_claims(text: str, candidate: int, cand_order: int,
                        claims) -> int:
-    """The _flush_split adjustment for one extendable candidate."""
-    covering = [c for c in claims if c[0] < candidate < c[1]]
-    if not covering:
+    """The _flush_split adjustment for one extendable candidate.
+    *claims* is the flat array('q') from _claimed_matches_flat."""
+    best = None
+    for i in range(0, len(claims), 3):
+        s, e, o = claims[i], claims[i + 1], claims[i + 2]
+        if s < candidate < e and (best is None or o < best[2]):
+            best = (s, e, o)
+    if best is None:
         return candidate
-    s, e, o = min(covering, key=lambda c: c[2])
+    s, e, o = best
     if o > cand_order or e >= len(text):
         return s
     # Sealed by an earlier-or-equal pattern: decide the remainder

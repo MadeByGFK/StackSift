@@ -710,3 +710,41 @@ def test_credential_dense_line_boundary_map_within_worker_memory_limit():
         capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+# --- Codex whole-diff finding on promotion PR #122 (verified) --------------
+#
+# The whole-release review of PR #122 found a case the per-PR reviews
+# missed: "password=[REDACTED] " * 2,000,000 + "password\n"
+# (40,000,009 bytes, one line) exhausts the 512 MiB limit inside
+# _claimed_matches on the head-11 tree (MemoryError in _append_slice:
+# materialized match list + one segment piece per gap/replacement +
+# tuple-list conversion of 2M claims), although whole-text
+# redact_secrets() -- the current production behaviour -- completes
+# it, so Release #3.1 would have regressed this input class. The fix
+# consumes finditer lazily, coalesces contiguous linear pieces,
+# records character-identical replacements inside a single linear
+# piece as linear, and keeps claims in the flat array on the
+# _flush_split path. This test FAILS on head 11 (MemoryError in the
+# subprocess) and passes on the fixed tree (teeth check).
+
+
+def test_already_redacted_dense_line_within_worker_memory_limit():
+    import subprocess
+
+    script = (
+        "import resource\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)\n"
+        "from app import service\n"
+        "text = 'password=[REDACTED] ' * 2000000 + 'password\\n'\n"
+        "assert len(text) == 40000009\n"
+        "streamed = ''.join(service._redacted_chunks(text.encode()))\n"
+        "assert streamed == text, 'already-redacted text must pass through unchanged'\n"
+        "print(len(streamed))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).parents[1]),
+        capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
