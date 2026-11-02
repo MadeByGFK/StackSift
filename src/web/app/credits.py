@@ -54,6 +54,11 @@ def _as_aware(dt: datetime | None) -> datetime | None:
 PRICING_VERSION = 1
 COST_ADDITIONAL_ANALYSIS = 1  # CONFIRMED
 COST_PDF = 2  # Proposed (Phase 2B)
+# Issue #105: founder-ruled 2026-11-01 (batched pricing) — exports are
+# uniform 2 credits for EVERY format (CSV/JSON/PDF). This constant is the
+# single source for structured-export consent, admission, UI copy and
+# error text; never duplicate the numeric price elsewhere.
+COST_STRUCTURED_EXPORT = 2
 # Issue #103 (trim B1): the obsolete fixed COST_BATCH = 5 proposal is
 # REMOVED. Founder-ruled batch pricing (2026-10-24) is per-file: the
 # first file under the normal rules (free hourly allowance if available,
@@ -90,6 +95,8 @@ DEFAULT_GLOBAL_CONCURRENT_LIMIT = 20
 # Paid rate limits per hour (proposed)
 RATE_LIMIT_PAID_ANALYSIS = 30
 RATE_LIMIT_PDF = 10
+# Issue #105: structured export mirrors the PDF rate policy.
+RATE_LIMIT_STRUCTURED_EXPORT = 10
 RATE_LIMIT_BATCH = 5
 # Issue #104, slice 1 (trim T3): explicit 30/hour policy for oversize, so
 # it never relies on _consume_rate()'s fallback.
@@ -621,6 +628,7 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
         "paid:oversize_analysis": RATE_LIMIT_OVERSIZE_ANALYSIS,
         "paid:compare_logs": RATE_LIMIT_COMPARE,
         "paid:pdf": RATE_LIMIT_PDF,
+        "paid:structured_export": RATE_LIMIT_STRUCTURED_EXPORT,
         "paid:batch": RATE_LIMIT_BATCH,
     }.get(policy, 30)
     window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
@@ -790,6 +798,52 @@ def store_pdf_result(db, user_id, operation_id, pdf_bytes: bytes, filename: str)
     db.add(result)
     db.flush()
     return result
+
+def store_structured_export_result(db, user_id, operation_id, export_bytes: bytes,
+                                   *, export_format: str, filename: str,
+                                   media_type: str, source_result_id,
+                                   source_integrity_digest: str):
+    """Store generated structured-export bytes as a Result (issue #105).
+
+    Follows store_pdf_result(): locks the operation, requires this
+    reserved structured_export operation, and writes ONE
+    Result.type="structured_export" whose manifest carries the artifact
+    provenance + base64 content. The caller settles with
+    complete_operation() in the same transaction.
+    """
+    import base64 as _b64
+    op, _, _ = _lock_operation(db, operation_id)
+    if op.status != "reserved":
+        raise AdmissionError("operation is no longer reserved")
+    if op.type != "structured_export":
+        raise AdmissionError("operation is not a structured export")
+    manifest = json.dumps({
+        "artifact_kind": "structured_export",
+        "schema_version": 1,
+        "source_result_id": str(source_result_id),
+        "source_integrity_digest": source_integrity_digest,
+        "format": export_format,
+        "filename": filename,
+        "media_type": media_type,
+        "content_base64": _b64.b64encode(export_bytes).decode("ascii"),
+        "content_byte_count": len(export_bytes),
+        "content_digest": hash_input(export_bytes),
+    })
+    now = _utcnow()
+    result = models.Result(
+        user_id=user_id,
+        operation_id=operation_id,
+        type="structured_export",
+        storage_manifest=manifest,
+        integrity_digest=hash_input(manifest.encode()),
+        byte_count=len(manifest.encode()),
+        ready_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    db.add(result)
+    db.flush()
+    return result
+
 
 def _settle_complete(db, op, grants, result):
     result_payload(result, user_id=op.user_id, operation_id=op.id)
