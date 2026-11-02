@@ -337,50 +337,99 @@ def _claimed_matches(text: str):
     substituted before the flush decision, and an in-progress block
     is carried by the PEM state.
 
-    The boundary map is an array('q') (8 bytes per boundary, not a
-    list of int objects) and is materialized lazily: until some
-    pattern actually matches, the map is the identity and is
-    represented by None, so a segment holding no secrets costs no
-    map at all.
+    Head 10: the boundary map is a SEGMENT map, not a per-character
+    array. Head 9's array('q') held one 8-byte entry per character
+    of the current text plus full-length slice copies per match, so
+    on a ~25M-character single line with an extendable credential
+    tail the map alone exceeded the worker's 512 MiB limit (Codex
+    finding 4441755934 on head 9) even though whole-text redaction
+    of the same input completes. A segment map holds one entry per
+    gap/replacement piece — O(matches) entries total: a piece is
+    (length, is_linear, orig_start, orig_end); a linear (untouched)
+    piece maps position p to orig_start + offset, a replacement
+    piece maps its start and interior to orig_start and its end to
+    orig_end, exactly the per-character array's values. Lookups are
+    bisect over the pieces' cumulative starts.
     """
-    from array import array
+    from bisect import bisect_right
+
+    def _starts_of(segments):
+        starts = []
+        pos = 0
+        for length, _lin, _os, _oe in segments:
+            starts.append(pos)
+            pos += length
+        return starts, pos
+
+    def _map_pos(segments, starts, total, pos):
+        if not segments:
+            return pos
+        if pos >= total:
+            length, is_linear, orig_start, orig_end = segments[-1]
+            return orig_start + length if is_linear else orig_end
+        idx = bisect_right(starts, pos) - 1
+        length, is_linear, orig_start, orig_end = segments[idx]
+        if is_linear:
+            return orig_start + (pos - starts[idx])
+        return orig_start
+
+    def _slice_segments(segments, starts, begin, end):
+        """Segment pieces covering current-text range [begin, end)."""
+        pieces = []
+        if end <= begin:
+            return pieces
+        idx = bisect_right(starts, begin) - 1
+        while idx < len(segments):
+            seg_start = starts[idx]
+            length, is_linear, orig_start, orig_end = segments[idx]
+            seg_end = seg_start + length
+            if seg_start >= end:
+                break
+            lo = max(begin, seg_start)
+            hi = min(end, seg_end)
+            if hi > lo:
+                if is_linear:
+                    new_start = orig_start + (lo - seg_start)
+                    pieces.append((hi - lo, True, new_start,
+                                   new_start + (hi - lo)))
+                else:
+                    pieces.append((hi - lo, False, orig_start,
+                                   orig_end if hi == seg_end
+                                   else orig_start))
+            idx += 1
+        return pieces
 
     claims = []
     current = text
-    boundaries = None  # None = identity map (no substitution yet)
+    segments = [(len(text), True, 0, len(text))] if text else []
     for order, (pattern, replacement) in enumerate(_ORDERED_PAIRS):
         matches = list(pattern.finditer(current))
         if not matches:
             continue
-        if boundaries is None:
-            boundaries = array("q", range(len(current) + 1))
+        starts, total = _starts_of(segments)
         parts = []
-        new_boundaries = array("q")
+        new_segments = []
         prev_end = 0
         for match in matches:
-            claims.append((boundaries[match.start()],
-                           boundaries[match.end()], order))
-            gap_bounds = boundaries[prev_end:match.start() + 1]
-            if new_boundaries:
-                gap_bounds = gap_bounds[1:]
+            orig_start = _map_pos(segments, starts, total,
+                                  match.start())
+            orig_end = _map_pos(segments, starts, total, match.end())
+            claims.append((orig_start, orig_end, order))
+            new_segments.extend(_slice_segments(
+                segments, starts, prev_end, match.start()))
             parts.append(current[prev_end:match.start()])
-            new_boundaries.extend(gap_bounds)
             repl = (replacement(match) if callable(replacement)
                     else replacement)
-            orig_start = boundaries[match.start()]
-            orig_end = boundaries[match.end()]
-            repl_bounds = array(
-                "q", [orig_start] * len(repl) + [orig_end])
             parts.append(repl)
-            new_boundaries.extend(repl_bounds[1:])
+            if repl:
+                new_segments.append(
+                    (len(repl), False, orig_start, orig_end))
             prev_end = match.end()
-        tail_bounds = boundaries[prev_end:]
-        if new_boundaries:
-            tail_bounds = tail_bounds[1:]
+        new_segments.extend(_slice_segments(
+            segments, starts, prev_end, len(current)))
         parts.append(current[prev_end:])
-        new_boundaries.extend(tail_bounds)
         current = "".join(parts)
-        boundaries = new_boundaries
+        segments = new_segments
     return claims
 
 

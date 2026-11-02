@@ -640,3 +640,38 @@ def test_dense_label_starts_before_token_claim_not_quadratic():
     elapsed = time.perf_counter() - start
     assert streamed == redact_secrets(text)
     assert elapsed < 10, elapsed
+
+
+# --- Codex review finding on PR #121 head 9 (verified) ----------------------
+#
+# Finding 4441755934: head 9's per-character boundary map (array('q')
+# plus full-length slice copies per match) exceeded the worker's
+# 512 MiB limit on a single ~25M-character line with an extendable
+# credential tail, even though whole-text redact_secrets() completes
+# the same input. Head 10 replaces the array with an O(matches)
+# segment map. This test runs Codex's fixture shape in a subprocess
+# under the worker's exact RLIMIT_AS so the limit cannot leak into
+# the test runner itself: it FAILS on head 9 (MemoryError) and
+# passes on head 10 (teeth check).
+
+
+def test_single_long_line_boundary_map_within_worker_memory_limit():
+    import subprocess
+
+    script = (
+        "import resource\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)\n"
+        "from app import service\n"
+        "text = ('ghp_' + 'a' * 20 + ' ' + 'x' * 25_000_000"
+        " + ' password=\\nhunter2\\n')\n"
+        "streamed = ''.join(service._redacted_chunks(text.encode()))\n"
+        "assert 'hunter2' not in streamed, 'credential leaked'\n"
+        "assert 'ghp_' not in streamed, 'token leaked'\n"
+        "print(len(streamed))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).parents[1]),
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
