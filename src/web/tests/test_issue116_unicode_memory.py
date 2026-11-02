@@ -144,6 +144,11 @@ EQUIVALENCE_TEXTS = [
     "pre -----BEGIN PRIVATE KEY----- BODY -----END PRIVATE KEY----- post\n",
     ('password="-----BEGIN PRIVATE KEY-----\nBODY\n'
      '-----END PRIVATE KEY-----hunter2"\nnext line\n'),    # finding 2
+    # PR #121 head-3 review corpus:
+    "password=Bearer\nabcdefghijklmnopqrstuvwx\nnext line\n",  # Bearer claims next line
+    "password=\n   \n\t\n  \nhunter2\nnext line\n",            # whitespace-run tail
+    "password=\nBearer\nnext line\n",              # Bearer word as the label's value
+    "password=\nBearer\nabcdefghijklmnopqrstuvwx\n",  # ... then Bearer claims a token
 ]
 
 
@@ -332,6 +337,57 @@ def test_label_ending_lines_do_not_accumulate_pending(monkeypatch):
         tracemalloc.stop()
     assert digest.hexdigest() == expected
     assert peak < 2_000_000, peak
+
+
+# --- Codex review findings on PR #121 head 3 (all verified) -----------------
+#
+# Head 3's flush split introduced two new divergences: its
+# sealed-match adjustment ignored pattern ORDER (a later pattern's
+# match cannot seal an earlier pattern's unresolved candidate), and a
+# held suffix made only of whitespace was still rescanned per line.
+
+
+def test_bearer_value_of_label_still_claims_next_line():
+    # Finding (4437859484): redact_secrets() applies the Bearer
+    # pattern BEFORE the labeled pattern, so in
+    # "password=Bearer\n<token>" the Bearer match consumes the token
+    # first and the labeled match then redacts "Bearer" itself.
+    # Head 3 let the labeled match seal the Bearer candidate and
+    # flushed the first line, leaking the token verbatim.
+    content = (
+        "2024-01-01 10:00:00 ERROR password=Bearer\n"
+        "abcdefghijklmnopqrstuvwx\n"
+        "2024-01-01 10:01:00 INFO ok\n"
+    ).encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    blob = json.dumps(out, default=str)
+    assert "abcdefghijklmnopqrstuvwx" not in blob
+    legacy = analyze_upload("s.log", content)
+    assert "error" not in legacy, legacy
+    assert out["results"]["level_counts"] == legacy["results"]["level_counts"]
+    assert out["results"]["total_lines"] == legacy["results"]["total_lines"]
+
+
+def test_whitespace_tail_after_label_is_not_rescanned():
+    # Finding (4437859489): the exact Codex fixture \u2014 a label, then
+    # 12,000 whitespace-only lines, then the value (12,012,018 bytes).
+    # Head 3 rescanned the growing held buffer on every line and the
+    # supervised worker timed out; the pre-#116 whole-text flow needs
+    # ~0.14s. Head 4 tracks the whitespace tail by state: the stream
+    # completes in the whole-text class and equals it exactly.
+    import time
+
+    from app.redact import redact_secrets
+
+    content = b"password=\n" + (b" " * 1000 + b"\n") * 12000 + b"hunter2\n"
+    assert len(content) == 12_012_018
+    start = time.perf_counter()
+    streamed = "".join(service._redacted_chunks(content))
+    elapsed = time.perf_counter() - start
+    assert streamed == redact_secrets(content.decode())
+    assert "hunter2" not in streamed
+    assert elapsed < 10, elapsed
 
 
 # --- the acceptance fixture: ~90 MB class, non-BMP heavy --------------------
