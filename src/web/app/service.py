@@ -295,8 +295,9 @@ def _extendable_suffix_start(text: str):
 
 
 # Non-PEM redaction patterns in redact_secrets() application order.
-_ORDERED_PATTERNS = [p for p, _r in _REDACT_PATTERNS
-                     if not p.pattern.startswith(_PEM_PATTERN_PREFIX)]
+_ORDERED_PAIRS = [(p, r) for p, r in _REDACT_PATTERNS
+                  if not p.pattern.startswith(_PEM_PATTERN_PREFIX)]
+_ORDERED_PATTERNS = [p for p, _r in _ORDERED_PAIRS]
 _BEARER_ORDER = next(i for i, p in enumerate(_ORDERED_PATTERNS)
                      if p.pattern.startswith("Bearer"))
 _LABELED_ORDER = next(i for i, p in enumerate(_ORDERED_PATTERNS)
@@ -307,93 +308,79 @@ def _claimed_matches(text: str):
     """Redaction matches in *text* that survive pattern order.
 
     redact_secrets() applies its patterns sequentially over the whole
-    text, so a match whose span intersects a region an earlier
-    pattern already claimed can never form as written \u2014 the
-    earlier substitution rewrote that part of the text (e.g. a
-    "password" label inside a ghp_ token, or a Bearer token broken
-    by the ghp_ substitution inside it). Returns (start, end, order)
-    intervals with such phantom matches discarded. The PEM pattern
-    is excluded: complete blocks are substituted before the flush
-    decision, and an in-progress block is carried by the PEM state.
+    text: each pattern's substitutions rewrite the text the next
+    pattern sees. A match found by scanning the ORIGINAL text can
+    therefore be a phantom (an earlier substitution inside its span
+    breaks it as written) or, conversely, real even though its span
+    intersects an earlier claim (the substitution inside its span
+    produces text its pattern still accepts, e.g. a labeled value
+    containing a ghp_ token: the token becomes [REDACTED], and the
+    labeled pattern matches the rewritten value in full). No
+    geometric test on original-text intervals distinguishes those
+    cases — heads 7 and 8 of PR #121 each failed in one direction.
 
-    Implementation points, each from a Codex finding on PR #121:
-    discarding a phantom must not swallow a real match that overlaps
-    it, so the scan resumes just past the covering claim's end (a
-    real match can start there, never inside the claim); and the
-    claim index is a merged-interval list maintained by bulk merge
-    per pattern \u2014 per-match list insertion and per-match scans of
-    every previous claim are both quadratic on lines holding many
-    credentials.
+    Head 9 therefore computes claims by simulating the sequential
+    substitution itself. A boundary map translates positions in the
+    current (rewritten) text back to original coordinates: untouched
+    segments keep their boundaries; a replacement segment's first
+    boundary is the replaced match's original start, its last is
+    the match's original end, and its interior boundaries are the
+    original start (a later match beginning inside a replacement is
+    conservatively expanded to the replaced span's start; a match
+    spanning a replacement maps to the whole replaced span). Each
+    pattern is scanned once over the current text with finditer —
+    the same non-overlapping left-to-right matches pattern.sub
+    would make — so there are no rescan loops: the scan is linear
+    per pattern. Returns (start, end, order) intervals in ORIGINAL
+    coordinates for every match redact_secrets() would actually
+    make. The PEM pattern is excluded: complete blocks are
+    substituted before the flush decision, and an in-progress block
+    is carried by the PEM state.
+
+    The boundary map is an array('q') (8 bytes per boundary, not a
+    list of int objects) and is materialized lazily: until some
+    pattern actually matches, the map is the identity and is
+    represented by None, so a segment holding no secrets costs no
+    map at all.
     """
-    import bisect
+    from array import array
 
     claims = []
-    merged_starts = []  # sorted, disjoint claimed intervals
-    merged_ends = []
-
-    def _intersecting(start, end):
-        """First claimed interval intersecting [start, end), or None."""
-        i = bisect.bisect_right(merged_starts, start) - 1
-        if i >= 0 and merged_ends[i] > start:
-            return merged_starts[i], merged_ends[i]
-        j = i + 1
-        if j < len(merged_starts) and merged_starts[j] < end:
-            return merged_starts[j], merged_ends[j]
-        return None
-
-    def _bulk_merge(accepted):
-        """Merge one pattern's accepted intervals (sorted, disjoint,
-        and non-intersecting with the index) into the index in a
-        single linear sweep."""
-        if not accepted:
-            return
-        new_starts = []
-        new_ends = []
-        i = 0
-        for s, e, _o in accepted:
-            while i < len(merged_starts) and merged_ends[i] < s:
-                new_starts.append(merged_starts[i])
-                new_ends.append(merged_ends[i])
-                i += 1
-            if i < len(merged_starts) and merged_starts[i] <= e:
-                s = min(s, merged_starts[i])
-                e = max(e, merged_ends[i])
-                i += 1
-            new_starts.append(s)
-            new_ends.append(e)
-        while i < len(merged_starts):
-            new_starts.append(merged_starts[i])
-            new_ends.append(merged_ends[i])
-            i += 1
-        merged_starts[:] = new_starts
-        merged_ends[:] = new_ends
-
-    for order, pattern in enumerate(_ORDERED_PATTERNS):
-        accepted = []
-        pos = 0
-        while pos <= len(text):
-            match = pattern.search(text, pos)
-            if match is None:
-                break
-            hit = _intersecting(match.start(), match.end())
-            if hit is not None:
-                s, e = hit
-                if s <= match.start():
-                    # The match starts inside a claimed region: no
-                    # real match can start inside it either, so skip
-                    # the whole region instead of rescanning it.
-                    pos = e
-                else:
-                    # The match starts before a claimed region and
-                    # overlaps it: the substitution inside its span
-                    # invalidates it. Step past its start and keep
-                    # looking for matches that survive.
-                    pos = match.start() + 1
-                continue
-            accepted.append((match.start(), match.end(), order))
-            pos = max(match.end(), match.start() + 1)
-        claims.extend(accepted)
-        _bulk_merge(accepted)
+    current = text
+    boundaries = None  # None = identity map (no substitution yet)
+    for order, (pattern, replacement) in enumerate(_ORDERED_PAIRS):
+        matches = list(pattern.finditer(current))
+        if not matches:
+            continue
+        if boundaries is None:
+            boundaries = array("q", range(len(current) + 1))
+        parts = []
+        new_boundaries = array("q")
+        prev_end = 0
+        for match in matches:
+            claims.append((boundaries[match.start()],
+                           boundaries[match.end()], order))
+            gap_bounds = boundaries[prev_end:match.start() + 1]
+            if new_boundaries:
+                gap_bounds = gap_bounds[1:]
+            parts.append(current[prev_end:match.start()])
+            new_boundaries.extend(gap_bounds)
+            repl = (replacement(match) if callable(replacement)
+                    else replacement)
+            orig_start = boundaries[match.start()]
+            orig_end = boundaries[match.end()]
+            repl_bounds = array(
+                "q", [orig_start] * len(repl) + [orig_end])
+            parts.append(repl)
+            new_boundaries.extend(repl_bounds[1:])
+            prev_end = match.end()
+        tail_bounds = boundaries[prev_end:]
+        if new_boundaries:
+            tail_bounds = tail_bounds[1:]
+        parts.append(current[prev_end:])
+        new_boundaries.extend(tail_bounds)
+        current = "".join(parts)
+        boundaries = new_boundaries
     return claims
 
 

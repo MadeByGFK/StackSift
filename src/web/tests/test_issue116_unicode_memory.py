@@ -576,3 +576,67 @@ def test_phantoms_inside_claimed_token_not_rescanned():
     elapsed = time.perf_counter() - start
     assert streamed == redact_secrets(text)
     assert elapsed < 10, elapsed
+
+
+# --- Codex review findings on PR #121 head 8 (all verified) -----------------
+#
+# Head 8's _claimed_matches rejects any match whose span INTERSECTS
+# an earlier claim. That is the same geometric approximation failing
+# in the other direction from head 7: a labeled match whose value
+# contains an earlier token claim still forms in whole-text
+# redaction (the token becomes [REDACTED], which the labeled-value
+# pattern accepts), so the outer match is real, not a phantom; and
+# the start+1 resume for matches that start before a claim and
+# intersect it rescans quadratically on dense label starts. Head 9
+# computes claims by simulating the sequential substitution itself:
+# each pattern runs over the current (rewritten) text, exactly as
+# redact_secrets() applies it, and its matches are translated back
+# to original coordinates through a substitution boundary map.
+# "Phantom" is then exact by construction and no scan resumes
+# one character at a time.
+
+
+def test_labeled_match_surviving_inner_token_claim_is_claimed():
+    # Finding (4438337030): the ghp_ token inside this labeled value
+    # is claimed first; after substitution the value is
+    # "[REDACTED]_secret_key", which the labeled pattern still
+    # matches, so the whole credential collapses to one redaction.
+    # Head 8's span-intersection rule discarded the labeled match
+    # and leaked the trailing "_secret_key" split.
+    from app.redact import redact_secrets
+
+    text = (
+        "2024-01-01 10:00:00 ERROR password=" + "ghp_" + "a" * 20
+        + "_secret_key\n"
+        "2024-01-01 10:01:00 INFO ok\n"
+    )
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    assert streamed == redact_secrets(text)
+    assert streamed.startswith(
+        "2024-01-01 10:00:00 ERROR password=[REDACTED]\n")
+    out = analyze_upload(
+        "s.log", text.encode(), allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    assert "secret_key" not in json.dumps(out, default=str)
+
+
+def test_dense_label_starts_before_token_claim_not_quadratic():
+    # Finding (4438337031): Codex's fixture scaled to ~656 KB —
+    # one physical line holding 16k labeled starts, each followed
+    # by a ghp_ token claim the labeled match overlaps. Head 8's
+    # start+1 resume rescans the remaining value per start
+    # (quadratic: ~11.6s at Codex's ~450 KB scale on this VM, and
+    # the supervised worker timed out at 60s on that fixture
+    # through analyze_upload). The simulation scan is linear per
+    # pattern, so the same guard separates the trees by an order
+    # of magnitude.
+    import time
+
+    from app.redact import redact_secrets
+
+    text = ("password=" + "ghp_" + "a" * 20 + "password") * 16000 + "\n"
+    start = time.perf_counter()
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    elapsed = time.perf_counter() - start
+    assert streamed == redact_secrets(text)
+    assert elapsed < 10, elapsed
