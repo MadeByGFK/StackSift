@@ -506,3 +506,73 @@ def test_many_tokens_line_claims_not_quadratic():
     assert streamed == redact_secrets(text)
     assert "hunter2" not in streamed
     assert elapsed < 10, elapsed
+
+
+# --- Codex review findings on PR #121 head 7 (all verified) -----------------
+#
+# Head 7's _claimed_matches tested only a match's START against
+# earlier claims and resumed phantom scans one character in: a
+# Bearer match starting before a ghp_ claim but overlapping it was
+# admitted (and broke the real labeled match after it); per-match
+# list insertion into the merged index was quadratic on interleaved
+# patterns; and phantoms inside a long claimed token were rescanned
+# one start at a time. Head 8 rejects any match whose span
+# intersects an earlier claim, resumes at the covering claim's end,
+# and bulk-merges each pattern's intervals.
+
+
+def test_match_overlapping_earlier_claim_is_phantom():
+    # Finding (4438275300): the Bearer match starts BEFORE the ghp_
+    # claim but overlaps it; whole-text substitution breaks the
+    # token, so the Bearer match never forms \u2014 and it must not
+    # suppress the real labeled match after it.
+    from app.redact import redact_secrets
+
+    content = (
+        "2024-01-01 10:00:00 ERROR Bearer " + "ghp_" + "a" * 20
+        + "=secret_key:password\n"
+        "2024-01-01 10:01:00 INFO ok\n"
+    ).encode()
+    out = analyze_upload("s.log", content, allow_oversize=True, use_alarm=False)
+    assert "error" not in out, out
+    blob = json.dumps(out, default=str)
+    assert "secret_key:password" not in blob
+    streamed = "".join(service._redacted_chunks(content))
+    assert streamed == redact_secrets(content.decode())
+
+
+def test_interleaved_token_patterns_not_quadratic():
+    # Finding (4438275304): interleaved ghp_/gho_ tokens \u2014 the
+    # second pattern's intervals insert between the first's.
+    # Guard at 100k pairs; the scale teeth evidence is recorded on
+    # PR #121 (500k pairs / 25 MB: head 7 streams it in 56.3s \u2014
+    # over the supervised worker's 60s budget once overhead is
+    # added, matching Codex's timeout \u2014 head 8 in 8.3s).
+    import time
+
+    from app.redact import redact_secrets
+
+    text = ("ghp_" + "a" * 20 + " gho_" + "b" * 20 + " ") * 100000 \
+        + "password=\nhunter2\n"
+    start = time.perf_counter()
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    elapsed = time.perf_counter() - start
+    assert streamed == redact_secrets(text)
+    assert "hunter2" not in streamed
+    assert elapsed < 20, elapsed
+
+
+def test_phantoms_inside_claimed_token_not_rescanned():
+    # Finding (4438275307): a claimed Bearer token holding many
+    # password= substrings must be skipped as one region, not
+    # rescanned per phantom start.
+    import time
+
+    from app.redact import redact_secrets
+
+    text = "Bearer " + ("password=" + "q" * 21) * 15000 + "password\n"
+    start = time.perf_counter()
+    streamed = "".join(service._redacted_chunks(text.encode()))
+    elapsed = time.perf_counter() - start
+    assert streamed == redact_secrets(text)
+    assert elapsed < 10, elapsed

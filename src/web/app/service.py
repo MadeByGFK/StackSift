@@ -307,21 +307,23 @@ def _claimed_matches(text: str):
     """Redaction matches in *text* that survive pattern order.
 
     redact_secrets() applies its patterns sequentially over the whole
-    text, so a match that starts inside a region an earlier pattern
-    already claimed can never form \u2014 the earlier substitution
-    consumed that text (e.g. a "password" label inside a ghp_ token).
-    Returns (start, end, order) intervals with such phantom matches
-    discarded. The PEM pattern is excluded: complete blocks are
-    substituted before the flush decision, and an in-progress block
-    is carried by the PEM state.
+    text, so a match whose span intersects a region an earlier
+    pattern already claimed can never form as written \u2014 the
+    earlier substitution rewrote that part of the text (e.g. a
+    "password" label inside a ghp_ token, or a Bearer token broken
+    by the ghp_ substitution inside it). Returns (start, end, order)
+    intervals with such phantom matches discarded. The PEM pattern
+    is excluded: complete blocks are substituted before the flush
+    decision, and an in-progress block is carried by the PEM state.
 
-    Two implementation points, both from Codex findings on PR #121:
+    Implementation points, each from a Codex finding on PR #121:
     discarding a phantom must not swallow a real match that overlaps
-    it, so after a phantom the scan resumes at phantom.start() + 1
-    rather than past the phantom's end; and the "starts inside a
-    claim" test uses a merged-interval index (bisect), not a scan of
-    every previous claim \u2014 a line holding many tokens otherwise
-    makes the check quadratic in the number of claims.
+    it, so the scan resumes just past the covering claim's end (a
+    real match can start there, never inside the claim); and the
+    claim index is a merged-interval list maintained by bulk merge
+    per pattern \u2014 per-match list insertion and per-match scans of
+    every previous claim are both quadratic on lines holding many
+    credentials.
     """
     import bisect
 
@@ -329,40 +331,69 @@ def _claimed_matches(text: str):
     merged_starts = []  # sorted, disjoint claimed intervals
     merged_ends = []
 
-    def _inside_claim(pos):
-        i = bisect.bisect_right(merged_starts, pos) - 1
-        return i >= 0 and pos < merged_ends[i]
-
-    def _add_claim(start, end):
+    def _intersecting(start, end):
+        """First claimed interval intersecting [start, end), or None."""
         i = bisect.bisect_right(merged_starts, start) - 1
-        first = i + 1
-        lo, hi = start, end
-        if i >= 0 and merged_ends[i] >= start:
-            lo = merged_starts[i]
-            hi = max(hi, merged_ends[i])
-            first = i
-        last = first
-        while last < len(merged_starts) and merged_starts[last] <= hi:
-            hi = max(hi, merged_ends[last])
-            last += 1
-        merged_starts[first:last] = [lo]
-        merged_ends[first:last] = [hi]
+        if i >= 0 and merged_ends[i] > start:
+            return merged_starts[i], merged_ends[i]
+        j = i + 1
+        if j < len(merged_starts) and merged_starts[j] < end:
+            return merged_starts[j], merged_ends[j]
+        return None
+
+    def _bulk_merge(accepted):
+        """Merge one pattern's accepted intervals (sorted, disjoint,
+        and non-intersecting with the index) into the index in a
+        single linear sweep."""
+        if not accepted:
+            return
+        new_starts = []
+        new_ends = []
+        i = 0
+        for s, e, _o in accepted:
+            while i < len(merged_starts) and merged_ends[i] < s:
+                new_starts.append(merged_starts[i])
+                new_ends.append(merged_ends[i])
+                i += 1
+            if i < len(merged_starts) and merged_starts[i] <= e:
+                s = min(s, merged_starts[i])
+                e = max(e, merged_ends[i])
+                i += 1
+            new_starts.append(s)
+            new_ends.append(e)
+        while i < len(merged_starts):
+            new_starts.append(merged_starts[i])
+            new_ends.append(merged_ends[i])
+            i += 1
+        merged_starts[:] = new_starts
+        merged_ends[:] = new_ends
 
     for order, pattern in enumerate(_ORDERED_PATTERNS):
+        accepted = []
         pos = 0
         while pos <= len(text):
             match = pattern.search(text, pos)
             if match is None:
                 break
-            if _inside_claim(match.start()):
-                # Phantom: an earlier pattern claimed this region.
-                # Resume just past its start so a real match that
-                # overlaps the phantom is still discovered.
-                pos = match.start() + 1
+            hit = _intersecting(match.start(), match.end())
+            if hit is not None:
+                s, e = hit
+                if s <= match.start():
+                    # The match starts inside a claimed region: no
+                    # real match can start inside it either, so skip
+                    # the whole region instead of rescanning it.
+                    pos = e
+                else:
+                    # The match starts before a claimed region and
+                    # overlaps it: the substitution inside its span
+                    # invalidates it. Step past its start and keep
+                    # looking for matches that survive.
+                    pos = match.start() + 1
                 continue
-            claims.append((match.start(), match.end(), order))
-            _add_claim(match.start(), match.end())
+            accepted.append((match.start(), match.end(), order))
             pos = max(match.end(), match.start() + 1)
+        claims.extend(accepted)
+        _bulk_merge(accepted)
     return claims
 
 
