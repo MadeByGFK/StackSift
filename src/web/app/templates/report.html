@@ -56,6 +56,22 @@
         <button type="submit" class="btn-small">Export PDF (2 credits)</button>
       </form>
       <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Charged 2 credits only when the PDF is first generated &mdash; re-downloads are free. Attach it to the incident ticket or hand it off at shift change.</p>
+      {% if not report_kind %}
+      <form method="post" action="/reports/{{ report_id }}/exports/csv" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-small">Export CSV ({{ structured_export_cost }} credits)</button>
+      </form>
+      <form method="post" action="/reports/{{ report_id }}/exports/json" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn-small">Export JSON ({{ structured_export_cost }} credits)</button>
+      </form>
+      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">First generation is charged; re-download is free while retained. For CSV, import text columns as text in your spreadsheet.</p>
+      {% if structured_exports %}
+      <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">Your exports:
+        {% for exp in structured_exports %}<a href="/exports/{{ exp.id }}">Download {{ exp.format|upper }}</a>{{ ", " if not loop.last }}{% endfor %}
+      </p>
+      {% endif %}
+      {% endif %}
     </div>
     {% endif %}
   </section>

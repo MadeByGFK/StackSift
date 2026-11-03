@@ -219,3 +219,27 @@ def test_payload_to_json_rejects_nan():
 
     with pytest.raises(StructuredExportError):
         payload_to_json(payload)
+
+
+# --- Issue #105 additions: report-kind gate + nonfinite JSON ----------------
+
+from app.structured_export import UnsupportedReportKind, check_report_kind
+
+
+def test_check_report_kind_accepts_single_file_shapes():
+    check_report_kind({})
+    check_report_kind({"report_kind": "single"})
+    check_report_kind({"report_kind": "analysis"})
+
+
+@pytest.mark.parametrize("kind", ["comparison", "batch", "weird-kind"])
+def test_check_report_kind_rejects_other_discriminators(kind):
+    with pytest.raises(UnsupportedReportKind):
+        check_report_kind({"report_kind": kind})
+
+
+def test_payload_to_json_rejects_infinity():
+    payload = _base_payload()
+    payload["results"]["metric"] = math.inf
+    with pytest.raises(StructuredExportError):
+        payload_to_json(payload)

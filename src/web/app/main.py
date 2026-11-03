@@ -102,6 +102,11 @@ async def stop_credit_maintenance():
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 templates.env.globals["new_request_id"] = lambda: __import__("uuid").uuid4().hex
+# Issue #105: report.html renders its structured-export price from the
+# single credits constant (global so every report.html render site —
+# fresh analysis, replay, saved report — shows the same ruled price).
+from app import credits as _credits_template_globals
+templates.env.globals["structured_export_cost"] = _credits_template_globals.COST_STRUCTURED_EXPORT
 
 # Phase 1: Auth routes (signup, login, OAuth, sessions, settings)
 app.include_router(auth_router)
@@ -2495,6 +2500,27 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     data["csrf_token"] = _csrf
     data["report_id"] = str(result.id)
     data["is_historical"] = True
+    # Issue #105: existing structured-export artifacts for this source get
+    # free re-download links on the report page (artifact's own expiry,
+    # validated on the download route itself).
+    if result.type == "analysis" and not data.get("report_kind"):
+        from datetime import datetime as _dt, timezone as _tz
+        _arts = db.query(models.Result).filter(
+            models.Result.user_id == _user.id,
+            models.Result.type == "structured_export",
+            models.Result.deleted_at.is_(None),
+            models.Result.expires_at > _dt.now(_tz.utc),
+        ).order_by(models.Result.created_at.desc()).all()
+        _links = []
+        for _art in _arts:
+            try:
+                _m = json.loads(_art.storage_manifest)
+            except (ValueError, TypeError):
+                continue
+            if _m.get("source_result_id") == str(result.id) and _m.get("format") in ("csv", "json"):
+                _links.append({"id": str(_art.id), "format": _m["format"]})
+        data["structured_exports"] = _links
+    data.setdefault("structured_exports", [])
     # Older manifests predate the elapsed field; the template requires it.
     data.setdefault("elapsed", 0.0)
     if result.type == "comparison":
@@ -2680,3 +2706,363 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         headers={"Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(filename)}.pdf"'},
     )
 
+
+
+# ---------------------------------------------------------------------------
+# Issue #105: Structured export (CSV/JSON) — uniform 2 credits per format
+# (founder batched ruling 2026-11-01: COST_STRUCTURED_EXPORT for every
+# format). Reserve -> generate from the validated snapshot -> store +
+# complete in ONE settlement; full release on any failure.
+# ---------------------------------------------------------------------------
+
+
+def _structured_export_response(export_bytes, manifest):
+    from fastapi.responses import Response
+    return Response(
+        content=export_bytes,
+        media_type=manifest["media_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="{manifest["filename"]}"',
+            "Cache-Control": "private, no-store",
+            "X-Export-Download-URL": f"/exports/{manifest['_artifact_id']}",
+        },
+    )
+
+
+@app.post("/reports/{result_id}/exports/{export_format}")
+async def report_export_structured(request: Request, result_id: str, export_format: str, db=Depends(get_db)):
+    """Export a stored single-file report as CSV or JSON.
+
+    Costs COST_STRUCTURED_EXPORT credits on first generation per format;
+    replays of the same format/source/schema are free.
+    """
+    import uuid as _uuid
+    import hmac
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import structured_export as se
+    from datetime import datetime, timezone
+
+    # Format gate first: reject anything but csv/json before any
+    # reservation (and before auth/CSRF work that could mask it).
+    if export_format not in se.EXPORT_FORMATS:
+        return JSONResponse({"error": "Unsupported export format"}, status_code=400)
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+
+    form = await request.form()
+    csrf_token = form.get("csrf_token", "")
+    if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+        return JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
+
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+
+    # PR #125 finding 4: comparison reports are stored with
+    # type="comparison" (credits.store_result result_type="comparison");
+    # they must be found here so they flow through integrity validation
+    # and the report-kind gate (422 before charge), not 404.
+    source = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+        models.Result.type.in_(("analysis", "comparison")),
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not source:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+    # Validate ALL source prerequisites BEFORE reservation (spec §5),
+    # including integrity via result_payload (owner/origin/expiry/digest).
+    try:
+        payload = credits_helpers.result_payload(
+            source, user_id=user.id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+
+    # Report-kind gate (§7): compare/batch/unknown fail closed before charge.
+    try:
+        se.check_report_kind(payload)
+    except se.UnsupportedReportKind:
+        return JSONResponse(
+            {"error": "Structured export is not yet supported for this report type"},
+            status_code=422,
+        )
+
+    # Serialization validation also happens BEFORE reservation: a CSV
+    # contradiction (422) or a non-finite JSON payload must never debit.
+    # PR #125 finding 3: validation is separated from generation —
+    # validate_exportable performs the full serialization validation
+    # WITHOUT calling generate_export, so the 402 and completed-replay
+    # paths below never run the generator. Bytes are generated only
+    # after replay discovery + successful admission, from this same
+    # validated snapshot.
+    try:
+        se.validate_exportable(payload, export_format)
+    except se.UnsupportedReportKind:
+        return JSONResponse(
+            {"error": "Structured export is not yet supported for this report type"},
+            status_code=422,
+        )
+    except se.StructuredExportError:
+        return JSONResponse({"error": "Report cannot be exported"}, status_code=422)
+
+    cost = credits_helpers.COST_STRUCTURED_EXPORT
+    base_key = f"structured-{rid}-{export_format}-v1"
+    request_hash = credits_helpers.hash_input(json.dumps(
+        {
+            "source_result_id": str(rid),
+            "source_integrity_digest": source.integrity_digest,
+            "format": export_format,
+            "schema_version": se.SCHEMA_VERSION,
+        },
+        sort_keys=True, separators=(",", ":"),
+    ).encode())
+
+    # PR #125 finding 1: serialize discovery + retry-key creation for
+    # the whole base-key chain. Lock the global:paid capacity scope
+    # (same first scope admit_paid_operation locks) BEFORE discovery
+    # and hold it, in this transaction, through the admission commit
+    # below. A concurrent POST blocks on that row until the first
+    # reservation commits, then its discovery sees the reserved /
+    # completed operation instead of inventing a second retry key.
+    # Every early return after this point rolls back to release it.
+    credits_helpers.lock_global_paid_scope(db)
+
+    # Replay discovery (§5): find the LATEST matching attempt — the base
+    # key or any server-created retry suffix — never just the base key
+    # (that is the PDF retry-discovery gap, designed out here).
+    attempts = db.execute(
+        _select(models.Operation).where(
+            models.Operation.user_id == user.id,
+            models.Operation.type == "structured_export",
+        )
+    ).scalars().all()
+    matching = [
+        op for op in attempts
+        if op.idempotency_key == base_key
+        or op.idempotency_key.startswith(base_key + "-retry-")
+    ]
+    # In-progress anywhere in the chain blocks a second generator/debit.
+    if any(op.status == "reserved" for op in matching):
+        db.rollback()
+        return JSONResponse(
+            {"error": "Structured export already in progress. Please wait and try again."},
+            status_code=409,
+        )
+    completed = [op for op in matching if op.status == "completed" and op.result_id]
+    if completed:
+        # Latest completed attempt wins (retries are created later).
+        latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
+        artifact = db.get(models.Result, latest.result_id)
+        if artifact is not None:
+            try:
+                manifest = credits_helpers.result_payload(
+                    artifact, user_id=user.id, operation_id=latest.id,
+                )
+                export_bytes, manifest = se.decode_artifact(
+                    manifest, expected_format=export_format, expected_source_id=rid,
+                    expected_source_integrity_digest=source.integrity_digest,
+                )
+            except Exception:
+                db.rollback()
+                return JSONResponse(
+                    {"error": "Previously generated export is no longer available."},
+                    status_code=410,
+                )
+            manifest = dict(manifest, _artifact_id=str(artifact.id))
+            db.rollback()
+            return _structured_export_response(export_bytes, manifest)
+        db.rollback()
+        return JSONResponse(
+            {"error": "Previously generated export is no longer available."},
+            status_code=410,
+        )
+
+    has_failed = any(op.status in ("failed", "expired") for op in matching)
+    idempotency_key = (
+        f"{base_key}-retry-{_uuid.uuid4().hex[:8]}" if has_failed else base_key
+    )
+
+    # Eligible-vs-total gate (§9.6): a spend-restricted user can hold a
+    # positive total balance yet have zero eligible credits — that is a
+    # 402 with the dynamic price, not an admission conflict, and it runs
+    # no generator and leaves no reservation/artifact.
+    if credits_helpers.get_eligible_credits(db, user.id) < cost:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Structured export costs {cost} credit{'s' if cost != 1 else ''}.",
+             "purchase_url": "/credits"},
+            status_code=402,
+        )
+
+    consent = credits_helpers.create_consent(
+        db, user_id=user.id, operation_type="structured_export",
+        input_hash=request_hash, max_cost=cost,
+    )
+    db.flush()
+
+    worker_id = f"structured-export-{_uuid.uuid4().hex[:8]}"
+    try:
+        op = credits_helpers.admit_paid_operation(
+            db, user_id=user.id, operation_type="structured_export",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            cost=cost, consent_id=consent.id,
+            worker_id=worker_id,
+        )
+        # Never execute an operation this request does not own: a replay
+        # returned by admission (lost race) is handled without generating.
+        if op.worker_id != worker_id or op.status != "reserved":
+            db.rollback()
+            if op.status == "completed":
+                return JSONResponse(
+                    {"error": "Structured export already completed. Please try again to download it."},
+                    status_code=409,
+                )
+            return JSONResponse(
+                {"error": "Structured export already in progress. Please wait and try again."},
+                status_code=409,
+            )
+        db.commit()
+    except credits_helpers.InsufficientCredits:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Structured export costs {cost} credit{'s' if cost != 1 else ''}.",
+             "purchase_url": "/credits"},
+            status_code=402,
+        )
+    except credits_helpers.AdmissionError as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+    # Reserve committed. Generate from the validated snapshot, then store
+    # + complete in ONE settlement transaction; full release on failure.
+    # PR #125 finding 2: Operation.failure_code is String(50); storing
+    # str(exception)[:200] overflowed it on PostgreSQL, the release
+    # flush failed and the reversal rolled back, leaving the op stuck
+    # reserved. Store only a short stable code (<=50 chars) and log the
+    # full exception detail separately.
+    def _release(failure_code, exc=None):
+        import logging as _logging
+        if exc is not None:
+            _logging.getLogger(__name__).exception(
+                "Structured export failed (%s)", failure_code,
+                exc_info=(type(exc), exc, exc.__traceback__))
+        bounded = str(failure_code)[:50]
+        try:
+            credits_helpers.release_operation(db, op.id, worker_id, bounded)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    try:
+        export_bytes = se.generate_export(payload, export_format)
+    except Exception as e:
+        _release("generation_failed", e)
+        return JSONResponse({"error": "Structured export generation failed"}, status_code=500)
+
+    filename = se.safe_download_name(payload.get("filename"), rid, export_format)
+    media_type = se.MEDIA_TYPES[export_format]
+    try:
+        artifact = credits_helpers.store_structured_export_result(
+            db, user.id, op.id, export_bytes,
+            export_format=export_format, filename=filename, media_type=media_type,
+            source_result_id=rid, source_integrity_digest=source.integrity_digest,
+        )
+        credits_helpers.complete_operation(
+            db, op.id, worker_id, result_id=artifact.id,
+            lease_generation=op.lease_generation,
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        _release("storage_failed", e)
+        return JSONResponse({"error": "Failed to store structured export"}, status_code=500)
+
+    manifest = {
+        "media_type": media_type,
+        "filename": filename,
+        "_artifact_id": str(artifact.id),
+    }
+    return _structured_export_response(export_bytes, manifest)
+
+
+@app.get("/exports/{export_id}")
+async def structured_export_download(request: Request, export_id: str, db=Depends(get_db)):
+    """Free re-download of a generated structured export (spec §6).
+
+    Owner-authenticated only; validates the artifact's own origin,
+    manifest and content integrity/expiry. Works even after the SOURCE
+    report expires — the artifact has its own 7-day life — and never
+    generates, charges, or refreshes expiry.
+    """
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse, RedirectResponse
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import structured_export as se
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    user = session.user
+
+    try:
+        eid = _uuid.UUID(export_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid export ID"}, status_code=400)
+
+    artifact = db.query(models.Result).filter(
+        models.Result.id == eid,
+        models.Result.user_id == user.id,
+        models.Result.type == "structured_export",
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not artifact:
+        return JSONResponse({"error": "Export not found"}, status_code=404)
+    try:
+        manifest = credits_helpers.result_payload(
+            artifact, user_id=user.id, operation_id=artifact.operation_id,
+        )
+        export_bytes, manifest = se.decode_artifact(manifest)
+        # PR #125 finding 5: bind provenance to the originating
+        # operation. The source may be expired/gone on GET, so recompute
+        # the POST route's request hash from the manifest's provenance
+        # fields (exactly the POST canonical construction) and compare
+        # it to the originating Operation's request_hash. Missing or
+        # mismatched operation fails closed (410).
+        if not artifact.operation_id:
+            raise ValueError("artifact has no originating operation")
+        origin_op = db.get(models.Operation, artifact.operation_id)
+        if origin_op is None or origin_op.type != "structured_export":
+            raise ValueError("originating operation missing")
+        expected_hash = credits_helpers.hash_input(json.dumps(
+            {
+                "source_result_id": manifest["source_result_id"],
+                "source_integrity_digest": manifest["source_integrity_digest"],
+                "format": manifest["format"],
+                "schema_version": manifest["schema_version"],
+            },
+            sort_keys=True, separators=(",", ":"),
+        ).encode())
+        if expected_hash != origin_op.request_hash:
+            raise ValueError("artifact provenance does not match operation")
+    except Exception:
+        return JSONResponse({"error": "Export has expired or is no longer available"}, status_code=410)
+    manifest = dict(manifest, _artifact_id=str(artifact.id))
+    return _structured_export_response(export_bytes, manifest)
