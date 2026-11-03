@@ -342,8 +342,8 @@ async def pricing_redirect():
     return RedirectResponse(url="/credits", status_code=301)
 
 
-# ISSUE-68: Stripe Checkout entry point. Test mode only — the billing module
-# refuses live keys outright (live activation is a separate founder gate).
+# ISSUE-68: Stripe Checkout entry point. The billing module accepts test
+# and live keys; the configured key determines the mode (issue #126).
 # Anonymous users cannot buy: they get a 401 pointing at signup/login, and
 # the credits page only renders buy forms for signed-in users.
 @app.post("/credits/checkout")
@@ -430,10 +430,6 @@ async def credits_checkout(
             raise
         purchase.stripe_session_id = session_id
         db.commit()
-    except stripe_billing.LiveKeyRefused:
-        logging.getLogger(__name__).critical(
-            "STRIPE_SECRET_KEY is a live key; checkout refused")
-        raise HTTPException(500, "Credit purchases are misconfigured.")
     except stripe_billing.CheckoutNotConfigured:
         return JSONResponse(
             {"error": "Credit purchases are not available yet. Please try again later."},
@@ -449,7 +445,7 @@ async def credits_checkout(
     return JSONResponse({"checkout_url": checkout_url})
 
 
-# ISSUE-69: Stripe webhook — idempotent credit granting (test mode only).
+# ISSUE-69: Stripe webhook — idempotent credit granting.
 # Server-to-server: no user session and no CSRF token. The Stripe-Signature
 # HMAC is the authentication; unsigned or mis-signed deliveries are answered
 # 400 before any database row is touched. Stripe retries non-2xx, so every
@@ -466,9 +462,6 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
     log = logging.getLogger(__name__)
     try:
         webhook_secret = stripe_billing._webhook_secret()
-    except stripe_billing.LiveKeyRefused:
-        log.critical("STRIPE_SECRET_KEY is a live key; webhook refused")
-        raise HTTPException(500, "Credit purchases are misconfigured.")
     except stripe_billing.WebhookNotConfigured:
         raise HTTPException(503, "Credit purchases are unavailable right now.")
 
