@@ -92,12 +92,13 @@
             <button type="button" class="btn-small" id="share-copy">Copy link</button>
             <a class="btn-small" id="share-mailto" href="mailto:">Open in email</a>
           </div>
-          {% if share_active %}
-          <button type="button" class="btn-small" id="share-rotate">Rotate link</button>
-          <button type="button" class="btn-small" id="share-revoke">Revoke link</button>
-          {% else %}
-          <button type="button" class="btn-small" id="share-create">Create share link</button>
-          {% endif %}
+          {# PR #132 follow-up (P2): ALL share controls are always
+             rendered; visibility follows the share state so a link
+             created in this popup can be rotated/revoked (and a
+             revoked one re-created) without a page reload. #}
+          <button type="button" class="btn-small" id="share-create"{% if share_active %} style="display:none"{% endif %}>Create share link</button>
+          <button type="button" class="btn-small" id="share-rotate"{% if not share_active %} style="display:none"{% endif %}>Rotate link</button>
+          <button type="button" class="btn-small" id="share-revoke"{% if not share_active %} style="display:none"{% endif %}>Revoke link</button>
           <button type="button" class="btn-small" id="share-close">Close</button>
         </div>
       </div>
@@ -116,8 +117,16 @@
         var pending = null;
         document.querySelectorAll('form[data-confirm]').forEach(function (f) {
           f.addEventListener('submit', function (e) {
-            if (f.dataset.confirmed) { return; }
+            if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
             e.preventDefault();
+            // PR #132 follow-up (P1): this listener is registered
+            // BEFORE auth_form_script.html's PDF fetch listener
+            // (this inline script precedes that include), so
+            // stopImmediatePropagation keeps the PDF fetch — and
+            // its 2-credit charge — from firing while the
+            // confirmation popup is open. Cancel therefore sends
+            // nothing at all.
+            e.stopImmediatePropagation();
             pending = f;
             text.textContent = f.getAttribute('data-confirm');
             modal.style.display = 'flex';
@@ -125,7 +134,7 @@
         });
         document.getElementById('ss-confirm-yes').addEventListener('click', function () {
           modal.style.display = 'none';
-          if (pending) { pending.dataset.confirmed = '1'; pending.submit(); pending = null; }
+          if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
         });
         document.getElementById('ss-confirm-no').addEventListener('click', function () {
           modal.style.display = 'none';
@@ -148,6 +157,17 @@
           linkBox.value = absoluteUrl;
           mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(absoluteUrl);
           linkRow.style.display = 'block';
+        }
+        function setShareButtons(active) {
+          // PR #132 follow-up (P2): toggle the always-rendered
+          // share controls to match the current share state,
+          // immediately on create/revoke success.
+          var c = document.getElementById('share-create');
+          var r = document.getElementById('share-rotate');
+          var v = document.getElementById('share-revoke');
+          if (c) { c.style.display = active ? 'none' : ''; }
+          if (r) { r.style.display = active ? '' : 'none'; }
+          if (v) { v.style.display = active ? '' : 'none'; }
         }
         function freshShareKey() {
           // PR #132 finding 1: after a successful share action the
@@ -197,7 +217,7 @@
           create.addEventListener('click', function () {
             postShare('/reports/{{ report_id }}/share', shareCreateKey).then(function (d) {
               if (d._httpOk) { shareCreateKey = freshShareKey(); }
-              if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); }
+              if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); setShareButtons(true); }
               else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
             });
           });
@@ -207,7 +227,7 @@
           rotate.addEventListener('click', function () {
             postShare('/reports/{{ report_id }}/share/rotate', shareRotateKey).then(function (d) {
               if (d._httpOk) { shareRotateKey = freshShareKey(); }
-              if (d._httpOk && d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url); }
+              if (d._httpOk && d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url); setShareButtons(true); }
               else { shareMsg.textContent = d.message || d.error || ''; }
             });
           });
@@ -224,6 +244,7 @@
                 shareRevokeKey = freshShareKey();
                 shareMsg.textContent = 'Share link revoked.';
                 linkRow.style.display = 'none';
+                setShareButtons(false);
               } else {
                 shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
               }

@@ -260,8 +260,15 @@
   var pending = null;
   document.querySelectorAll('form[data-confirm]').forEach(function (f) {
     f.addEventListener('submit', function (e) {
-      if (f.dataset.confirmed) { return; }
+      if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
       e.preventDefault();
+      // PR #132 follow-up (P1): this listener is registered BEFORE
+      // auth_form_script.html's PDF fetch listener (this inline
+      // script precedes that include), so stopImmediatePropagation
+      // keeps the PDF fetch — and its 2-credit charge — from
+      // firing while the confirmation popup is open. Cancel
+      // therefore sends nothing at all.
+      e.stopImmediatePropagation();
       pending = f;
       text.textContent = f.getAttribute('data-confirm');
       modal.style.display = 'flex';
@@ -269,7 +276,7 @@
   });
   document.getElementById('ss-confirm-yes').addEventListener('click', function () {
     modal.style.display = 'none';
-    if (pending) { pending.dataset.confirmed = '1'; pending.submit(); pending = null; }
+    if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
   });
   document.getElementById('ss-confirm-no').addEventListener('click', function () {
     modal.style.display = 'none';
@@ -283,6 +290,14 @@
   var createBtn = document.getElementById('share-create');
   var rotateBtn = document.getElementById('share-rotate');
   var revokeBtn = document.getElementById('share-revoke');
+  function setShareButtons(active) {
+    // PR #132 follow-up (P2): update the still-open popup's visible
+    // buttons immediately on create/revoke success, not only on
+    // the next popup open.
+    createBtn.style.display = active ? 'none' : '';
+    rotateBtn.style.display = active ? '' : 'none';
+    revokeBtn.style.display = active ? '' : 'none';
+  }
   var current = null;
   function resolveShareUrl(url) {
     // PR #132 finding 3: the server returns a hostless /s/<token>
@@ -358,7 +373,7 @@
       if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); }
       if (d._httpOk && d.share_url) { originBtn.setAttribute('data-active', '1'); }
       if (current !== originBtn) { return; }
-      if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); }
+      if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); setShareButtons(true); }
       else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
     });
   });
@@ -390,6 +405,7 @@
       if (revoked) {
         shareMsg.textContent = 'Share link revoked.';
         linkRow.style.display = 'none';
+        setShareButtons(false);
       } else {
         shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
       }

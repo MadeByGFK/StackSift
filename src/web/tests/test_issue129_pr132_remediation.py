@@ -21,6 +21,7 @@ to the originating row button. Each assertion names a pattern that
 does not exist on the pre-fix templates.
 """
 
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -36,7 +37,8 @@ from test_structured_export_e2e import (
 )
 from test_issue129_export_unlock import _completed_charges
 from test_phase2b_reports_pdf import _login, _signup_and_verify
-from app import credits as C
+from test_report_sharing import _anon_client
+from app import credits as C, models as M, report_access as RA
 
 
 def _insert_export_op(auth_env, user_id, op_type, key, status):
@@ -217,3 +219,190 @@ def test_reports_page_share_script_contracts(auth_env):
     # the shared popup DOM is not written after a row switch.
     assert "var originBtn = current;" in text
     assert "if (current !== originBtn) { return; }" in text
+
+
+# --- PR #132 follow-up round ---------------------------------------------
+# Finding 1 (P1, JS contract): the PDF fetch must fire ONLY after the
+# confirmation popup's Continue — the confirm listener (registered
+# before auth_form_script.html's PDF listener in both pages) stops
+# immediate propagation for unconfirmed forms, Continue re-dispatches
+# via requestSubmit(), and the confirmed flag is cleared on the
+# confirmed pass so a later export asks again. No JS runtime harness
+# exists in this repo, so these are rendered-page contract tests.
+# Finding 2 (P2, JS contract): share controls reflect create/revoke
+# success immediately, without a reload.
+# Finding 3 (P2, behavioral): has_pdf_export_operation /
+# find_shareable_pdf match legacy noncanonical PDF keys via
+# credits.export_key_belongs_to, so an expired legacy PDF keeps the
+# identical-404 share outcome instead of regenerating on the fly.
+
+
+def _rewrite_pdf_op_key(env, user_id, new_key):
+    with env.sessions() as db:
+        op = db.query(M.Operation).filter(
+            M.Operation.user_id == user_id,
+            M.Operation.type == "pdf").one()
+        op.idempotency_key = new_key
+        db.commit()
+
+
+# --- Follow-up F3: legacy PDF keys in report_access --------------------------
+
+def test_has_pdf_export_operation_recognizes_uppercase_key(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    _insert_export_op(
+        auth_env, user_id, "pdf", f"pdf-{str(rid).upper()}", "completed")
+    with auth_env.sessions() as db:
+        source = db.get(M.Result, rid)
+        assert RA.has_pdf_export_operation(db, source) is True
+
+
+def test_has_pdf_export_operation_recognizes_unhyphenated_retry_key(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    _insert_export_op(
+        auth_env, user_id, "pdf",
+        f"pdf-{rid.hex}-retry-ab12cd34", "completed")
+    with auth_env.sessions() as db:
+        source = db.get(M.Result, rid)
+        assert RA.has_pdf_export_operation(db, source) is True
+
+
+def test_find_shareable_pdf_recognizes_uppercase_key(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    pdf = auth_env.client.post(
+        f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    _rewrite_pdf_op_key(auth_env, user_id, f"pdf-{str(rid).upper()}")
+    with auth_env.sessions() as db:
+        source = db.get(M.Result, rid)
+        found = RA.find_shareable_pdf(db, source)
+        assert found is not None
+        pdf_result, pdf_bytes = found
+        assert pdf_result.type == "pdf"
+        assert pdf_bytes[:4] == b"%PDF"
+
+
+def test_find_shareable_pdf_recognizes_unhyphenated_key(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    pdf = auth_env.client.post(
+        f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    _rewrite_pdf_op_key(auth_env, user_id, f"pdf-{rid.hex}")
+    with auth_env.sessions() as db:
+        source = db.get(M.Result, rid)
+        found = RA.find_shareable_pdf(db, source)
+        assert found is not None
+        pdf_result, pdf_bytes = found
+        assert pdf_result.type == "pdf"
+        assert pdf_bytes[:4] == b"%PDF"
+
+
+def _create_share_token(auth_env, rid, csrf, key="followup-share-1"):
+    resp = auth_env.client.post(
+        f"/reports/{rid}/share",
+        data={"csrf_token": csrf, "idempotency_key": key})
+    assert resp.status_code == 200, resp.text[:400]
+    m = re.search(r"([0-9a-f]{64})", resp.json()["share_url"])
+    assert m, resp.json()
+    return m.group(1)
+
+
+def test_shared_pdf_expired_legacy_uppercase_key_returns_identical_404(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    token = _create_share_token(auth_env, rid, csrf)
+    anon = _anon_client()
+    pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    # Legacy storage: the completed PDF operation's key carries the
+    # noncanonical uppercase report segment.
+    _rewrite_pdf_op_key(auth_env, user_id, f"pdf-{str(rid).upper()}")
+    # The PDF artifact expires (T6): the share PDF route must return
+    # the identical 404, NOT regenerate the PDF on the fly — the
+    # on-the-fly path applies only when no PDF was ever generated.
+    with auth_env.sessions() as db:
+        pdf_result = db.query(M.Result).filter(
+            M.Result.user_id == user_id, M.Result.type == "pdf").one()
+        pdf_result.expires_at = C._utcnow() - timedelta(minutes=1)
+        db.commit()
+    baseline = anon.get(f"/s/{'0' * 64}/pdf")
+    assert baseline.status_code == 404
+    got = anon.get(f"/s/{token}/pdf")
+    assert got.status_code == 404
+    assert got.content == baseline.content
+
+
+# --- Follow-up F1: PDF confirmation gates the fetch (contract) ---------------
+
+def test_pdf_confirmation_gates_fetch_on_report_page(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    page = auth_env.client.get(f"/reports/{rid}")
+    assert page.status_code == 200
+    text = page.text
+    # Unconfirmed submit stops the later-registered PDF fetch listener.
+    assert "e.stopImmediatePropagation();" in text
+    # Continue re-dispatches through the submit event (so the PDF
+    # fetch handler performs the download), exactly once.
+    assert "confirmedForm.requestSubmit();" in text
+    assert "pending.submit()" not in text
+    # The confirmed flag is cleared on the confirmed pass, so a
+    # later export asks again.
+    assert "delete f.dataset.confirmed;" in text
+    # The confirm listener is registered before the PDF fetch listener.
+    assert text.index("form[data-confirm]") < text.index('form[action$="/pdf"]')
+
+
+def test_pdf_confirmation_gates_fetch_on_reports_page(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    page = auth_env.client.get("/reports")
+    assert page.status_code == 200
+    text = page.text
+    assert "e.stopImmediatePropagation();" in text
+    assert "confirmedForm.requestSubmit();" in text
+    assert "pending.submit()" not in text
+    assert "delete f.dataset.confirmed;" in text
+    assert text.index("form[data-confirm]") < text.index('form[action$="/pdf"]')
+
+
+# --- Follow-up F2: share controls update in place (contract) -----------------
+
+def test_report_page_renders_all_share_controls_when_inactive(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    page = auth_env.client.get(f"/reports/{rid}")
+    assert page.status_code == 200
+    text = page.text
+    # All three controls are rendered even with no active link;
+    # rotate/revoke start hidden, create visible.
+    assert 'id="share-create"' in text
+    assert 'id="share-rotate" style="display:none"' in text
+    assert 'id="share-revoke" style="display:none"' in text
+    # Create/revoke success toggles visibility immediately.
+    assert "function setShareButtons(active)" in text
+    assert "setShareButtons(true);" in text
+    assert "setShareButtons(false);" in text
+
+
+def test_report_page_renders_all_share_controls_when_active(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    _create_share_token(auth_env, rid, csrf)
+    page = auth_env.client.get(f"/reports/{rid}")
+    assert page.status_code == 200
+    text = page.text
+    # With an active link, create is rendered too (hidden), so a
+    # revoke in the popup can surface it without a reload.
+    assert 'id="share-create" style="display:none"' in text
+    assert 'id="share-rotate"' in text
+    assert 'id="share-revoke"' in text
+    assert "function setShareButtons(active)" in text
+    assert "setShareButtons(true);" in text
+    assert "setShareButtons(false);" in text
+
+
+def test_reports_page_share_callbacks_toggle_popup_buttons(auth_env):
+    _, user_id, rid, csrf = _setup(auth_env)
+    page = auth_env.client.get("/reports")
+    assert page.status_code == 200
+    text = page.text
+    # The still-open popup's buttons toggle on create/revoke success.
+    assert "function setShareButtons(active)" in text
+    assert "setShareButtons(true);" in text
+    assert "setShareButtons(false);" in text
