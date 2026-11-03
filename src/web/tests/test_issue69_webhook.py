@@ -9,7 +9,9 @@
 - Idempotency: redelivered events collide on stripe_webhook_events PK;
   second event ids for an already-settled purchase grant nothing;
   unknown purchases are ignored and logged; metadata mismatches fail closed.
-- Test mode only: live keys refused, unset webhook secret fails closed.
+- Mode follows the configured key (issue #126): a live key settles a
+  correctly signed completed checkout; signature failure still rejects,
+  and an unset webhook secret fails closed.
 
 Stripe is faked at the httpx boundary for checkout; webhook events are
 constructed locally and HMAC-signed exactly the way Stripe signs them.
@@ -205,15 +207,43 @@ def test_webhook_secret_unset_503(webhook_env, monkeypatch):
     assert resp.status_code == 503
 
 
-def test_webhook_refuses_live_key(webhook_env, monkeypatch):
-    from app import stripe_billing
+def test_webhook_settles_with_live_key(webhook_env, monkeypatch):
+    # Issue #126 premise-changed test: a live key used to be refused with
+    # 500 before signature handling; it now settles a completed checkout.
+    from app import credits as credits_helpers
+    from app import models
 
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc123")
-    payload = json.dumps({"id": "evt_x", "type": "ping"}).encode()
+    user_id, _ = _login(webhook_env)
+    purchase_id = _make_pending(webhook_env, user_id)
+    evt = _checkout_event("evt_live_1", "cs_test_pending_1", purchase_id, user_id)
+    resp = _post_event(webhook_env, evt)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "processed"
+    with webhook_env.sessions() as db:
+        p = db.get(models.CreditPurchase, purchase_id)
+        assert p.status == "completed"
+        summary = credits_helpers.get_balance_summary(db, uuid.UUID(user_id))
+        assert summary["balance"] == 10
+
+
+def test_webhook_live_key_bad_signature_400_writes_nothing(webhook_env, monkeypatch):
+    # Issue #126: live mode does not weaken signature verification.
+    from app import models
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc123")
+    user_id, _ = _login(webhook_env)
+    purchase_id = _make_pending(webhook_env, user_id)
+    evt = _checkout_event("evt_live_bad_1", "cs_test_pending_1", purchase_id, user_id)
+    payload = json.dumps(evt).encode()
     resp = webhook_env.client.post(
         "/credits/webhook", content=payload,
-        headers={"Stripe-Signature": _sign(payload)})
-    assert resp.status_code == 500
+        headers={"Stripe-Signature": _sign(payload, secret="whsec_wrong")})
+    assert resp.status_code == 400
+    with webhook_env.sessions() as db:
+        assert db.query(models.StripeWebhookEvent).count() == 0
+        p = db.get(models.CreditPurchase, purchase_id)
+        assert p.status == "pending"
 
 
 def test_webhook_bad_signature_400_writes_nothing(webhook_env):

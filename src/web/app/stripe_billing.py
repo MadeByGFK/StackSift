@@ -1,11 +1,13 @@
 """Phase 3: Stripe Checkout for credit packs (issue #68).
 
-Test-mode ONLY. The secret key MUST start with ``sk_test_`` — live keys are
-refused outright and never touch the network. Live activation is a separate
-founder gate (issues #69+); this module must never enable it.
+Mode follows the configured secret key (issue #126): the key MUST start
+with ``sk_test_`` or ``sk_live_`` — the configured key determines whether
+calls run in test or live mode, and there is no separate mode flag. Unset
+keys fail closed and unrecognized key shapes are refused before any
+network call.
 
-Each pack maps to a Stripe Price created in the sandbox account
-("StackSift", test mode). Price IDs reach the app through environment
+Each pack maps to a Stripe Price created in the Stripe account
+("StackSift"). Price IDs reach the app through environment
 variables so no Stripe IDs are hardcoded:
 
     STRIPE_PRICE_STARTER  $5  -> 10 credits
@@ -93,10 +95,6 @@ class CheckoutNotConfigured(CheckoutError):
     """Stripe is not configured yet — fail closed, no partial checkout."""
 
 
-class LiveKeyRefused(CheckoutError):
-    """A live secret key was presented; this build never uses live mode."""
-
-
 class WebhookNotConfigured(CheckoutError):
     """STRIPE_WEBHOOK_SECRET is not set — webhooks fail closed."""
 
@@ -140,17 +138,16 @@ def checkout_configured() -> bool:
 
 
 def _secret_key() -> str:
-    """Return the Stripe secret key, enforcing test mode.
+    """Return the Stripe secret key; the configured key determines the mode.
 
-    Raises CheckoutNotConfigured when unset, LiveKeyRefused for live keys,
-    CheckoutError for anything that is not a test key.
+    Accepts both test (``sk_test_``) and live (``sk_live_``) secret keys.
+    Raises CheckoutNotConfigured when unset, CheckoutError for anything
+    that is not a recognized secret-key shape.
     """
     key = os.environ.get("STRIPE_SECRET_KEY", "")
     if not key:
         raise CheckoutNotConfigured("STRIPE_SECRET_KEY is not set")
-    if key.startswith("sk_live_"):
-        raise LiveKeyRefused("live Stripe keys are never used by this build")
-    if not key.startswith("sk_test_"):
+    if not key.startswith(("sk_test_", "sk_live_")):
         raise CheckoutError("unrecognized Stripe key format")
     return key
 
@@ -158,16 +155,13 @@ def _secret_key() -> str:
 def _webhook_secret() -> str:
     """Return the Stripe webhook signing secret.
 
-    Raises WebhookNotConfigured when unset, LiveKeyRefused when a live
-    secret key is configured (this build never settles live payments;
-    live activation is a separate founder gate).
+    Raises WebhookNotConfigured when unset. Settlement proceeds with
+    whichever mode the configured secret key selects (test or live);
+    webhook signature verification is unchanged.
     """
     secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
     if not secret:
         raise WebhookNotConfigured("STRIPE_WEBHOOK_SECRET is not set")
-    key = os.environ.get("STRIPE_SECRET_KEY", "")
-    if key.startswith("sk_live_"):
-        raise LiveKeyRefused("live Stripe keys are never used by this build")
     return secret
 
 

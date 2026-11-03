@@ -6,8 +6,8 @@ as negative entries on the Stripe side even when the ledger holds no
 matching reversal — they are economics, and an unmatched one is the
 anomaly the founder must see (GFK-013 §6).
 
-Test-mode ONLY: the Stripe key must start with ``sk_test_`` (enforced by
-``stripe_billing._secret_key``); this module never touches live mode.
+The Stripe mode follows the configured key (``stripe_billing._secret_key``
+accepts ``sk_test_`` and ``sk_live_`` keys; issue #126).
 
 Join path (per models.py): Stripe payment <-> credit_purchases
 (stripe_session_id) <-> credit_grants (purchase_id) <-> credit_ledger
@@ -712,7 +712,7 @@ def reconcile_day(db, day: date, *, stripe_get=None,
         return run
 
     try:
-        key = sb._secret_key()  # test-mode enforced here
+        key = sb._secret_key()  # mode follows the configured key
         if stripe_get is not None:
             sessions = stripe_get("sessions", day)
             charges = stripe_get("charges", day)
