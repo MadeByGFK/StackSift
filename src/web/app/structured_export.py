@@ -94,7 +94,30 @@ def generate_export(payload, export_format, *, deadline_seconds=GENERATION_DEADL
     return data
 
 
-def decode_artifact(manifest, *, expected_format=None, expected_source_id=None):
+def validate_exportable(payload, export_format):
+    """Full prerequisite serialization validation WITHOUT generation.
+
+    PR #125 finding 3: performs exactly the validation generate_export
+    would surface (format gate, report-kind gate, CSV ordered-rows /
+    field validation, JSON round-trip / non-finite checks) but never
+    calls generate_export, so callers can validate before replay
+    discovery and before the eligible-credit gate without running
+    the generator on 402/replay paths. Returns None on success and
+    raises StructuredExportError / UnsupportedReportKind otherwise.
+    The bytes are discarded; generation from the same validated
+    snapshot happens only after successful admission.
+    """
+    validate_format(export_format)
+    check_report_kind(payload)
+    if export_format == "csv":
+        payload_to_csv(payload)
+    else:
+        payload_to_json(payload)
+    return None
+
+
+def decode_artifact(manifest, *, expected_format=None, expected_source_id=None,
+                    expected_source_integrity_digest=None):
     """Validate a stored structured-export artifact manifest and return
     (export_bytes, manifest). Strict base64, byte-count and digest are
     all verified; any mismatch raises StructuredExportError so replay /
@@ -112,8 +135,20 @@ def decode_artifact(manifest, *, expected_format=None, expected_source_id=None):
     validate_format(fmt)
     if expected_format is not None and fmt != expected_format:
         raise StructuredExportError("artifact format mismatch")
-    if expected_source_id is not None and manifest.get("source_result_id") != str(expected_source_id):
+    # PR #125 finding 5: provenance is mandatory — a manifest without
+    # a non-empty source id / integrity digest is not bound to any
+    # originating report and must fail closed.
+    source_result_id = manifest.get("source_result_id")
+    if not isinstance(source_result_id, str) or not source_result_id.strip():
+        raise StructuredExportError("artifact source provenance missing")
+    source_integrity_digest = manifest.get("source_integrity_digest")
+    if not isinstance(source_integrity_digest, str) or not source_integrity_digest.strip():
+        raise StructuredExportError("artifact source integrity digest missing")
+    if expected_source_id is not None and source_result_id != str(expected_source_id):
         raise StructuredExportError("artifact source mismatch")
+    if (expected_source_integrity_digest is not None
+            and source_integrity_digest != expected_source_integrity_digest):
+        raise StructuredExportError("artifact source integrity digest mismatch")
     encoded = manifest.get("content_base64")
     if not isinstance(encoded, str):
         raise StructuredExportError("artifact content missing")

@@ -2766,10 +2766,14 @@ async def report_export_structured(request: Request, result_id: str, export_form
     except ValueError:
         return JSONResponse({"error": "Invalid report ID"}, status_code=400)
 
+    # PR #125 finding 4: comparison reports are stored with
+    # type="comparison" (credits.store_result result_type="comparison");
+    # they must be found here so they flow through integrity validation
+    # and the report-kind gate (422 before charge), not 404.
     source = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == user.id,
-        models.Result.type == "analysis",
+        models.Result.type.in_(("analysis", "comparison")),
         models.Result.deleted_at.is_(None),
     ).first()
     if not source:
@@ -2801,10 +2805,14 @@ async def report_export_structured(request: Request, result_id: str, export_form
 
     # Serialization validation also happens BEFORE reservation: a CSV
     # contradiction (422) or a non-finite JSON payload must never debit.
-    # The bytes are regenerated after admission from this same validated
-    # snapshot, so what was validated is exactly what is exported.
+    # PR #125 finding 3: validation is separated from generation —
+    # validate_exportable performs the full serialization validation
+    # WITHOUT calling generate_export, so the 402 and completed-replay
+    # paths below never run the generator. Bytes are generated only
+    # after replay discovery + successful admission, from this same
+    # validated snapshot.
     try:
-        se.generate_export(payload, export_format)
+        se.validate_exportable(payload, export_format)
     except se.UnsupportedReportKind:
         return JSONResponse(
             {"error": "Structured export is not yet supported for this report type"},
@@ -2825,6 +2833,16 @@ async def report_export_structured(request: Request, result_id: str, export_form
         sort_keys=True, separators=(",", ":"),
     ).encode())
 
+    # PR #125 finding 1: serialize discovery + retry-key creation for
+    # the whole base-key chain. Lock the global:paid capacity scope
+    # (same first scope admit_paid_operation locks) BEFORE discovery
+    # and hold it, in this transaction, through the admission commit
+    # below. A concurrent POST blocks on that row until the first
+    # reservation commits, then its discovery sees the reserved /
+    # completed operation instead of inventing a second retry key.
+    # Every early return after this point rolls back to release it.
+    credits_helpers.lock_global_paid_scope(db)
+
     # Replay discovery (§5): find the LATEST matching attempt — the base
     # key or any server-created retry suffix — never just the base key
     # (that is the PDF retry-discovery gap, designed out here).
@@ -2841,6 +2859,7 @@ async def report_export_structured(request: Request, result_id: str, export_form
     ]
     # In-progress anywhere in the chain blocks a second generator/debit.
     if any(op.status == "reserved" for op in matching):
+        db.rollback()
         return JSONResponse(
             {"error": "Structured export already in progress. Please wait and try again."},
             status_code=409,
@@ -2857,14 +2876,18 @@ async def report_export_structured(request: Request, result_id: str, export_form
                 )
                 export_bytes, manifest = se.decode_artifact(
                     manifest, expected_format=export_format, expected_source_id=rid,
+                    expected_source_integrity_digest=source.integrity_digest,
                 )
             except Exception:
+                db.rollback()
                 return JSONResponse(
                     {"error": "Previously generated export is no longer available."},
                     status_code=410,
                 )
             manifest = dict(manifest, _artifact_id=str(artifact.id))
+            db.rollback()
             return _structured_export_response(export_bytes, manifest)
+        db.rollback()
         return JSONResponse(
             {"error": "Previously generated export is no longer available."},
             status_code=410,
@@ -2880,6 +2903,7 @@ async def report_export_structured(request: Request, result_id: str, export_form
     # 402 with the dynamic price, not an admission conflict, and it runs
     # no generator and leaves no reservation/artifact.
     if credits_helpers.get_eligible_credits(db, user.id) < cost:
+        db.rollback()
         return JSONResponse(
             {"error": f"Insufficient credits. Structured export costs {cost} credit{'s' if cost != 1 else ''}.",
              "purchase_url": "/credits"},
@@ -2927,9 +2951,20 @@ async def report_export_structured(request: Request, result_id: str, export_form
 
     # Reserve committed. Generate from the validated snapshot, then store
     # + complete in ONE settlement transaction; full release on failure.
-    def _release(failure_code):
+    # PR #125 finding 2: Operation.failure_code is String(50); storing
+    # str(exception)[:200] overflowed it on PostgreSQL, the release
+    # flush failed and the reversal rolled back, leaving the op stuck
+    # reserved. Store only a short stable code (<=50 chars) and log the
+    # full exception detail separately.
+    def _release(failure_code, exc=None):
+        import logging as _logging
+        if exc is not None:
+            _logging.getLogger(__name__).exception(
+                "Structured export failed (%s)", failure_code,
+                exc_info=(type(exc), exc, exc.__traceback__))
+        bounded = str(failure_code)[:50]
         try:
-            credits_helpers.release_operation(db, op.id, worker_id, str(failure_code)[:200])
+            credits_helpers.release_operation(db, op.id, worker_id, bounded)
             db.commit()
         except Exception:
             db.rollback()
@@ -2937,7 +2972,7 @@ async def report_export_structured(request: Request, result_id: str, export_form
     try:
         export_bytes = se.generate_export(payload, export_format)
     except Exception as e:
-        _release(e)
+        _release("generation_failed", e)
         return JSONResponse({"error": "Structured export generation failed"}, status_code=500)
 
     filename = se.safe_download_name(payload.get("filename"), rid, export_format)
@@ -2955,7 +2990,7 @@ async def report_export_structured(request: Request, result_id: str, export_form
         db.commit()
     except Exception as e:
         db.rollback()
-        _release(e)
+        _release("storage_failed", e)
         return JSONResponse({"error": "Failed to store structured export"}, status_code=500)
 
     manifest = {
@@ -3005,6 +3040,28 @@ async def structured_export_download(request: Request, export_id: str, db=Depend
             artifact, user_id=user.id, operation_id=artifact.operation_id,
         )
         export_bytes, manifest = se.decode_artifact(manifest)
+        # PR #125 finding 5: bind provenance to the originating
+        # operation. The source may be expired/gone on GET, so recompute
+        # the POST route's request hash from the manifest's provenance
+        # fields (exactly the POST canonical construction) and compare
+        # it to the originating Operation's request_hash. Missing or
+        # mismatched operation fails closed (410).
+        if not artifact.operation_id:
+            raise ValueError("artifact has no originating operation")
+        origin_op = db.get(models.Operation, artifact.operation_id)
+        if origin_op is None or origin_op.type != "structured_export":
+            raise ValueError("originating operation missing")
+        expected_hash = credits_helpers.hash_input(json.dumps(
+            {
+                "source_result_id": manifest["source_result_id"],
+                "source_integrity_digest": manifest["source_integrity_digest"],
+                "format": manifest["format"],
+                "schema_version": manifest["schema_version"],
+            },
+            sort_keys=True, separators=(",", ":"),
+        ).encode())
+        if expected_hash != origin_op.request_hash:
+            raise ValueError("artifact provenance does not match operation")
     except Exception:
         return JSONResponse({"error": "Export has expired or is no longer available"}, status_code=410)
     manifest = dict(manifest, _artifact_id=str(artifact.id))

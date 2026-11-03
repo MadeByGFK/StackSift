@@ -57,7 +57,7 @@ def test_decode_artifact_strict_base64_and_digest():
     data = se.payload_to_csv(payload)
     manifest = {
         "artifact_kind": "structured_export", "schema_version": 1,
-        "source_result_id": "src-1", "format": "csv",
+        "source_result_id": "src-1", "source_integrity_digest": "a" * 64, "format": "csv",
         "content_base64": base64.b64encode(data).decode(),
         "content_byte_count": len(data),
         "content_digest": hashlib.sha256(data).hexdigest(),

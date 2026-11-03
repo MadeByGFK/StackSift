@@ -417,6 +417,26 @@ def _ensure_capacity_scope(db: Session, scope_key: str, limit: int) -> models.Ca
     return scope
 
 
+def lock_global_paid_scope(db: Session):
+    """Ensure and lock the ``global:paid`` capacity scope FOR UPDATE.
+
+    PR #125 finding 1: callers that must serialize a discovery +
+    reservation sequence (structured-export retry-chain discovery)
+    hold this lock from before discovery through the admission commit
+    in the same transaction. This mirrors the serialization
+    admit_paid_operation already performs (it locks the first capacity
+    scope before its authoritative lookup). Lock order is preserved:
+    capacity scopes are locked before credit accounts/grants, and
+    ``global:paid`` is the lexicographically first standard scope.
+    The caller owns the transaction: commit on success, rollback on
+    every early-return path after taking the lock. On SQLite FOR
+    UPDATE is a no-op, so this is a correctness lock on PostgreSQL
+    and a no-op (but harmless) marker on SQLite.
+    """
+    return _ensure_capacity_scope(
+        db, "global:paid", DEFAULT_GLOBAL_CONCURRENT_LIMIT)
+
+
 def _acquire_capacity(db: Session, user_id: uuid.UUID,
                       extra_scopes: list[tuple[str, int]] | None = None) -> list[str]:
     """Acquire one unit of user + global paid-operation capacity.
