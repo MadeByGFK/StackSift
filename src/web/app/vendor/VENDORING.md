@@ -39,6 +39,15 @@ This is a web-app-local addition, not an upstream change — do not
 overwrite it on a vendor sync without re-applying the collector. The
 SHASUMS entry for `analyzer.py` tracks this local version.
 
+**Issue #106 Stage 1 (2026-11-03):** the F01/F04/F05 core corrections
+(bare-order-ID contextual normalization, peak group severity, anchored
+request-handler wrapper normalization) and the always-on retained
+`diagnostic_evidence` capture were applied to BOTH `analyzer.py`
+copies (this vendored one and `src/stacksift/analyzer.py`) in the same
+change — the copies differ only by the #102 comparison collector and
+import rewriting. Do not overwrite the comparison collector on a
+vendor sync.
+
 ## Import rewriting
 
 All `from stacksift.X import` statements have been rewritten to
