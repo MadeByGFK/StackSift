@@ -119,7 +119,12 @@ def test_https_account_forms_end_to_end(auth_env, tmp_path, monkeypatch):
             page.goto(base + "/reset?token=" + reset_token)
             page.locator('input[name="new_password"]').fill("NewSecurePass123!")
             page.locator('button[type="submit"]').click()
-            expect(page.get_by_role("status")).to_contain_text("Password reset")
+            # ISSUE-130 (premise-changed): a successful reset no longer
+            # leaves a status-line message on the reset page — it ends in
+            # a confirmation modal whose acknowledgement routes to login.
+            expect(page.locator("#success-modal")).to_contain_text("You have changed your password")
+            page.get_by_role("button", name="OK", exact=True).click()
+            page.wait_for_url(base + "/login")
             # Original homepage script references a missing upload-form element.
             # It is outside accounts scope and unchanged by this PR. Account pages
             # must have no script errors; do not suppress any other homepage error.
