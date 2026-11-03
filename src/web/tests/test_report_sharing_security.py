@@ -88,18 +88,34 @@ def test_public_limiter_has_no_replay_bypass(paid_env, monkeypatch):
 
 
 def test_share_path_log_redaction_filter():
+    """PREMISE CHANGED (PR #128 round 2, Finding 3): the old version of
+    this test used a flattened 1-arg record, which is NOT the shape
+    Uvicorn emits. Uvicorn's access logger emits msg
+    '%s - "%s %s HTTP/%s" %d' with a 5-tuple of args
+    (client_addr, method, full_path, http_version, status_code), and
+    its AccessFormatter unpacks exactly five values — clearing args
+    (the old filter behaviour) raised ValueError on every /s/*
+    request. This test now uses the real Uvicorn record shape and
+    the real AccessFormatter."""
     from app.report_access import SharePathRedactionFilter
+    from uvicorn.logging import AccessFormatter
     token = "a" * 64
     record = logging.LogRecord(
         "uvicorn.access", logging.INFO, __file__, 1,
-        '127.0.0.1 - "GET /s/%s HTTP/1.1" 200', (token,), None)
-    # uvicorn.access formats args into the message; emulate by rendering.
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:50000", "GET", f"/s/{token}", "1.1", 200), None)
     rendered = record.getMessage()
     assert token in rendered  # sanity: the raw record really carries it
     filt = SharePathRedactionFilter()
     filt.filter(record)
+    assert isinstance(record.args, tuple) and len(record.args) == 5
     assert token not in record.getMessage()
     assert "[redacted]" in record.getMessage()
+    formatter = AccessFormatter(
+        fmt='%(client_addr)s - "%(request_line)s" %(status_code)s',
+        use_colors=False)
+    out = formatter.format(record)
+    assert "/s/[redacted]" in out and token not in out
 
 
 def test_share_tokens_not_in_app_logs_during_request(paid_env, caplog):

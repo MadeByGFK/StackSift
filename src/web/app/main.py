@@ -3133,16 +3133,105 @@ _SHARE_CSP = (
 )
 
 
-def _share_headers(extra: dict | None = None) -> dict:
+def _share_csp(nonce: str | None = None) -> str:
+    """CSP for shared pages. With a per-response nonce (Finding 4),
+    ONLY the shared report page's single nonced <style> block is
+    additionally allowed; 'unsafe-inline' is never added and every
+    other directive is unchanged. Without a nonce the original
+    policy is returned verbatim (identical-404 / PDF routes)."""
+    if not nonce:
+        return _SHARE_CSP
+    return _SHARE_CSP.replace(
+        "style-src 'self'", f"style-src 'self' 'nonce-{nonce}'")
+
+
+def _share_headers(extra: dict | None = None,
+                   nonce: str | None = None) -> dict:
     headers = {
         "Cache-Control": "private, no-store",
         "Referrer-Policy": "no-referrer",
         "X-Robots-Tag": "noindex, nofollow, noarchive",
-        "Content-Security-Policy": _SHARE_CSP,
+        "Content-Security-Policy": _share_csp(nonce),
     }
     if extra:
         headers.update(extra)
     return headers
+
+
+def _share_chart_style(projection: dict) -> tuple[str, dict]:
+    """Build CSP-nonced dynamic chart dimensions (Finding 4).
+
+    Returns (css_text, class_map): css_text holds one generated rule
+    per dynamic height/width, to be emitted inside the shared page's
+    single ``<style nonce=...>`` block; class_map maps a stable key
+    for each chart element to its generated class name, which the
+    template adds alongside the static classes. No inline style=
+    attributes are used, so style-src 'self' (plus the nonce) is
+    honoured without weakening the CSP. Percentages replicate the
+    template's former inline computations exactly.
+    """
+    rules: list[str] = []
+    classes: dict = {"timeline": {}, "severity": {}, "service": {}}
+
+    def _pct(num, den):
+        try:
+            return (num / den * 100) if den else 0
+        except Exception:
+            return 0
+
+    def _fmt(v):
+        return f"{v:.6g}"
+
+    timeline = projection.get("timeline") or []
+    if isinstance(timeline, list) and len(timeline) > 1:
+        try:
+            tmax = max((b.get("total") or 0) for b in timeline)
+        except Exception:
+            tmax = 0
+        for i, b in enumerate(timeline):
+            if not isinstance(b, dict):
+                continue
+            issues = (b.get("warn") or 0) + (b.get("error") or 0) \
+                + (b.get("critical") or 0)
+            entry = {}
+            cls = f"ss-dyn-tl-{i}"
+            rules.append(f".{cls}{{height:{_fmt(_pct(issues, tmax))}%}}")
+            entry["stack"] = cls
+            for seg, key in (("critical", "critical"),
+                             ("error", "error"), ("warn", "warn")):
+                val = b.get(key) or 0
+                if val > 0:
+                    scls = f"ss-dyn-tl-{i}-{seg}"
+                    rules.append(
+                        f".{scls}{{height:{_fmt(_pct(val, issues))}%}}")
+                    entry[seg] = scls
+            classes["timeline"][i] = entry
+
+    results = projection.get("results") or {}
+    if isinstance(results, dict):
+        level_counts = results.get("level_counts") or {}
+        if level_counts:
+            counts = [level_counts.get(k, 0) for k in
+                      ("CRITICAL", "ERROR", "WARN", "INFO")]
+            max_count = max(counts) if counts else 0
+            for level in ("CRITICAL", "ERROR", "WARN", "INFO"):
+                count = level_counts.get(level, 0)
+                cls = f"ss-dyn-sev-{level.lower()}"
+                rules.append(
+                    f".{cls}{{width:{_fmt(_pct(count, max_count))}%}}")
+                classes["severity"][level] = cls
+        service_counts = results.get("service_counts") or {}
+        total_lines = results.get("total_lines") or 0
+        if isinstance(service_counts, dict):
+            for idx, svc in enumerate(
+                    sorted(service_counts, key=lambda k: service_counts[k],
+                           reverse=True)):
+                cls = f"ss-dyn-svc-{idx}"
+                rules.append(
+                    f".{cls}{{width:"
+                    f"{_fmt(_pct(service_counts[svc], total_lines))}%}}")
+                classes["service"][svc] = cls
+    return "\n".join(rules), classes
 
 
 def _share_unavailable():
@@ -3507,11 +3596,18 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
         return err
     source, idempotency_key = ctx
     request_hash = _ra.action_request_hash(source, "share_create")
+    # Finding 2: lock the share:actions bucket BEFORE the replay
+    # lookup and hold it through settlement, so the lookup below is
+    # authoritative under the lock (concurrent same-key requests
+    # serialize; replays never consume rate and never 429/500).
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
     prior, err = _share_action_replay(
         db, user, source, "share_create", idempotency_key, request_hash)
     if err is not None:
+        db.rollback()
         return err
     if prior is not None:
+        db.rollback()
         return JSONResponse({
             "status": "already_shared",
             "message": "This report already has a share link. "
@@ -3519,6 +3615,7 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
         })
     gate = _share_source_gate(db, user, source)
     if gate is not None:
+        db.rollback()
         return gate
     try:
         credits_helpers._consume_rate(db, "share:actions", str(user.id))
@@ -3533,6 +3630,15 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
         .with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if sharing is not None and sharing.token_hash and sharing.revoked_at is None:
+        # Finding 1: record this no-op create outcome (with the
+        # existing active sharing's generation) in the SAME
+        # transaction as the rate consumption, so replaying this
+        # key hits _share_action_replay and returns already_shared
+        # without consuming rate or — if the owner revoked in the
+        # meantime — creating a new active link.
+        _record_share_action(db, user, source, "share_create",
+                             idempotency_key, request_hash,
+                             sharing.generation)
         db.commit()
         return JSONResponse({
             "status": "already_shared",
@@ -3575,11 +3681,16 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
         return err
     source, idempotency_key = ctx
     request_hash = _ra.action_request_hash(source, "share_rotate")
+    # Finding 2: lock before the authoritative replay lookup (see
+    # report_share_create).
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
     prior, err = _share_action_replay(
         db, user, source, "share_rotate", idempotency_key, request_hash)
     if err is not None:
+        db.rollback()
         return err
     if prior is not None:
+        db.rollback()
         return JSONResponse({
             "status": "already_rotated",
             "message": "That rotation already happened. Rotate again "
@@ -3587,6 +3698,7 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
         })
     gate = _share_source_gate(db, user, source)
     if gate is not None:
+        db.rollback()
         return gate
     try:
         credits_helpers._consume_rate(db, "share:actions", str(user.id))
@@ -3634,11 +3746,16 @@ async def report_share_revoke(request: Request, result_id: str, db=Depends(get_d
         return err
     source, idempotency_key = ctx
     request_hash = _ra.action_request_hash(source, "share_revoke")
+    # Finding 2: lock before the authoritative replay lookup (see
+    # report_share_create).
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
     prior, err = _share_action_replay(
         db, user, source, "share_revoke", idempotency_key, request_hash)
     if err is not None:
+        db.rollback()
         return err
     if prior is not None:
+        db.rollback()
         return JSONResponse({"status": "revoked"})
     try:
         credits_helpers._consume_rate(db, "share:actions", str(user.id))
@@ -3686,9 +3803,15 @@ async def shared_report_view(request: Request, token: str, db=Depends(get_db)):
     if again is None or again[0].id != sharing.id:
         return _share_unavailable()
     projection = _ra.public_projection(payload)
+    # Finding 4: per-response CSP nonce for the dynamic chart rules.
+    import secrets as _secrets
+    nonce = _secrets.token_urlsafe(16)
+    chart_css, chart_classes = _share_chart_style(projection)
+    projection = {**projection, "csp_nonce": nonce,
+                  "chart_css": chart_css, "chart_classes": chart_classes}
     response = templates.TemplateResponse(
         request, "shared_report.html", projection)
-    for key, value in _share_headers().items():
+    for key, value in _share_headers(nonce=nonce).items():
         response.headers[key] = value
     return response
 

@@ -236,3 +236,16 @@ table.issues tr:last-child td { border-bottom: none; }
 .tlegend { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .tlegend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: baseline; }
 .tlegend .tphases { margin-left: auto; }
+
+/* shared report (issue #107, PR #128 round 2 Finding 4): static
+   replacements for the shared page's former inline style attributes,
+   so the page needs no inline styles under its CSP. Dynamic chart
+   dimensions are NOT here — they arrive in the page's nonced style
+   block as generated ss-dyn-* rules. */
+.ss-muted-normal { color: var(--muted); font-weight: 400; }
+.ss-subtitle-note { color: var(--muted); font-weight: 400; font-size: 14px; }
+.ss-mt10 { margin-top: 10px; }
+.ss-mb8 { margin-bottom: 8px; }
+.ss-card-pad-x { padding: 0 20px; }
+.ss-text-right { text-align: right; }
+.ss-count-cell { text-align: right; color: var(--muted); }

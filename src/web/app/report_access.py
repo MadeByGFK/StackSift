@@ -160,6 +160,30 @@ class SharePathRedactionFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn access records (PR #128 round 2, Finding 3): the
+        # record carries a 5-tuple of args — (client_addr, method,
+        # full_path, http_version, status_code) — and Uvicorn's
+        # AccessFormatter.formatMessage unpacks exactly five values.
+        # Clearing args (the old behaviour) raised ValueError for
+        # every /s/* request. Redact the token ONLY inside the
+        # full_path argument (index 2) and preserve the tuple shape.
+        try:
+            args = record.args
+            if isinstance(args, tuple) and len(args) == 5:
+                new_args = tuple(
+                    _SHARE_PATH_PATTERN.sub("/s/[redacted]", a)
+                    if isinstance(a, str) else a
+                    for a in args
+                )
+                if new_args != args:
+                    record.args = new_args
+                return True
+        except Exception:
+            return True
+        # Fallback for non-Uvicorn records (app/uvicorn.error loggers,
+        # already-rendered or non-standard args): redact the rendered
+        # message and flatten it, which is safe for the standard
+        # Formatter used by those loggers.
         try:
             message = record.getMessage()
         except Exception:

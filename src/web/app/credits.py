@@ -657,6 +657,42 @@ def admit_paid_operation(
         raise
 
 
+def lock_share_rate_bucket(db: Session, owner: str):
+    """Ensure and lock FOR UPDATE the ``share:actions`` rate bucket.
+
+    Issue #107 PR #128 round 2 (Finding 2): share-action handlers call
+    this BEFORE their authoritative ReportAction replay lookup and
+    hold the row lock through settlement (commit/rollback), so
+    concurrent same-key requests on multiple workers serialize on
+    this bucket row: the second transaction blocks until the first
+    commits, then its replay lookup sees the recorded action and
+    returns the stored outcome without consuming rate or raising a
+    duplicate-key IntegrityError / spurious 429. This mirrors the
+    admit_paid_operation precedent (lock the first scope row before
+    the authoritative identity lookup). Upsert-then-lock follows
+    _ensure_capacity_scope. On SQLite FOR UPDATE is a no-op, so this
+    is a correctness lock on PostgreSQL and a harmless marker on
+    SQLite (single-connection tests pin the serialized contract).
+    """
+    policy = "share:actions"
+    window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+    db.execute(insert(models.RateBucket).values(
+        policy=policy, owner=owner, window_start=window_start,
+        attempts=0, max_limit=RATE_LIMIT_SHARE_ACTIONS,
+    ).on_conflict_do_nothing(index_elements=["policy", "owner", "window_start"]))
+    db.flush()
+    return db.execute(
+        select(models.RateBucket).where(
+            models.RateBucket.policy == policy,
+            models.RateBucket.owner == owner,
+            models.RateBucket.window_start == window_start,
+        ).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one()
+
+
 def _consume_rate(db: Session, policy: str, owner: str) -> None:
     """Atomically consume one unit from a rate bucket. Raises AdmissionError if over limit."""
     limit = {
