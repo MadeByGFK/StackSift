@@ -3520,12 +3520,20 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
     gate = _share_source_gate(db, user, source)
     if gate is not None:
         return gate
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
     sharing = db.execute(
         _select(models.ReportSharing).where(
             models.ReportSharing.result_id == source.id)
         .with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if sharing is not None and sharing.token_hash and sharing.revoked_at is None:
+        db.commit()
         return JSONResponse({
             "status": "already_shared",
             "message": "This report already has a share link. "
@@ -3558,6 +3566,7 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
     from fastapi.responses import JSONResponse
     from sqlalchemy import select as _select
     from app import auth as auth_helpers
+    from app import credits as credits_helpers
     from app import models
     from app import report_access as _ra
 
@@ -3579,12 +3588,20 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
     gate = _share_source_gate(db, user, source)
     if gate is not None:
         return gate
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
     sharing = db.execute(
         _select(models.ReportSharing).where(
             models.ReportSharing.result_id == source.id)
         .with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if sharing is None:
+        db.commit()
         return JSONResponse(
             {"error": "This report has no share link to rotate"},
             status_code=409)
@@ -3623,6 +3640,13 @@ async def report_share_revoke(request: Request, result_id: str, db=Depends(get_d
         return err
     if prior is not None:
         return JSONResponse({"status": "revoked"})
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
     sharing = db.execute(
         _select(models.ReportSharing).where(
             models.ReportSharing.result_id == source.id)

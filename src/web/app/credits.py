@@ -110,6 +110,10 @@ RATE_LIMIT_BATCH = 5
 # Issue #107: explicit 10/hour policy for retention extension (draft §8),
 # so it never relies on _consume_rate()'s unknown-policy fallback.
 RATE_LIMIT_RETENTION_EXTENSION = 10
+# Issue #107: explicit 10/hour policy for free share actions
+# (create/rotate/revoke), so they never rely on _consume_rate()'s
+# unknown-policy fallback.
+RATE_LIMIT_SHARE_ACTIONS = 10
 # Issue #104, slice 1 (trim T3): explicit 30/hour policy for oversize, so
 # it never relies on _consume_rate()'s fallback.
 RATE_LIMIT_OVERSIZE_ANALYSIS = 30
@@ -663,6 +667,7 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
         "paid:structured_export": RATE_LIMIT_STRUCTURED_EXPORT,
         "paid:batch": RATE_LIMIT_BATCH,
         "paid:retention_extension": RATE_LIMIT_RETENTION_EXTENSION,
+        "share:actions": RATE_LIMIT_SHARE_ACTIONS,
     }.get(policy, 30)
     window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
 

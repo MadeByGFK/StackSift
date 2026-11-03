@@ -16,6 +16,14 @@ What shipped, and the operational boundaries an operator must know.
 - **Sharing is FREE.** Create, rotate and revoke never charge, never create
   a consent or a paid operation. There is no share price constant — do not
   add one without a new founder ruling.
+- Share owner actions are rate-limited: **10 per hour per owner**
+  (`credits.RATE_LIMIT_SHARE_ACTIONS`, policy `share:actions` via
+  `credits._consume_rate`), covering create, rotate and revoke together.
+  The check runs after the replay fence and the owner/source gates and
+  before any mutation, so a same-key replay never consumes rate and still
+  returns its stored outcome even at/over the limit. A rate-limited
+  (429) attempt persists no `ReportAction` row and no token/generation
+  change.
 - Exports stay uniform 2 credits (issue #105). Extending a report does
   **not** extend its PDF or structured-export Results; each artifact keeps
   its own 7-day expiry.

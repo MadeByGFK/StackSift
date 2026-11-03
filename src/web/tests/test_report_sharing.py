@@ -349,3 +349,105 @@ def test_reshare_after_revoke_via_rotate(paid_env):
     new_token = _token_from(r)
     assert anon.get(f"/s/{new_token}").status_code == 200
     assert anon.get(f"/s/{token}").status_code == 404
+
+
+# --- Share-action owner rate limit (10/hour, policy "share:actions") ---
+
+
+def _rotate(env, rid, csrf, key):
+    return env.client.post(f"/reports/{rid}/share/rotate",
+                           data={"csrf_token": csrf, "idempotency_key": key})
+
+
+def _sharing_state(env, rid):
+    with env.sessions() as db:
+        row = db.query(M.ReportSharing).filter(
+            M.ReportSharing.result_id == rid).one()
+        return row.generation, row.token_hash
+
+
+def _share_action_count(env, uid, rid):
+    with env.sessions() as db:
+        return db.query(M.ReportAction).filter(
+            M.ReportAction.owner_user_id == uid,
+            M.ReportAction.result_id == rid,
+            M.ReportAction.action_kind.in_(
+                ("share_create", "share_rotate", "share_revoke"))).count()
+
+
+def _exhaust_share_limit(env, rid, csrf, prefix):
+    """Drive exactly 10 distinct share actions: 1 create + 9 rotates."""
+    resp = _create_share(env, rid, csrf, key=f"{prefix}-create")
+    assert resp.status_code == 200, resp.text[:400]
+    last_token = _token_from(resp)
+    for i in range(9):
+        r = _rotate(env, rid, csrf, f"{prefix}-rot-{i}")
+        assert r.status_code == 200, r.text[:400]
+        last_token = _token_from(r)
+    return last_token
+
+
+def test_share_actions_rate_limited_11th_distinct_action_429_no_mutation(paid_env):
+    env = paid_env
+    _, uid, csrf = _signup_verify_login(env)
+    rid = _make_report(env, uid)
+    last_token = _exhaust_share_limit(env, rid, csrf, "rl-a")
+    gen_before, hash_before = _sharing_state(env, rid)
+    assert _share_action_count(env, uid, rid) == 10
+    # The 11th distinct share action in the window is rate-limited.
+    r = _rotate(env, rid, csrf, "rl-a-rot-9")
+    assert r.status_code == 429, r.text[:400]
+    assert r.json() == {"error": "Too many share actions. Please try again later."}
+    # No mutation persisted: active token + generation unchanged, and
+    # no new ReportAction row for the rate-limited attempt.
+    gen_after, hash_after = _sharing_state(env, rid)
+    assert (gen_after, hash_after) == (gen_before, hash_before)
+    assert hash_after == auth.hash_token(last_token)
+    assert _share_action_count(env, uid, rid) == 10
+    assert _http_balance(env) == 3  # still FREE: no debit
+    assert _anon_client().get(f"/s/{last_token}").status_code == 200
+
+
+def test_share_action_replay_at_limit_returns_stored_outcome_without_consuming(paid_env):
+    env = paid_env
+    _, uid, csrf = _signup_verify_login(env)
+    rid = _make_report(env, uid)
+    _exhaust_share_limit(env, rid, csrf, "rl-b")
+    # Prove the limit is actually reached (this assertion is what
+    # fails on a tree with no share-action rate bucket).
+    blocked = _rotate(env, rid, csrf, "rl-b-rot-9")
+    assert blocked.status_code == 429, blocked.text[:400]
+    gen_before, hash_before = _sharing_state(env, rid)
+    assert _share_action_count(env, uid, rid) == 10
+    # Replaying an earlier rotate key at/over the limit still returns
+    # its stored outcome (200, no new token) and consumes no rate.
+    replay = _rotate(env, rid, csrf, "rl-b-rot-0")
+    assert replay.status_code == 200, replay.text[:400]
+    assert replay.json().get("status") == "already_rotated"
+    assert "share_url" not in replay.json()
+    # Replaying the original create key likewise returns its outcome.
+    replay_create = _create_share(env, rid, csrf, key="rl-b-create")
+    assert replay_create.status_code == 200, replay_create.text[:400]
+    assert replay_create.json().get("status") == "already_shared"
+    assert "share_url" not in replay_create.json()
+    assert _sharing_state(env, rid) == (gen_before, hash_before)
+    assert _share_action_count(env, uid, rid) == 10
+    # A further distinct action is still rate-limited afterwards.
+    assert _rotate(env, rid, csrf, "rl-b-rot-10").status_code == 429
+
+
+def test_share_action_rate_limit_is_per_owner(paid_env):
+    env = paid_env
+    _, uid, csrf = _signup_verify_login(env)
+    rid = _make_report(env, uid)
+    _exhaust_share_limit(env, rid, csrf, "rl-c")
+    # First owner is at the limit (fails on a tree with no bucket).
+    assert _rotate(env, rid, csrf, "rl-c-rot-9").status_code == 429
+    # A second owner is unaffected by the first owner's bucket.
+    _, uid2, csrf2 = _signup_verify_login(env)
+    rid2 = _make_report(env, uid2)
+    resp = _create_share(env, rid2, csrf2, key="rl-c-owner2-create")
+    assert resp.status_code == 200, resp.text[:400]
+    token2 = _token_from(resp)
+    assert _anon_client().get(f"/s/{token2}").status_code == 200
+    assert _share_action_count(env, uid2, rid2) == 1
