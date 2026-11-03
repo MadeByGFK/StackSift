@@ -722,3 +722,62 @@ class PaymentReconciliation(Base):
             name="ck_recon_status_valid",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #107: retention extension + shareable report links.
+#
+# ReportSharing is the ONE sharing row per report: it carries only the
+# SHA-256 hash of the current 256-bit bearer token (raw tokens are never
+# stored), a generation counter fencing stale create/rotate replays, and
+# revocation state. Sharing is FREE (founder ruling 2026-11-01, trim T1):
+# there is deliberately NO entitlement/operation column — no charge,
+# consent, or admission exists for create/rotate/revoke, ever.
+#
+# ReportAction is the permanent, append-only identity record for owner
+# actions on a report (retention purchases and free share actions). It
+# makes same-key replays identifiable forever — including after the
+# action-receipt Result's payload has been cleaned up — without storing
+# any bearer secret.
+# ---------------------------------------------------------------------------
+
+
+class ReportSharing(Base):
+    __tablename__ = "report_sharing"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    result_id = Column(GUID(), ForeignKey("results.id", ondelete="CASCADE"),
+                       nullable=False, unique=True, index=True)
+    owner_user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    token_hash = Column(String(64), nullable=True, unique=True, index=True)
+    generation = Column(Integer, nullable=False, default=0)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("generation >= 0", name="ck_report_sharing_generation_nonneg"),
+    )
+
+
+class ReportAction(Base):
+    __tablename__ = "report_actions"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    owner_user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    result_id = Column(GUID(), ForeignKey("results.id", ondelete="CASCADE"),
+                       nullable=False, index=True)
+    action_kind = Column(String(30), nullable=False)  # retention_extension | share_create | share_rotate | share_revoke
+    idempotency_key = Column(String(255), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    generation = Column(Integer, nullable=True)  # sharing generation after the action
+    resulting_expiry = Column(DateTime(timezone=True), nullable=True)  # retention outcome
+    operation_id = Column(GUID(), ForeignKey("operations.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "result_id", "action_kind",
+                         "idempotency_key", name="uq_report_action_identity"),
+    )

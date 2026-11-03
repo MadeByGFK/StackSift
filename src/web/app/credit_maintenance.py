@@ -85,9 +85,25 @@ def cleanup_results(db):
     # Same capacity-first order as settlement; retain identities, remove payloads.
     C._ensure_capacity_scope(db, 'global:paid', C.DEFAULT_GLOBAL_CONCURRENT_LIMIT)
     rows = db.scalars(select(M.Result).where(M.Result.expires_at <= C._utcnow(), M.Result.deleted_at.is_(None)))
+    expired_ids = []
     for result in rows:
         result.storage_manifest = '{}'
         result.deleted_at = C._utcnow()
+        expired_ids.append(result.id)
+    # Issue #107 (draft §8): hygiene — clear active share tokens for
+    # expired/deleted reports in the same commit. Read-time expiry checks
+    # on the share route are the primary guard; this only ensures a stale
+    # hash does not linger. Entitlement-free sharing rows and the
+    # ReportAction audit identities are preserved (hashes only, no raw
+    # tokens exist to leak).
+    if expired_ids:
+        sharings = db.scalars(select(M.ReportSharing).where(
+            M.ReportSharing.result_id.in_(expired_ids),
+            M.ReportSharing.token_hash.isnot(None)))
+        for sharing in sharings:
+            sharing.token_hash = None
+            sharing.revoked_at = C._utcnow()
+            sharing.generation += 1
     db.commit()
 
 

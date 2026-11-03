@@ -84,6 +84,15 @@ COST_OVERSIZE_ANALYSIS = 3
 # charged only on success, even when the pair is identical or shows no
 # material differences (disclosed on the consent page, spec trim C10).
 COST_COMPARE = 3
+# Issue #107: founder-ruled 2026-11-01 (batched pricing) — retention
+# extension is 1 credit per +90-day unit, added to the report's CURRENT
+# expires_at, stackable, lifetime ceiling ready_at + 365 days, full-unit
+# purchases only. These constants are the single source for consent,
+# admission, cap arithmetic, UI copy and error text. Sharing is FREE
+# (same ruling): there is deliberately NO share cost constant.
+COST_RETENTION_EXTENSION = 1
+RETENTION_EXTENSION_DAYS = 90
+RETENTION_MAX_DAYS = 365
 
 # Signup reward (approved 2026-10-15)
 SIGNUP_REWARD_CREDITS = 3
@@ -98,6 +107,13 @@ RATE_LIMIT_PDF = 10
 # Issue #105: structured export mirrors the PDF rate policy.
 RATE_LIMIT_STRUCTURED_EXPORT = 10
 RATE_LIMIT_BATCH = 5
+# Issue #107: explicit 10/hour policy for retention extension (draft §8),
+# so it never relies on _consume_rate()'s unknown-policy fallback.
+RATE_LIMIT_RETENTION_EXTENSION = 10
+# Issue #107: explicit 10/hour policy for free share actions
+# (create/rotate/revoke), so they never rely on _consume_rate()'s
+# unknown-policy fallback.
+RATE_LIMIT_SHARE_ACTIONS = 10
 # Issue #104, slice 1 (trim T3): explicit 30/hour policy for oversize, so
 # it never relies on _consume_rate()'s fallback.
 RATE_LIMIT_OVERSIZE_ANALYSIS = 30
@@ -641,6 +657,42 @@ def admit_paid_operation(
         raise
 
 
+def lock_share_rate_bucket(db: Session, owner: str):
+    """Ensure and lock FOR UPDATE the ``share:actions`` rate bucket.
+
+    Issue #107 PR #128 round 2 (Finding 2): share-action handlers call
+    this BEFORE their authoritative ReportAction replay lookup and
+    hold the row lock through settlement (commit/rollback), so
+    concurrent same-key requests on multiple workers serialize on
+    this bucket row: the second transaction blocks until the first
+    commits, then its replay lookup sees the recorded action and
+    returns the stored outcome without consuming rate or raising a
+    duplicate-key IntegrityError / spurious 429. This mirrors the
+    admit_paid_operation precedent (lock the first scope row before
+    the authoritative identity lookup). Upsert-then-lock follows
+    _ensure_capacity_scope. On SQLite FOR UPDATE is a no-op, so this
+    is a correctness lock on PostgreSQL and a harmless marker on
+    SQLite (single-connection tests pin the serialized contract).
+    """
+    policy = "share:actions"
+    window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+    db.execute(insert(models.RateBucket).values(
+        policy=policy, owner=owner, window_start=window_start,
+        attempts=0, max_limit=RATE_LIMIT_SHARE_ACTIONS,
+    ).on_conflict_do_nothing(index_elements=["policy", "owner", "window_start"]))
+    db.flush()
+    return db.execute(
+        select(models.RateBucket).where(
+            models.RateBucket.policy == policy,
+            models.RateBucket.owner == owner,
+            models.RateBucket.window_start == window_start,
+        ).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one()
+
+
 def _consume_rate(db: Session, policy: str, owner: str) -> None:
     """Atomically consume one unit from a rate bucket. Raises AdmissionError if over limit."""
     limit = {
@@ -650,6 +702,8 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
         "paid:pdf": RATE_LIMIT_PDF,
         "paid:structured_export": RATE_LIMIT_STRUCTURED_EXPORT,
         "paid:batch": RATE_LIMIT_BATCH,
+        "paid:retention_extension": RATE_LIMIT_RETENTION_EXTENSION,
+        "share:actions": RATE_LIMIT_SHARE_ACTIONS,
     }.get(policy, 30)
     window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
 
@@ -854,6 +908,40 @@ def store_structured_export_result(db, user_id, operation_id, export_bytes: byte
         user_id=user_id,
         operation_id=operation_id,
         type="structured_export",
+        storage_manifest=manifest,
+        integrity_digest=hash_input(manifest.encode()),
+        byte_count=len(manifest.encode()),
+        ready_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    db.add(result)
+    db.flush()
+    return result
+
+
+def store_report_action_receipt(db, user_id, operation_id, manifest_fields: dict):
+    """Store the action-receipt Result for a non-artifact paid action (#107).
+
+    complete_operation() requires a ready Result bound to THIS operation;
+    a retention extension produces no artifact, so it settles against
+    this receipt (draft §4/§8) instead of weakening result_payload()'s
+    origin invariants. The manifest records the action kind, the target
+    Result ID and the previous/new expiry — never any bearer secret.
+    The receipt is type "report_action": report lists filter on
+    analysis/comparison types, so it never appears as a report. Its own
+    7-day expiry is independent of the extended report (trim T6); the
+    permanent ReportAction identity row, not this receipt, carries
+    replay safety after the receipt payload is cleaned up.
+    """
+    op, _, _ = _lock_operation(db, operation_id)
+    if op.status != "reserved":
+        raise AdmissionError("operation is no longer reserved")
+    manifest = json.dumps(dict(manifest_fields))
+    now = _utcnow()
+    result = models.Result(
+        user_id=user_id,
+        operation_id=operation_id,
+        type="report_action",
         storage_manifest=manifest,
         integrity_digest=hash_input(manifest.encode()),
         byte_count=len(manifest.encode()),
