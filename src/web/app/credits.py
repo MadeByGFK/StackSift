@@ -59,6 +59,12 @@ COST_PDF = 2  # Proposed (Phase 2B)
 # single source for structured-export consent, admission, UI copy and
 # error text; never duplicate the numeric price elsewhere.
 COST_STRUCTURED_EXPORT = 2
+# Issue #129: founder-ruled 2026-11-03 (single-unlock) — the 2-credit
+# export charge is keyed per (owner, report), NOT per format. The first
+# successful export generation in ANY format charges exactly this once
+# and unlocks every format for that report; all later generations and
+# downloads of any format are free. Same ruled price (2), new keying.
+COST_EXPORT_UNLOCK = 2
 # Issue #103 (trim B1): the obsolete fixed COST_BATCH = 5 proposal is
 # REMOVED. Founder-ruled batch pricing (2026-10-24) is per-file: the
 # first file under the normal rules (free hourly allowance if available,
@@ -655,6 +661,53 @@ def admit_paid_operation(
 
     except Exception:
         raise
+
+
+def export_operations(db: Session, user_id, source_result_id):
+    """All export operations (any format) belonging to one report (#129).
+
+    Export identity is key-based, exactly as the routes create it: PDF
+    operations carry ``pdf-{report_id}`` (plus server ``-retry-``
+    suffixes) and structured operations carry
+    ``structured-{report_id}-{format}-v1`` (plus retry suffixes). A
+    completed operation in ANY format is the report's export unlock;
+    the per-format operation rows remain the artifact/replay record.
+    """
+    rid = str(source_result_id)
+    pdf_base = f"pdf-{rid}"
+    structured_base = f"structured-{rid}-"
+    ops = db.execute(
+        select(models.Operation).where(
+            models.Operation.user_id == user_id,
+            models.Operation.type.in_(("pdf", "structured_export")),
+        )
+    ).scalars().all()
+    return [
+        op for op in ops
+        if op.idempotency_key == pdf_base
+        or op.idempotency_key.startswith(pdf_base + "-retry-")
+        or op.idempotency_key.startswith(structured_base)
+    ]
+
+
+def export_unlock_state(db: Session, user_id, source_result_id):
+    """Return (unlocked, in_progress) for a report's export unlock (#129).
+
+    unlocked: a first generation in some format completed — its single
+    2-credit charge (COST_EXPORT_UNLOCK) bought every format.
+    in_progress: an export generation for this report is reserved in
+    some format; concurrent cross-format requests must wait (409)
+    rather than race a second charge.
+    """
+    ops = export_operations(db, user_id, source_result_id)
+    unlocked = any(op.status == "completed" for op in ops)
+    in_progress = any(op.status == "reserved" for op in ops)
+    return unlocked, in_progress
+
+
+def is_export_unlocked(db: Session, user_id, source_result_id) -> bool:
+    unlocked, _ = export_unlock_state(db, user_id, source_result_id)
+    return unlocked
 
 
 def lock_share_rate_bucket(db: Session, owner: str):

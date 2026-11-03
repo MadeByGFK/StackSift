@@ -87,6 +87,35 @@ def lookup_shared(db, raw_token: str):
     return sharing, result, payload
 
 
+def is_export_unlocked(db, source_result) -> bool:
+    """Issue #129 §5: an export-unlocked report counts as having its
+    PDF export purchased for the share-link PDF rule — the unlock may
+    have been bought with a CSV or JSON first generation, in which
+    case no PDF operation exists at all."""
+    return credits.is_export_unlocked(
+        db, source_result.user_id, source_result.id)
+
+
+def has_pdf_export_operation(db, source_result) -> bool:
+    """True when a completed PDF operation exists for the report, even
+    if its artifact has since expired. Issue #107 T6 still governs
+    that case (an expired PDF is not shareable); the #129 on-the-fly
+    generation in the share route applies only when no PDF was ever
+    generated but the report is export-unlocked via another format."""
+    base_key = f"pdf-{source_result.id}"
+    ops = db.execute(
+        select(models.Operation).where(
+            models.Operation.user_id == source_result.user_id,
+            models.Operation.type == "pdf",
+            models.Operation.status == "completed",
+        )
+    ).scalars().all()
+    return any(
+        op.idempotency_key == base_key
+        or op.idempotency_key.startswith(base_key + "-retry-")
+        for op in ops)
+
+
 def find_shareable_pdf(db, source_result):
     """Return (pdf_result, pdf_bytes) for a paid unexpired PDF, else None.
 

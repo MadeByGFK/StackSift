@@ -2453,6 +2453,7 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     total = base_q.count()
     results = base_q.order_by(models.Result.created_at.desc()).offset(offset).limit(per_page).all()
     total_pages = max(1, (total + per_page - 1) // per_page)
+    from app import credits as _credits_for_list
     reports = []
     for r in results:
         try:
@@ -2461,6 +2462,8 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
         except (json.JSONDecodeError, TypeError):
             filename = "Unknown file"
         from app.credits import _as_aware
+        _sharing_row = db.query(models.ReportSharing).filter(
+            models.ReportSharing.result_id == r.id).first()
         reports.append({
             "id": str(r.id),
             "filename": filename,
@@ -2468,6 +2471,20 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             "created_at": r.created_at,
             "expires_at": r.expires_at,
             "days_left": max(0, (_as_aware(r.expires_at) - now).days),
+            # Issue #129 + founder UI amendment: row action row is
+            # View / Export (dropdown) / Share / Extend. Each row gets
+            # fresh per-render action keys and its unlock/share state
+            # for the confirmation copy.
+            "type": r.type,
+            "retention_key": uuid_module.uuid4().hex,
+            "share_create_key": uuid_module.uuid4().hex,
+            "share_rotate_key": uuid_module.uuid4().hex,
+            "share_revoke_key": uuid_module.uuid4().hex,
+            "export_unlocked": _credits_for_list.is_export_unlocked(
+                db, _user.id, r.id),
+            "share_active": bool(
+                _sharing_row and _sharing_row.token_hash
+                and _sharing_row.revoked_at is None),
         })
     return templates.TemplateResponse(request, "reports.html", {
         "reports": reports,
@@ -2564,6 +2581,10 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
             models.ReportSharing.result_id == result.id).first()
         data["share_active"] = bool(
             _sharing and _sharing.token_hash and _sharing.revoked_at is None)
+        # Issue #129: the report page's Export confirm copy reflects
+        # the per-report unlock state (2 credits once, then free).
+        data["export_unlocked"] = credits_helpers.is_export_unlocked(
+            db, _user.id, result.id)
     # Older manifests predate the elapsed field; the template requires it.
     data.setdefault("elapsed", 0.0)
     if result.type == "comparison":
@@ -2588,7 +2609,12 @@ def _safe_download_filename(filename: str) -> str:
 
 @app.post("/reports/{result_id}/pdf")
 async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)):
-    """Export a report as PDF. Costs 2 credits (COST_PDF)."""
+    """Export a report as PDF.
+
+    Issue #129: costs 2 credits (COST_PDF) only when this generation is
+    the report's first export in ANY format (the single per-report
+    unlock charge); once unlocked, PDF downloads are free.
+    """
     import uuid as _uuid
     import hmac
     import base64 as _b64
@@ -2635,6 +2661,13 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
 
     base_idempotency_key = f"pdf-{result_id}"
     request_hash = result.integrity_digest
+    # Issue #129: serialize cross-format unlock discovery under the
+    # global:paid lock (the first scope admit_paid_operation locks) and
+    # hold it through the admission commit below, so a concurrent CSV/
+    # JSON first generation for the same report cannot race this route
+    # into a second 2-credit charge. Every early return after this
+    # point rolls back to release the lock.
+    credits_helpers.lock_global_paid_scope(db)
     existing_op = db.query(models.Operation).filter(
         models.Operation.user_id == user.id,
         models.Operation.type == "pdf",
@@ -2658,6 +2691,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                     )
                     pdf_bytes = _b64.b64decode(manifest["pdf_base64"])
                     filename = manifest.get("filename", "report")
+                    db.rollback()
                     return Response(
                         content=pdf_bytes,
                         media_type="application/pdf",
@@ -2666,17 +2700,60 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                 except (credits_helpers.AdmissionError, KeyError, ValueError):
                     # Stored PDF is invalid or expired; don't attempt to reuse the
                     # completed operation's idempotency key. Return a controlled error.
+                    db.rollback()
                     return JSONResponse(
                         {"error": "Previously generated PDF is no longer available. Please generate a new export."},
                         status_code=410,
                     )
         elif existing_op.status == "reserved":
             # Another request is already generating this PDF; don't hijack its operation
+            db.rollback()
             return JSONResponse(
                 {"error": "PDF export already in progress. Please wait and try again."},
                 status_code=409,
             )
         # For failed/expired operations, fall through to admit a fresh one
+
+    # Issue #129: per-report export unlock. Any completed export
+    # operation for this report (a CSV/JSON first generation included)
+    # unlocks the PDF for free; any reserved export operation in any
+    # format fences this request so two formats cannot both charge.
+    _unlocked, _in_progress = credits_helpers.export_unlock_state(
+        db, user.id, rid)
+    if _in_progress:
+        db.rollback()
+        return JSONResponse(
+            {"error": "PDF export already in progress. Please wait and try again."},
+            status_code=409,
+        )
+    if _unlocked:
+        db.rollback()
+        # Unlocked: generate and serve with NO charge and no new
+        # operation. A generation failure charges 0 and leaves the
+        # unlock (already paid for) untouched.
+        from app.pdf_export import generate_report_pdf as _gen_pdf
+        from app.pdf_export import generate_comparison_pdf as _gen_cmp_pdf
+        from app.pdf_export import generate_batch_pdf as _gen_batch_pdf
+        try:
+            _manifest_data = credits_helpers.result_payload(
+                result, user_id=user.id,
+                operation_id=result.operation_id,
+                free_request_id=result.free_request_id,
+            )
+            _filename = _manifest_data.get("filename", "report")
+            if _manifest_data.get("report_kind") == "batch":
+                _pdf_bytes = _gen_batch_pdf(result.storage_manifest, _filename)
+            elif result.type == "comparison":
+                _pdf_bytes = _gen_cmp_pdf(result.storage_manifest, _filename)
+            else:
+                _pdf_bytes = _gen_pdf(result.storage_manifest, _filename)
+        except Exception:
+            return JSONResponse({"error": "PDF generation failed"}, status_code=500)
+        return Response(
+            content=_pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(_filename)}.pdf"'},
+        )
 
     consent = credits_helpers.create_consent(
         db, user_id=user.id, operation_type="pdf",
@@ -2756,6 +2833,11 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
 # (founder batched ruling 2026-11-01: COST_STRUCTURED_EXPORT for every
 # format). Reserve -> generate from the validated snapshot -> store +
 # complete in ONE settlement; full release on any failure.
+# Issue #129 (founder ruling 2026-11-03): that charge is now the
+# per-report export UNLOCK — the first successful generation in any
+# format (PDF included) charges 2 credits once per report; every later
+# format generation/download for that report is free (see the unlock
+# branch in the route below).
 # ---------------------------------------------------------------------------
 
 
@@ -2776,8 +2858,9 @@ def _structured_export_response(export_bytes, manifest):
 async def report_export_structured(request: Request, result_id: str, export_format: str, db=Depends(get_db)):
     """Export a stored single-file report as CSV or JSON.
 
-    Costs COST_STRUCTURED_EXPORT credits on first generation per format;
-    replays of the same format/source/schema are free.
+    Issue #129: costs COST_STRUCTURED_EXPORT credits only when this
+    generation is the report's first export in ANY format (the single
+    per-report unlock charge); replays and all later formats are free.
     """
     import uuid as _uuid
     import hmac
@@ -2934,6 +3017,40 @@ async def report_export_structured(request: Request, result_id: str, export_form
         return JSONResponse(
             {"error": "Previously generated export is no longer available."},
             status_code=410,
+        )
+
+    # Issue #129: per-report export unlock. A completed export
+    # operation in ANY format (a PDF first generation included) unlocks
+    # this format: generate and serve with NO charge, no consent and
+    # no new operation (a generation failure here charges 0 and leaves
+    # the unlock untouched). A reserved export operation in another
+    # format fences this request (409) so two formats racing a locked
+    # report cannot both charge — the global:paid lock held since
+    # discovery makes this check authoritative on PostgreSQL.
+    _unlocked, _any_in_progress = credits_helpers.export_unlock_state(
+        db, user.id, rid)
+    if _any_in_progress:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Structured export already in progress. Please wait and try again."},
+            status_code=409,
+        )
+    if _unlocked:
+        db.rollback()
+        try:
+            export_bytes = se.generate_export(payload, export_format)
+        except Exception:
+            return JSONResponse(
+                {"error": "Structured export generation failed"},
+                status_code=500)
+        from fastapi.responses import Response as _Response
+        return _Response(
+            content=export_bytes,
+            media_type=se.MEDIA_TYPES[export_format],
+            headers={
+                "Content-Disposition": f'attachment; filename="{se.safe_download_name(payload.get("filename"), rid, export_format)}"',
+                "Cache-Control": "private, no-store",
+            },
         )
 
     has_failed = any(op.status in ("failed", "expired") for op in matching)
@@ -3835,7 +3952,31 @@ async def shared_report_pdf(request: Request, token: str, db=Depends(get_db)):
     sharing, result, payload = found
     pdf = _ra.find_shareable_pdf(db, result)
     if pdf is None:
-        return _share_unavailable()
+        # Issue #129 §5: an export-unlocked report counts as having
+        # its PDF export purchased. When the unlock was bought with a
+        # CSV/JSON first generation, no PDF artifact exists — generate
+        # the PDF on the fly from the validated source (the share
+        # route never charges anyone). A PDF that WAS generated but
+        # has expired keeps the #107 T6 outcome (identical 404): the
+        # on-the-fly path applies only when no PDF operation exists.
+        if _ra.has_pdf_export_operation(db, result) \
+                or not _ra.is_export_unlocked(db, result):
+            return _share_unavailable()
+        from app.pdf_export import generate_report_pdf as _gen_share_pdf
+        try:
+            pdf_bytes = _gen_share_pdf(
+                result.storage_manifest, payload.get("filename", "report"))
+        except Exception:
+            return _share_unavailable()
+        db.expire_all()
+        if _ra.lookup_shared(db, token) is None:
+            return _share_unavailable()
+        filename = payload.get("filename", "report")
+        headers = _share_headers({
+            "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.pdf"',
+        })
+        return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers=headers)
     pdf_result, pdf_bytes = pdf
     db.expire_all()
     if _ra.lookup_shared(db, token) is None:

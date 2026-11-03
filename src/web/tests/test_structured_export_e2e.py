@@ -178,19 +178,26 @@ def test_json_export_equals_full_stored_payload(auth_env):
     assert "current_user" not in exported and "csrf_token" not in exported
 
 
-def test_csv_and_json_are_separate_purchases(auth_env):
+def test_csv_and_json_share_one_unlock_per_report(auth_env):
+    # PREMISE-CHANGED by issue #129 (was test_csv_and_json_are_separate_
+    # purchases under #105): the 2-credit charge is per (owner, report)
+    # UNLOCK, not per format. First format charges 2; every later
+    # format for the same report is free. Another report is a separate
+    # unlock (its own single 2-credit charge).
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     r2 = auth_env.client.post(f"/reports/{rid}/exports/json", data={"csrf_token": csrf})
     assert r1.status_code == r2.status_code == 200
-    assert _balance(auth_env, user_id) == before - 4
-    assert len(_artifacts(auth_env, user_id)) == 2
-    # Another report is a separate purchase.
+    assert _balance(auth_env, user_id) == before - 2
+    # Only the charged first generation stores an artifact; the free
+    # JSON generation is served on the fly.
+    assert len(_artifacts(auth_env, user_id)) == 1
+    # Another report is a separate unlock.
     rid2 = _create_result(auth_env, user_id, "second.log")
     r3 = auth_env.client.post(f"/reports/{rid2}/exports/csv", data={"csrf_token": csrf})
     assert r3.status_code == 200
-    assert _balance(auth_env, user_id) == before - 6
+    assert _balance(auth_env, user_id) == before - 4
 
 
 def test_repeated_post_and_get_download_free_identical(auth_env):
@@ -208,18 +215,25 @@ def test_repeated_post_and_get_download_free_identical(auth_env):
 
 
 def test_report_page_shows_priced_forms_and_download_link(auth_env):
+    # PREMISE-CHANGED by issue #129 + founder UI amendment: the report
+    # page now carries ONE Export button with a format dropdown and a
+    # Share button — no per-format priced buttons, no microcopy. The
+    # charged first generation still returns a free re-download URL.
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
     assert f"/reports/{rid}/exports/csv" in page.text
     assert f"/reports/{rid}/exports/json" in page.text
-    assert f"Export CSV ({C.COST_STRUCTURED_EXPORT} credits)" in page.text
-    assert f"Export JSON ({C.COST_STRUCTURED_EXPORT} credits)" in page.text
-    assert "First generation is charged; re-download is free while retained." in page.text
+    assert f"/reports/{rid}/pdf" in page.text
+    assert ">Export</button>" in page.text
+    assert ">Share</button>" in page.text
+    assert "Export CSV (" not in page.text
+    assert "Export JSON (" not in page.text
+    assert "First generation is charged; re-download is free while retained." not in page.text
     r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r1.status_code == 200
-    page2 = auth_env.client.get(f"/reports/{rid}")
-    assert r1.headers["x-export-download-url"] in page2.text
+    dl = auth_env.client.get(r1.headers["x-export-download-url"])
+    assert dl.status_code == 200 and dl.content == r1.content
 
 
 # --- validation before reservation ------------------------------------------

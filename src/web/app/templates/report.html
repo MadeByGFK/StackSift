@@ -33,7 +33,6 @@
 
   {% if is_demo %}
   <div class="demo-banner">Sample report — this is what StackSift does with your logs. <a href="/">Analyze your own →</a></div>
-  <div class="demo-banner" style="margin-top:8px">Made for handoffs: the PDF export is built to attach to the incident ticket or pass along at shift change.</div>
   {% endif %}
 
   <section class="report-head">
@@ -50,63 +49,144 @@
       <span class="badge {{ health.color }}">{{ health.label }}</span>
     </div>
     {% if current_user and report_id and not is_demo %}
+    {# Issue #129 + founder UI amendment (2026-11-03): the report page
+       keeps exactly two action buttons — Export and Share — with no
+       explanatory paragraphs. Extend and the share forms moved off
+       this page (My Reports row / the Share popup). Every action is
+       confirmed in a popup BEFORE any charge. #}
     <div class="report-actions" style="margin-top:1rem">
-      <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
-      </form>
-      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Charged 2 credits only when the PDF is first generated &mdash; re-downloads are free. Attach it to the incident ticket or hand it off at shift change.</p>
-      {% if not report_kind %}
-      <form method="post" action="/reports/{{ report_id }}/exports/csv" style="display:inline">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn-small">Export CSV ({{ structured_export_cost }} credits)</button>
-      </form>
-      <form method="post" action="/reports/{{ report_id }}/exports/json" style="display:inline">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn-small">Export JSON ({{ structured_export_cost }} credits)</button>
-      </form>
-      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">First generation is charged; re-download is free while retained. For CSV, import text columns as text in your spreadsheet.</p>
-      {% if structured_exports %}
-      <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">Your exports:
-        {% for exp in structured_exports %}<a href="/exports/{{ exp.id }}">Download {{ exp.format|upper }}</a>{{ ", " if not loop.last }}{% endfor %}
-      </p>
-      {% endif %}
-      {% endif %}
-      {% if report_expires_at %}
-      <div class="retention-sharing" style="margin-top:1rem">
-        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">This report is retained until {{ report_expires_at.strftime("%Y-%m-%d") }}.</p>
-        {% if retention_at_cap %}
-        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">This report is at the maximum retention (365 days from creation) and cannot be extended further.</p>
-        {% else %}
-        <form method="post" action="/reports/{{ report_id }}/retention" style="display:inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="idempotency_key" value="{{ retention_key }}">
-          <button type="submit" class="btn-small">Extend {{ retention_extension_days }} days — {{ retention_extension_cost }} credit</button>
-        </form>
-        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">Extending keeps this report longer (new date if extended: {{ retention_next_expiry.strftime("%Y-%m-%d") }}). It does not extend PDFs or exports, which keep their own dates. An active share link stays usable for as long as the report is retained; revoking is separate.</p>
-        {% endif %}
-        {% if share_active %}
-        <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Sharing is on: anyone with the link can read this report. The link was shown once when created — rotate to get a new copyable link (the old one stops working).</p>
-        <form method="post" action="/reports/{{ report_id }}/share/rotate" style="display:inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="idempotency_key" value="{{ share_rotate_key }}">
-          <button type="submit" class="btn-small">Rotate share link (free)</button>
-        </form>
-        <form method="post" action="/reports/{{ report_id }}/share/revoke" style="display:inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="idempotency_key" value="{{ share_revoke_key }}">
-          <button type="submit" class="btn-small">Revoke share link (free)</button>
-        </form>
-        {% else %}
-        <form method="post" action="/reports/{{ report_id }}/share" style="display:inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="idempotency_key" value="{{ share_create_key }}">
-          <button type="submit" class="btn-small">Share this report (free)</button>
-        </form>
-        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">Sharing is free. Anyone holding the link can read this report's text — and a PDF only if you have already paid to generate one. Redaction is best-effort; review the report before sharing.</p>
-        {% endif %}
+      <span style="display:inline-block;position:relative">
+        <button type="button" class="btn-small" id="export-btn" aria-haspopup="true" aria-expanded="false">Export</button>
+        <span id="export-dropdown" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:8px;padding:6px;min-width:150px">
+          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">PDF</button>
+          </form>
+          {% if not report_kind %}
+          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">CSV</button>
+          </form>
+          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">JSON</button>
+          </form>
+          {% endif %}
+        </span>
+      </span>
+      <button type="button" class="btn-small" id="share-btn">Share</button>
+
+      <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
+        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:340px">
+          <p id="ss-confirm-text" style="margin:0 0 14px"></p>
+          <button type="button" class="btn-small" id="ss-confirm-yes">Continue</button>
+          <button type="button" class="btn-small" id="ss-confirm-no">Cancel</button>
+        </div>
       </div>
-      {% endif %}
+
+      <div id="share-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
+        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
+          <p id="share-msg" style="margin:0 0 12px">{% if share_active %}Sharing is on for this report.{% endif %}</p>
+          <div id="share-link-row" style="display:none;margin-bottom:12px">
+            <input type="text" id="share-link" readonly style="width:100%;box-sizing:border-box;margin-bottom:8px">
+            <button type="button" class="btn-small" id="share-copy">Copy link</button>
+            <a class="btn-small" id="share-mailto" href="mailto:">Open in email</a>
+          </div>
+          {% if share_active %}
+          <button type="button" class="btn-small" id="share-rotate">Rotate link</button>
+          <button type="button" class="btn-small" id="share-revoke">Revoke link</button>
+          {% else %}
+          <button type="button" class="btn-small" id="share-create">Create share link</button>
+          {% endif %}
+          <button type="button" class="btn-small" id="share-close">Close</button>
+        </div>
+      </div>
+
+      <script>
+      (function () {
+        var exportBtn = document.getElementById('export-btn');
+        var dropdown = document.getElementById('export-dropdown');
+        exportBtn.addEventListener('click', function () {
+          var open = dropdown.style.display === 'block';
+          dropdown.style.display = open ? 'none' : 'block';
+          exportBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+        });
+        var modal = document.getElementById('ss-confirm');
+        var text = document.getElementById('ss-confirm-text');
+        var pending = null;
+        document.querySelectorAll('form[data-confirm]').forEach(function (f) {
+          f.addEventListener('submit', function (e) {
+            if (f.dataset.confirmed) { return; }
+            e.preventDefault();
+            pending = f;
+            text.textContent = f.getAttribute('data-confirm');
+            modal.style.display = 'flex';
+          });
+        });
+        document.getElementById('ss-confirm-yes').addEventListener('click', function () {
+          modal.style.display = 'none';
+          if (pending) { pending.dataset.confirmed = '1'; pending.submit(); pending = null; }
+        });
+        document.getElementById('ss-confirm-no').addEventListener('click', function () {
+          modal.style.display = 'none';
+          pending = null;
+        });
+        var shareModal = document.getElementById('share-modal');
+        var shareMsg = document.getElementById('share-msg');
+        var linkRow = document.getElementById('share-link-row');
+        var linkBox = document.getElementById('share-link');
+        var mailto = document.getElementById('share-mailto');
+        function showLink(url) {
+          linkBox.value = url;
+          mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(url);
+          linkRow.style.display = 'block';
+        }
+        function postShare(path, key) {
+          var fd = new FormData();
+          fd.append('csrf_token', '{{ csrf_token }}');
+          fd.append('idempotency_key', key);
+          return fetch(path, { method: 'POST', body: fd, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); });
+        }
+        document.getElementById('share-btn').addEventListener('click', function () {
+          shareModal.style.display = 'flex';
+        });
+        document.getElementById('share-close').addEventListener('click', function () {
+          shareModal.style.display = 'none';
+        });
+        var create = document.getElementById('share-create');
+        if (create) {
+          create.addEventListener('click', function () {
+            postShare('/reports/{{ report_id }}/share', '{{ share_create_key }}').then(function (d) {
+              if (d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); }
+              else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
+            });
+          });
+        }
+        var rotate = document.getElementById('share-rotate');
+        if (rotate) {
+          rotate.addEventListener('click', function () {
+            postShare('/reports/{{ report_id }}/share/rotate', '{{ share_rotate_key }}').then(function (d) {
+              if (d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url); }
+              else { shareMsg.textContent = d.message || d.error || ''; }
+            });
+          });
+        }
+        var revoke = document.getElementById('share-revoke');
+        if (revoke) {
+          revoke.addEventListener('click', function () {
+            postShare('/reports/{{ report_id }}/share/revoke', '{{ share_revoke_key }}').then(function (d) {
+              shareMsg.textContent = 'Share link revoked.';
+              linkRow.style.display = 'none';
+            });
+          });
+        }
+        document.getElementById('share-copy').addEventListener('click', function () {
+          linkBox.select();
+          if (navigator.clipboard) { navigator.clipboard.writeText(linkBox.value); }
+        });
+      })();
+      </script>
     </div>
     {% endif %}
   </section>
