@@ -47,7 +47,7 @@
       <h1>Reset password</h1>
       <p class="sub">Choose a new password.</p>
       {% if error %}<div class="error">{{ error }}</div>{% endif %}
-      <form method="post" action="/auth/reset" data-auth-form>
+      <form method="post" action="/auth/reset" data-auth-form data-success-modal="You have changed your password" data-success-url="/login">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <p role="status" aria-live="polite"></p>
         <input type="hidden" name="token" value="{{ token }}">
