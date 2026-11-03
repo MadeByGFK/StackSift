@@ -756,10 +756,10 @@ async def analyze(
             if _nbytes > MAX_BYTES:
                 return error("That file is over the 10 MB free-tier limit. "
                              "Sign in to analyze files up to 100 MB / 500,000 lines "
-                             "with Power-Up credits, or upload a smaller file.")
+                             "with credits, or upload a smaller file.")
             return error("That file has more than 50,000 lines. "
                          "Sign in to analyze files up to 100 MB / 500,000 lines "
-                         "with Power-Up credits, or upload a smaller file.")
+                         "with credits, or upload a smaller file.")
         from app import credits as _credits_helpers
         try:
             return _paid_consent_page(request, file.filename, content, _user, _csrf, ip,
@@ -897,7 +897,7 @@ _PENDING_LOCK = _threading.RLock()
 # Issue #104: exact insufficient-credits message (spec §4), with the
 # /credits CTA rendered by _analysis_response(buy_credits=True).
 OVERSIZE_INSUFFICIENT_MESSAGE = (
-    "Oversize analysis costs 3 credits. You do not have enough eligible Power-Up credits."
+    "Oversize analysis costs 3 credits. You do not have enough eligible credits."
 )
 
 
@@ -1255,7 +1255,7 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
             "size_line": None,
             "limits_line": None,
             "cost_label": "1 credit",
-            "cost_sentence": "Continue this analysis now with a Power-Up credit",
+            "cost_sentence": "Continue this analysis now with a credit",
             "confirm_label": "Use 1 credit",
             "confirm_action": "/analyze/paid",
             "cancel_label": "Wait for free",
@@ -1448,7 +1448,7 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                     return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
         except C.InsufficientCredits:
             db.rollback()
-            return _analysis_response(request, 402, message="Insufficient Power-Up credits.", buy_credits=True)
+            return _analysis_response(request, 402, message="Insufficient credits.", buy_credits=True)
         except C.AdmissionError as exc:
             db.rollback()
             return _analysis_response(request, 409 if '409' in str(exc) else 429, message=str(exc))
@@ -1525,7 +1525,7 @@ async def analyze_paid(request: Request, consent_id: str = Form(...), file_hash:
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _analysis_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _analysis_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _analysis_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -1574,7 +1574,7 @@ async def analyze_paid_cancel(request: Request, consent_id: str = Form(...),
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _analysis_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _analysis_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _analysis_response(request, 403, message="Invalid request. Please try again.")
         try:
@@ -1598,7 +1598,7 @@ async def analyze_paid_cancel(request: Request, consent_id: str = Form(...),
 # ---------------------------------------------------------------------------
 
 COMPARE_INSUFFICIENT_MESSAGE = (
-    "Comparing two logs costs 3 credits. You do not have enough eligible Power-Up credits."
+    "Comparing two logs costs 3 credits. You do not have enough eligible credits."
 )
 
 
@@ -1838,7 +1838,7 @@ async def compare_paid(request: Request, consent_id: str = Form(...), file_hash:
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _comparison_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _comparison_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _comparison_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -1869,7 +1869,7 @@ BATCH_OUTER_DEADLINE_SECONDS = 150
 
 def _batch_insufficient_message(file_count: int, total: int) -> str:
     return (f"This {file_count}-file batch costs {total} credits. "
-            "Insufficient eligible Power-Up credits.")
+            "Insufficient eligible credits.")
 
 
 def _batch_response(request, status, data=None, message=None, *, report_id=None,
@@ -2110,7 +2110,7 @@ def _durable_batch(request, key, *, consent_id, digest):
     from app import batch_admission, batch_service
     user, csrf = _get_current_user_optional(request)
     if user is None:
-        return _batch_response(request, 401, message="Please log in to use Power-Up credits.")
+        return _batch_response(request, 401, message="Please log in to use credits.")
     user_id = user.id
     ip = _client_ip(request)
     worker = uuid_module.uuid4().hex
@@ -2389,7 +2389,7 @@ async def batch_paid(request: Request, consent_id: str = Form(...), file_hash: s
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _batch_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _batch_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _batch_response(request, 403, message="Invalid request. Please try again.")
     try:
