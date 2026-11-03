@@ -59,6 +59,12 @@ COST_PDF = 2  # Proposed (Phase 2B)
 # single source for structured-export consent, admission, UI copy and
 # error text; never duplicate the numeric price elsewhere.
 COST_STRUCTURED_EXPORT = 2
+# Issue #129: founder-ruled 2026-11-03 (single-unlock) — the 2-credit
+# export charge is keyed per (owner, report), NOT per format. The first
+# successful export generation in ANY format charges exactly this once
+# and unlocks every format for that report; all later generations and
+# downloads of any format are free. Same ruled price (2), new keying.
+COST_EXPORT_UNLOCK = 2
 # Issue #103 (trim B1): the obsolete fixed COST_BATCH = 5 proposal is
 # REMOVED. Founder-ruled batch pricing (2026-10-24) is per-file: the
 # first file under the normal rules (free hourly allowance if available,
@@ -655,6 +661,99 @@ def admit_paid_operation(
 
     except Exception:
         raise
+
+
+def _canonical_uuid_str(segment) -> str | None:
+    """Canonical ``str(UUID)`` for a stored key segment, or None.
+
+    Tolerates the noncanonical forms a raw URL segment can carry —
+    uppercase hex and the unhyphenated 32-char form both parse to the
+    same UUID (PR #132 finding 5).
+    """
+    try:
+        return str(uuid.UUID(str(segment)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def export_key_belongs_to(key, source_result_id) -> bool:
+    """True when an export operation's idempotency key names this report.
+
+    Matches the canonical keys the routes create today
+    (``pdf-{rid}`` / ``structured-{rid}-{format}-v1``, plus server
+    ``-retry-`` suffixes) AND existing noncanonical stored keys whose
+    report segment is an uppercase or unhyphenated UUID (PR #132
+    finding 5): the segment is parsed to a UUID and compared
+    canonically, so a first PDF export made through a noncanonical
+    URL still counts as the report's unlock / reservation fence.
+    """
+    if not isinstance(key, str):
+        return False
+    rid = _canonical_uuid_str(source_result_id)
+    if rid is None:
+        rid = str(source_result_id)
+    pdf_base = f"pdf-{rid}"
+    structured_base = f"structured-{rid}-"
+    if (key == pdf_base or key.startswith(pdf_base + "-retry-")
+            or key.startswith(structured_base)):
+        return True
+    if key.startswith("pdf-"):
+        segment = key[len("pdf-"):].split("-retry-", 1)[0]
+        return _canonical_uuid_str(segment) == rid
+    if key.startswith("structured-"):
+        rest = key[len("structured-"):]
+        for width in (36, 32):
+            segment = rest[:width]
+            if len(segment) == width and rest[width:width + 1] == "-":
+                if _canonical_uuid_str(segment) == rid:
+                    return True
+        return False
+    return False
+
+
+def export_operations(db: Session, user_id, source_result_id):
+    """All export operations (any format) belonging to one report (#129).
+
+    Export identity is key-based, exactly as the routes create it: PDF
+    operations carry ``pdf-{report_id}`` (plus server ``-retry-``
+    suffixes) and structured operations carry
+    ``structured-{report_id}-{format}-v1`` (plus retry suffixes). A
+    completed operation in ANY format is the report's export unlock;
+    the per-format operation rows remain the artifact/replay record.
+    Discovery is canonical-tolerant (see export_key_belongs_to):
+    stored keys whose report segment is a noncanonical UUID form
+    still match.
+    """
+    ops = db.execute(
+        select(models.Operation).where(
+            models.Operation.user_id == user_id,
+            models.Operation.type.in_(("pdf", "structured_export")),
+        )
+    ).scalars().all()
+    return [
+        op for op in ops
+        if export_key_belongs_to(op.idempotency_key, source_result_id)
+    ]
+
+
+def export_unlock_state(db: Session, user_id, source_result_id):
+    """Return (unlocked, in_progress) for a report's export unlock (#129).
+
+    unlocked: a first generation in some format completed — its single
+    2-credit charge (COST_EXPORT_UNLOCK) bought every format.
+    in_progress: an export generation for this report is reserved in
+    some format; concurrent cross-format requests must wait (409)
+    rather than race a second charge.
+    """
+    ops = export_operations(db, user_id, source_result_id)
+    unlocked = any(op.status == "completed" for op in ops)
+    in_progress = any(op.status == "reserved" for op in ops)
+    return unlocked, in_progress
+
+
+def is_export_unlocked(db: Session, user_id, source_result_id) -> bool:
+    unlocked, _ = export_unlock_state(db, user_id, source_result_id)
+    return unlocked
 
 
 def lock_share_rate_bucket(db: Session, owner: str):

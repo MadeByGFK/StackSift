@@ -87,17 +87,50 @@ def lookup_shared(db, raw_token: str):
     return sharing, result, payload
 
 
+def is_export_unlocked(db, source_result) -> bool:
+    """Issue #129 §5: an export-unlocked report counts as having its
+    PDF export purchased for the share-link PDF rule — the unlock may
+    have been bought with a CSV or JSON first generation, in which
+    case no PDF operation exists at all."""
+    return credits.is_export_unlocked(
+        db, source_result.user_id, source_result.id)
+
+
+def has_pdf_export_operation(db, source_result) -> bool:
+    """True when a completed PDF operation exists for the report, even
+    if its artifact has since expired. Issue #107 T6 still governs
+    that case (an expired PDF is not shareable); the #129 on-the-fly
+    generation in the share route applies only when no PDF was ever
+    generated but the report is export-unlocked via another format."""
+    ops = db.execute(
+        select(models.Operation).where(
+            models.Operation.user_id == source_result.user_id,
+            models.Operation.type == "pdf",
+            models.Operation.status == "completed",
+        )
+    ).scalars().all()
+    # Canonical-tolerant matching (PR #132 follow-up): a legacy PDF
+    # operation stored under an uppercase or unhyphenated key counts
+    # exactly like the canonical pdf-{id} key. The query above already
+    # filters type == "pdf", so export_key_belongs_to's structured-*
+    # branch can never match here — only its pdf-* branch applies.
+    return any(
+        credits.export_key_belongs_to(op.idempotency_key, source_result.id)
+        for op in ops)
+
+
 def find_shareable_pdf(db, source_result):
     """Return (pdf_result, pdf_bytes) for a paid unexpired PDF, else None.
 
     T3 provenance: PDF exports are Operations of type "pdf" whose
-    idempotency key is ``pdf-{source_id}`` (plus server retry suffixes).
-    The PDF Result is validated with its OWN expiry/integrity via
+    idempotency key belongs to the source under
+    credits.export_key_belongs_to — canonically ``pdf-{source_id}``
+    (plus server retry suffixes), tolerating legacy noncanonical
+    stored forms. The PDF Result is validated with its OWN expiry/integrity via
     result_payload — extending the source never extends it (T6).
     """
     import base64 as _b64
 
-    base_key = f"pdf-{source_result.id}"
     ops = db.execute(
         select(models.Operation).where(
             models.Operation.user_id == source_result.user_id,
@@ -106,10 +139,14 @@ def find_shareable_pdf(db, source_result):
             models.Operation.result_id.isnot(None),
         )
     ).scalars().all()
+    # Canonical-tolerant matching, as in has_pdf_export_operation
+    # above: legacy uppercase/unhyphenated pdf-* keys (including
+    # -retry- suffixes, which export_key_belongs_to handles) belong
+    # to this report. The type == "pdf" filter above scopes the
+    # helper to pdf operations only.
     candidates = [
         op for op in ops
-        if op.idempotency_key == base_key
-        or op.idempotency_key.startswith(base_key + "-retry-")
+        if credits.export_key_belongs_to(op.idempotency_key, source_result.id)
     ]
     if not candidates:
         return None
