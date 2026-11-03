@@ -84,6 +84,15 @@ COST_OVERSIZE_ANALYSIS = 3
 # charged only on success, even when the pair is identical or shows no
 # material differences (disclosed on the consent page, spec trim C10).
 COST_COMPARE = 3
+# Issue #107: founder-ruled 2026-11-01 (batched pricing) — retention
+# extension is 1 credit per +90-day unit, added to the report's CURRENT
+# expires_at, stackable, lifetime ceiling ready_at + 365 days, full-unit
+# purchases only. These constants are the single source for consent,
+# admission, cap arithmetic, UI copy and error text. Sharing is FREE
+# (same ruling): there is deliberately NO share cost constant.
+COST_RETENTION_EXTENSION = 1
+RETENTION_EXTENSION_DAYS = 90
+RETENTION_MAX_DAYS = 365
 
 # Signup reward (approved 2026-10-15)
 SIGNUP_REWARD_CREDITS = 3
@@ -98,6 +107,9 @@ RATE_LIMIT_PDF = 10
 # Issue #105: structured export mirrors the PDF rate policy.
 RATE_LIMIT_STRUCTURED_EXPORT = 10
 RATE_LIMIT_BATCH = 5
+# Issue #107: explicit 10/hour policy for retention extension (draft §8),
+# so it never relies on _consume_rate()'s unknown-policy fallback.
+RATE_LIMIT_RETENTION_EXTENSION = 10
 # Issue #104, slice 1 (trim T3): explicit 30/hour policy for oversize, so
 # it never relies on _consume_rate()'s fallback.
 RATE_LIMIT_OVERSIZE_ANALYSIS = 30
@@ -650,6 +662,7 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
         "paid:pdf": RATE_LIMIT_PDF,
         "paid:structured_export": RATE_LIMIT_STRUCTURED_EXPORT,
         "paid:batch": RATE_LIMIT_BATCH,
+        "paid:retention_extension": RATE_LIMIT_RETENTION_EXTENSION,
     }.get(policy, 30)
     window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
 
@@ -854,6 +867,40 @@ def store_structured_export_result(db, user_id, operation_id, export_bytes: byte
         user_id=user_id,
         operation_id=operation_id,
         type="structured_export",
+        storage_manifest=manifest,
+        integrity_digest=hash_input(manifest.encode()),
+        byte_count=len(manifest.encode()),
+        ready_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    db.add(result)
+    db.flush()
+    return result
+
+
+def store_report_action_receipt(db, user_id, operation_id, manifest_fields: dict):
+    """Store the action-receipt Result for a non-artifact paid action (#107).
+
+    complete_operation() requires a ready Result bound to THIS operation;
+    a retention extension produces no artifact, so it settles against
+    this receipt (draft §4/§8) instead of weakening result_payload()'s
+    origin invariants. The manifest records the action kind, the target
+    Result ID and the previous/new expiry — never any bearer secret.
+    The receipt is type "report_action": report lists filter on
+    analysis/comparison types, so it never appears as a report. Its own
+    7-day expiry is independent of the extended report (trim T6); the
+    permanent ReportAction identity row, not this receipt, carries
+    replay safety after the receipt payload is cleaned up.
+    """
+    op, _, _ = _lock_operation(db, operation_id)
+    if op.status != "reserved":
+        raise AdmissionError("operation is no longer reserved")
+    manifest = json.dumps(dict(manifest_fields))
+    now = _utcnow()
+    result = models.Result(
+        user_id=user_id,
+        operation_id=operation_id,
+        type="report_action",
         storage_manifest=manifest,
         integrity_digest=hash_input(manifest.encode()),
         byte_count=len(manifest.encode()),

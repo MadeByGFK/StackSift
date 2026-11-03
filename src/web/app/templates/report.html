@@ -72,6 +72,41 @@
       </p>
       {% endif %}
       {% endif %}
+      {% if report_expires_at %}
+      <div class="retention-sharing" style="margin-top:1rem">
+        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">This report is retained until {{ report_expires_at.strftime("%Y-%m-%d") }}.</p>
+        {% if retention_at_cap %}
+        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">This report is at the maximum retention (365 days from creation) and cannot be extended further.</p>
+        {% else %}
+        <form method="post" action="/reports/{{ report_id }}/retention" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="idempotency_key" value="{{ retention_key }}">
+          <button type="submit" class="btn-small">Extend {{ retention_extension_days }} days — {{ retention_extension_cost }} credit</button>
+        </form>
+        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">Extending keeps this report longer (new date if extended: {{ retention_next_expiry.strftime("%Y-%m-%d") }}). It does not extend PDFs or exports, which keep their own dates. An active share link stays usable for as long as the report is retained; revoking is separate.</p>
+        {% endif %}
+        {% if share_active %}
+        <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Sharing is on: anyone with the link can read this report. The link was shown once when created — rotate to get a new copyable link (the old one stops working).</p>
+        <form method="post" action="/reports/{{ report_id }}/share/rotate" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="idempotency_key" value="{{ share_rotate_key }}">
+          <button type="submit" class="btn-small">Rotate share link (free)</button>
+        </form>
+        <form method="post" action="/reports/{{ report_id }}/share/revoke" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="idempotency_key" value="{{ share_revoke_key }}">
+          <button type="submit" class="btn-small">Revoke share link (free)</button>
+        </form>
+        {% else %}
+        <form method="post" action="/reports/{{ report_id }}/share" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="idempotency_key" value="{{ share_create_key }}">
+          <button type="submit" class="btn-small">Share this report (free)</button>
+        </form>
+        <p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0 0">Sharing is free. Anyone holding the link can read this report's text — and a PDF only if you have already paid to generate one. Redaction is best-effort; review the report before sharing.</p>
+        {% endif %}
+      </div>
+      {% endif %}
     </div>
     {% endif %}
   </section>

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift shared report — {{ filename }}</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <span class="logo">stacksift<span>.</span></span>
+  </header>
+
+  <div class="demo-banner">Shared read-only report. Anyone with the link can view it; the owner can revoke it at any time.</div>
+
+  <section class="report-head">
+    <h2>{{ filename }}</h2>
+    <div class="meta">
+      Analyzed in {{ "%.2f"|format(elapsed or 0) }}s ·
+      {% if detected_format == "jsonlines" %}
+        JSON-lines detected, auto-converted for analysis
+      {% else %}
+        Plain-text log format
+      {% endif %}
+    </div>
+    {% if health %}
+    <div>
+      <span class="badge {{ health.color }}">{{ health.label }}</span>
+    </div>
+    {% endif %}
+  </section>
+
+  {% if complexity_truncated %}
+  <div class="complexity-notice">
+    <strong>⚠️ Analysis limited:</strong> {{ complexity_notice }}
+  </div>
+  {% endif %}
+
+  <div class="stats">
+    <div class="stat"><div class="num">{{ results.total_lines }}</div><div class="lbl">Total lines</div></div>
+    <div class="stat"><div class="num">{{ results.parsed_lines }}</div><div class="lbl">Parsed</div></div>
+    <div class="stat"><div class="num">{{ results.malformed_lines }}</div><div class="lbl">Malformed</div></div>
+    <div class="stat"><div class="num">{{ sorted_issues|length }}</div><div class="lbl">Unique issues</div></div>
+  </div>
+
+  {% if diagnostic_issue %}
+  <div class="callout">
+    <div class="k">Investigate first — most diagnostic</div>
+    <div class="v">[{{ diagnostic_issue[1].level }}] {{ diagnostic_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ diagnostic_issue[1].count }}</span></div>
+    {% if diagnostic_explanation %}
+    <div class="why">{{ diagnostic_explanation|join(' · ') }}</div>
+    {% endif %}
+    {% if top_issue and top_issue[0] != diagnostic_issue[0] %}
+    <div class="k" style="margin-top:10px">Most frequent warning/error</div>
+    <div class="v">[{{ top_issue[1].level }}] {{ top_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ top_issue[1].count }}</span></div>
+    {% endif %}
+  </div>
+  {% elif top_issue %}
+  <div class="callout">
+    <div class="k">Investigate first</div>
+    <div class="v">[{{ top_issue[1].level }}] {{ top_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ top_issue[1].count }}</span></div>
+  </div>
+  {% endif %}
+
+  {% if timeline and timeline|length > 1 %}
+  <h3 class="section-title">Incident timeline <span style="color:var(--muted);font-weight:400;font-size:14px">— warnings + errors per 5 min</span></h3>
+  {% if first_seen and last_seen %}
+  <div class="meta" style="margin-bottom:8px">First event: {{ first_seen }} · Last event: {{ last_seen }}</div>
+  {% endif %}
+  <div class="card">
+    {% set tmax = timeline|map(attribute='total')|max %}
+    <div class="timeline">
+      {% for b in timeline %}
+      {% set issues = b.warn + b.error + b.critical %}
+      <div class="tbar" title="{{ b.label }} — {{ b.critical }} critical, {{ b.error }} errors, {{ b.warn }} warnings">
+        <div class="tcount">{{ issues if issues > 0 else '' }}</div>
+        <div class="tstack" style="height: {{ (issues / tmax * 100) if tmax else 0 }}%">
+          {% if b.critical > 0 %}<div class="tseg seg-critical" style="height: {{ (b.critical / issues * 100) }}%"></div>{% endif %}
+          {% if b.error > 0 %}<div class="tseg seg-error" style="height: {{ (b.error / issues * 100) }}%"></div>{% endif %}
+          {% if b.warn > 0 %}<div class="tseg seg-warn" style="height: {{ (b.warn / issues * 100) }}%"></div>{% endif %}
+        </div>
+        <div class="tbar-label">{{ b.label if loop.index0 % 2 == 0 else '' }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="tlegend">
+      <span><i class="sw seg-critical"></i>Critical</span>
+      <span><i class="sw seg-error"></i>Error</span>
+      <span><i class="sw seg-warn"></i>Warning</span>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if results.level_counts %}
+  <h3 class="section-title">Severity breakdown</h3>
+  {% set max_count = [results.level_counts.get("CRITICAL",0), results.level_counts.get("ERROR",0), results.level_counts.get("WARN",0), results.level_counts.get("INFO",0)]|max %}
+  {% for level, cls in [("CRITICAL","critical"),("ERROR","error"),("WARN","warn"),("INFO","info")] %}
+  {% set count = results.level_counts.get(level, 0) %}
+  <div class="sev-row">
+    <div class="name">{{ level }}</div>
+    <div class="bar-wrap"><div class="bar {{ cls }}" style="width: {{ (count / max_count * 100) if max_count else 0 }}%"></div></div>
+    <div class="count">{{ count }}</div>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  {% if results.service_counts %}
+  <h3 class="section-title">By service</h3>
+  <div class="card">
+    {% for svc, count in results.service_counts|dictsort(by='value')|reverse %}
+    <div class="sev-row">
+      <div class="name">{{ svc }}</div>
+      <div class="bar-wrap"><div class="bar info" style="width: {{ (count / results.total_lines * 100) if results.total_lines else 0 }}%"></div></div>
+      <div class="count">{{ count }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <h3 class="section-title">Issues <span style="color:var(--muted);font-weight:400;font-size:14px">— sorted by severity, then frequency</span></h3>
+  {% if sorted_issues %}
+  <div class="card" style="padding:0 20px">
+    <table class="issues">
+      <thead><tr><th>Severity</th><th>Message</th><th style="text-align:right">Count</th></tr></thead>
+      <tbody>
+      {% for issue, data in sorted_issues %}
+        <tr>
+          <td><span class="pill {{ data.level }}">{{ data.level }}</span></td>
+          <td>{{ issue }}</td>
+          <td style="text-align:right;color:var(--muted)">× {{ data.count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card"><p>No warnings, errors, or critical entries found. Quiet logs — enjoy it.</p></div>
+  {% endif %}
+
+  {% if results.malformed_lines and results.malformed_lines > 0 %}
+  <div class="notice">
+    ⚠️ <strong>{{ results.malformed_lines }}</strong> line{{ "s" if results.malformed_lines != 1 }} couldn't be parsed and {{ "was" if results.malformed_lines == 1 else "were" }} excluded.
+  </div>
+  {% endif %}
+
+  {% if adapted %}
+  <div class="notice">
+    ℹ️ This file was detected as <strong>JSON-lines</strong> and converted automatically.
+  </div>
+  {% endif %}
+
+  <p class="privacy">This is a shared, read-only copy of a StackSift report. Redaction may miss sensitive data; the report owner shared this link deliberately.</p>
+
+  <footer>
+    StackSift · a Goodfolk Digital project
+  </footer>
+
+</div>
+</body>
+</html>
