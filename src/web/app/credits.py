@@ -663,6 +663,54 @@ def admit_paid_operation(
         raise
 
 
+def _canonical_uuid_str(segment) -> str | None:
+    """Canonical ``str(UUID)`` for a stored key segment, or None.
+
+    Tolerates the noncanonical forms a raw URL segment can carry —
+    uppercase hex and the unhyphenated 32-char form both parse to the
+    same UUID (PR #132 finding 5).
+    """
+    try:
+        return str(uuid.UUID(str(segment)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def export_key_belongs_to(key, source_result_id) -> bool:
+    """True when an export operation's idempotency key names this report.
+
+    Matches the canonical keys the routes create today
+    (``pdf-{rid}`` / ``structured-{rid}-{format}-v1``, plus server
+    ``-retry-`` suffixes) AND existing noncanonical stored keys whose
+    report segment is an uppercase or unhyphenated UUID (PR #132
+    finding 5): the segment is parsed to a UUID and compared
+    canonically, so a first PDF export made through a noncanonical
+    URL still counts as the report's unlock / reservation fence.
+    """
+    if not isinstance(key, str):
+        return False
+    rid = _canonical_uuid_str(source_result_id)
+    if rid is None:
+        rid = str(source_result_id)
+    pdf_base = f"pdf-{rid}"
+    structured_base = f"structured-{rid}-"
+    if (key == pdf_base or key.startswith(pdf_base + "-retry-")
+            or key.startswith(structured_base)):
+        return True
+    if key.startswith("pdf-"):
+        segment = key[len("pdf-"):].split("-retry-", 1)[0]
+        return _canonical_uuid_str(segment) == rid
+    if key.startswith("structured-"):
+        rest = key[len("structured-"):]
+        for width in (36, 32):
+            segment = rest[:width]
+            if len(segment) == width and rest[width:width + 1] == "-":
+                if _canonical_uuid_str(segment) == rid:
+                    return True
+        return False
+    return False
+
+
 def export_operations(db: Session, user_id, source_result_id):
     """All export operations (any format) belonging to one report (#129).
 
@@ -672,10 +720,10 @@ def export_operations(db: Session, user_id, source_result_id):
     ``structured-{report_id}-{format}-v1`` (plus retry suffixes). A
     completed operation in ANY format is the report's export unlock;
     the per-format operation rows remain the artifact/replay record.
+    Discovery is canonical-tolerant (see export_key_belongs_to):
+    stored keys whose report segment is a noncanonical UUID form
+    still match.
     """
-    rid = str(source_result_id)
-    pdf_base = f"pdf-{rid}"
-    structured_base = f"structured-{rid}-"
     ops = db.execute(
         select(models.Operation).where(
             models.Operation.user_id == user_id,
@@ -684,9 +732,7 @@ def export_operations(db: Session, user_id, source_result_id):
     ).scalars().all()
     return [
         op for op in ops
-        if op.idempotency_key == pdf_base
-        or op.idempotency_key.startswith(pdf_base + "-retry-")
-        or op.idempotency_key.startswith(structured_base)
+        if export_key_belongs_to(op.idempotency_key, source_result_id)
     ]
 
 

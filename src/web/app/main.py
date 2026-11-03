@@ -2459,8 +2459,10 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
         try:
             manifest = json.loads(r.storage_manifest)
             filename = manifest.get("filename", "Unknown file")
+            report_kind = manifest.get("report_kind")
         except (json.JSONDecodeError, TypeError):
             filename = "Unknown file"
+            report_kind = None
         from app.credits import _as_aware
         _sharing_row = db.query(models.ReportSharing).filter(
             models.ReportSharing.result_id == r.id).first()
@@ -2476,6 +2478,13 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             # fresh per-render action keys and its unlock/share state
             # for the confirmation copy.
             "type": r.type,
+            # PR #132 finding 4: the row template needs the same
+            # discriminator the report page uses (report.html hides
+            # CSV/JSON when report_kind is set) so batch rows — type
+            # "analysis" with report_kind "batch", whose structured
+            # exports the route rejects with 422 — do not offer
+            # CSV/JSON controls that can only fail.
+            "report_kind": report_kind,
             "retention_key": uuid_module.uuid4().hex,
             "share_create_key": uuid_module.uuid4().hex,
             "share_rotate_key": uuid_module.uuid4().hex,
@@ -2659,7 +2668,14 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     from app import funnel as funnel_helpers
     funnel_helpers.emit_standalone(funnel_helpers.EXPORT_INTENT, user_id=user.id)
 
-    base_idempotency_key = f"pdf-{result_id}"
+    # PR #132 finding 5: build the operation key from the PARSED
+    # canonical UUID (rid), never the raw URL segment — an uppercase
+    # or unhyphenated first PDF export must create the same canonical
+    # key unlock discovery searches for, or a later CSV/JSON export
+    # would charge a second 2 credits and bypass the cross-format
+    # reservation fence. The retry key below derives from this base,
+    # so it is canonical too.
+    base_idempotency_key = f"pdf-{rid}"
     request_hash = result.integrity_digest
     # Issue #129: serialize cross-format unlock discovery under the
     # global:paid lock (the first scope admit_paid_operation locks) and
@@ -2673,6 +2689,33 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         models.Operation.type == "pdf",
         models.Operation.idempotency_key == base_idempotency_key,
     ).first()
+    if existing_op is None:
+        # PR #132 finding 5: an operation stored before key
+        # canonicalization (raw uppercase/unhyphenated URL segment in
+        # its key) must still be found here — otherwise its completed
+        # PDF could not replay and its reserved state would not fence
+        # this request. Canonical-tolerant match over this user's PDF
+        # operations, preferring completed, then reserved, then the
+        # latest attempt.
+        _legacy = [
+            _op for _op in db.query(models.Operation).filter(
+                models.Operation.user_id == user.id,
+                models.Operation.type == "pdf",
+            ).all()
+            if credits_helpers.export_key_belongs_to(
+                _op.idempotency_key, rid)
+        ]
+        if _legacy:
+            _rank = {"completed": 0, "reserved": 1}
+            existing_op = max(
+                _legacy,
+                key=lambda _op: (
+                    -_rank.get(_op.status, 2),
+                    _op.created_at or datetime.min.replace(
+                        tzinfo=timezone.utc),
+                    str(_op.id),
+                ),
+            )
     # For failed/expired operations, use a new idempotency key so the retry
     # gets a fresh operation identity (the old credits were released).
     # The unique constraint on (user_id, type, idempotency_key) ensures safety.

@@ -136,17 +136,55 @@
         var linkRow = document.getElementById('share-link-row');
         var linkBox = document.getElementById('share-link');
         var mailto = document.getElementById('share-mailto');
+        function resolveShareUrl(url) {
+          // PR #132 finding 3: the server returns a hostless
+          // /s/<token> path when APP_BASE_URL is unset; resolve it
+          // against this origin before it reaches the copy field
+          // or the mailto body.
+          return new URL(url, window.location.origin).href;
+        }
         function showLink(url) {
-          linkBox.value = url;
-          mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(url);
+          var absoluteUrl = resolveShareUrl(url);
+          linkBox.value = absoluteUrl;
+          mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(absoluteUrl);
           linkRow.style.display = 'block';
         }
+        function freshShareKey() {
+          // PR #132 finding 1: after a successful share action the
+          // used idempotency key is replaced with a fresh one, so a
+          // later action (revoke -> rotate -> revoke) never replays
+          // an earlier action's key as a no-op.
+          if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+            return window.crypto.randomUUID();
+          }
+          var hex = '';
+          for (var i = 0; i < 32; i++) {
+            hex += Math.floor(Math.random() * 16).toString(16);
+          }
+          return hex;
+        }
+        var shareCreateKey = '{{ share_create_key }}';
+        var shareRotateKey = '{{ share_rotate_key }}';
+        var shareRevokeKey = '{{ share_revoke_key }}';
         function postShare(path, key) {
           var fd = new FormData();
           fd.append('csrf_token', '{{ csrf_token }}');
           fd.append('idempotency_key', key);
           return fetch(path, { method: 'POST', body: fd, credentials: 'same-origin' })
-            .then(function (r) { return r.json(); });
+            .then(function (r) {
+              // PR #132 finding 2: keep the HTTP status with the
+              // payload so callers check success before reporting
+              // it (a 429 revoke leaves the link active and must
+              // surface as an error, not as "revoked").
+              return r.json().then(function (d) {
+                d = d || {};
+                d._httpOk = r.ok;
+                d._httpStatus = r.status;
+                return d;
+              }, function () {
+                return { _httpOk: r.ok, _httpStatus: r.status };
+              });
+            });
         }
         document.getElementById('share-btn').addEventListener('click', function () {
           shareModal.style.display = 'flex';
@@ -157,8 +195,9 @@
         var create = document.getElementById('share-create');
         if (create) {
           create.addEventListener('click', function () {
-            postShare('/reports/{{ report_id }}/share', '{{ share_create_key }}').then(function (d) {
-              if (d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); }
+            postShare('/reports/{{ report_id }}/share', shareCreateKey).then(function (d) {
+              if (d._httpOk) { shareCreateKey = freshShareKey(); }
+              if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); }
               else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
             });
           });
@@ -166,8 +205,9 @@
         var rotate = document.getElementById('share-rotate');
         if (rotate) {
           rotate.addEventListener('click', function () {
-            postShare('/reports/{{ report_id }}/share/rotate', '{{ share_rotate_key }}').then(function (d) {
-              if (d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url); }
+            postShare('/reports/{{ report_id }}/share/rotate', shareRotateKey).then(function (d) {
+              if (d._httpOk) { shareRotateKey = freshShareKey(); }
+              if (d._httpOk && d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url); }
               else { shareMsg.textContent = d.message || d.error || ''; }
             });
           });
@@ -175,9 +215,18 @@
         var revoke = document.getElementById('share-revoke');
         if (revoke) {
           revoke.addEventListener('click', function () {
-            postShare('/reports/{{ report_id }}/share/revoke', '{{ share_revoke_key }}').then(function (d) {
-              shareMsg.textContent = 'Share link revoked.';
-              linkRow.style.display = 'none';
+            postShare('/reports/{{ report_id }}/share/revoke', shareRevokeKey).then(function (d) {
+              // PR #132 finding 2: claim "revoked" only when the
+              // server actually revoked (HTTP success + revoked
+              // status). A 429 leaves the link active: surface the
+              // error and keep the link row visible.
+              if (d._httpOk && d.status === 'revoked') {
+                shareRevokeKey = freshShareKey();
+                shareMsg.textContent = 'Share link revoked.';
+                linkRow.style.display = 'none';
+              } else {
+                shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
+              }
             });
           });
         }
