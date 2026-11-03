@@ -380,10 +380,10 @@ def test_402_page_carries_buy_credits_cta(checkout_env):
     }
     request = Request(scope)
     response = _analysis_response(
-        request, 402, message="Insufficient Power-Up credits.", buy_credits=True)
+        request, 402, message="Insufficient credits.", buy_credits=True)
     assert response.status_code == 402
     body = response.body.decode()
-    assert "Insufficient Power-Up credits." in body
+    assert "Insufficient credits." in body
     assert 'href="/credits"' in body and "Buy credits" in body
 
 

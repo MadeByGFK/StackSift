@@ -34,7 +34,7 @@ from app.sample_data import SAMPLE_LOG
 
 OVERSIZE_402 = (
     "Oversize analysis costs 3 credits. "
-    "You do not have enough eligible Power-Up credits."
+    "You do not have enough eligible credits."
 )
 
 
