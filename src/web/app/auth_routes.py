@@ -212,13 +212,17 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
 
     _origin = _os.environ.get("APP_BASE_URL", "").rstrip("/")
     share_links = []
+    # PR #138 remediation (finding 2): do NOT filter on raw_token —
+    # active pre-#135 legacy rows have raw_token NULL (the token was
+    # never stored) yet their links still serve, so they must be
+    # listed (as txt) with a working revoke. Their URL is simply not
+    # recoverable; the template renders an explicit note for them.
     _sharings = (
         db.query(_models.ReportSharing)
         .filter(
             _models.ReportSharing.owner_user_id == user.id,
             _models.ReportSharing.revoked_at.is_(None),
             _models.ReportSharing.token_hash.isnot(None),
-            _models.ReportSharing.raw_token.isnot(None),
         )
         .order_by(_models.ReportSharing.created_at.desc())
         .all()
@@ -243,7 +247,11 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "report": _filename,
             "format": (_row.share_format or "txt"),
             "created_at": _row.created_at,
-            "url": f"{_origin}/s/{_row.raw_token}",
+            # Legacy rows (raw_token NULL) have no recoverable URL:
+            # url stays None and the template renders the explicit
+            # not-recoverable note instead of a broken link.
+            "url": f"{_origin}/s/{_row.raw_token}" if _row.raw_token else None,
+            "link_recoverable": bool(_row.raw_token),
         })
     return templates.TemplateResponse(
         request,

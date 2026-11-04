@@ -3651,11 +3651,17 @@ async def report_extend_retention(request: Request, result_id: str, db=Depends(g
 
 
 def _share_action_replay(db, user, source, action_kind, idempotency_key,
-                         request_hash):
-    """Return (prior_action, error_response) for a free share action."""
+                         request_hash, share_format=None):
+    """Return (prior_action, error_response) for a free share action.
+
+    PR #138 remediation (finding 4): a stored hash also matches when
+    it is the pre-#135 legacy representation and the current action's
+    format carries the legacy txt semantics — see
+    report_access.action_hash_matches for the exact scheme."""
     from fastapi.responses import JSONResponse
     from sqlalchemy import select as _select
     from app import models
+    from app import report_access as _ra
     prior = db.execute(
         _select(models.ReportAction).where(
             models.ReportAction.owner_user_id == user.id,
@@ -3664,7 +3670,9 @@ def _share_action_replay(db, user, source, action_kind, idempotency_key,
             models.ReportAction.idempotency_key == idempotency_key,
         )
     ).scalar_one_or_none()
-    if prior is not None and prior.request_hash != request_hash:
+    if prior is not None and not _ra.action_hash_matches(
+            prior.request_hash, source, action_kind, request_hash,
+            share_format=share_format):
         return None, JSONResponse(
             {"error": "Idempotency key reused with different input"},
             status_code=409)
@@ -3810,7 +3818,8 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
     # serialize; replays never consume rate and never 429/500).
     credits_helpers.lock_share_rate_bucket(db, str(user.id))
     prior, err = _share_action_replay(
-        db, user, source, "share_create", idempotency_key, request_hash)
+        db, user, source, "share_create", idempotency_key, request_hash,
+        share_format=share_format)
     if err is not None:
         db.rollback()
         return err
@@ -3926,7 +3935,8 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
     # report_share_create).
     credits_helpers.lock_share_rate_bucket(db, str(user.id))
     prior, err = _share_action_replay(
-        db, user, source, "share_rotate", idempotency_key, request_hash)
+        db, user, source, "share_rotate", idempotency_key, request_hash,
+        share_format=_rotate_fmt)
     if err is not None:
         db.rollback()
         return err
@@ -4031,7 +4041,8 @@ async def report_share_revoke(request: Request, result_id: str, db=Depends(get_d
     # report_share_create).
     credits_helpers.lock_share_rate_bucket(db, str(user.id))
     prior, err = _share_action_replay(
-        db, user, source, "share_revoke", idempotency_key, request_hash)
+        db, user, source, "share_revoke", idempotency_key, request_hash,
+        share_format=_revoke_fmt)
     if err is not None:
         db.rollback()
         return err
@@ -4105,6 +4116,13 @@ async def settings_report_access_revoke(request: Request, sharing_id: str,
         sid = _uuid.UUID(sharing_id)
     except ValueError:
         return JSONResponse({"error": "Invalid link ID"}, status_code=400)
+    # PR #138 remediation (finding 3): lock ORDER — acquire the
+    # share rate bucket BEFORE locking the sharing row, exactly as
+    # create/rotate/report-revoke do. Locking the row first inverted
+    # that order and could deadlock on PostgreSQL against a
+    # concurrent share action, aborting this revoke and leaving the
+    # bearer token live.
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
     sharing = db.execute(
         _select(models.ReportSharing).where(
             models.ReportSharing.id == sid,
@@ -4122,9 +4140,9 @@ async def settings_report_access_revoke(request: Request, sharing_id: str,
     request_hash = _ra.action_request_hash(
         source, "share_revoke",
         share_format=_ra.share_format_of(sharing))
-    credits_helpers.lock_share_rate_bucket(db, str(user.id))
     prior, err = _share_action_replay(
-        db, user, source, "share_revoke", idempotency_key, request_hash)
+        db, user, source, "share_revoke", idempotency_key, request_hash,
+        share_format=_ra.share_format_of(sharing))
     if err is not None:
         db.rollback()
         return err

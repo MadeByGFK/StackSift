@@ -258,13 +258,11 @@ class SharePathRedactionFilter(logging.Filter):
         return True
 
 
-def action_request_hash(source_result, action_kind: str,
-                        share_format: str | None = None) -> str:
-    """Canonical request hash binding an action to the source snapshot.
-
-    Issue #135: share actions also bind the link format, so replaying
-    a create key with a DIFFERENT format is a key-reuse conflict
-    (409), never a silent second link under the same key."""
+def _legacy_action_request_hash(source_result, action_kind: str) -> str:
+    """The pre-#135 request-hash representation: no ``share_format``
+    key at all. This is the byte-identical hash stored on every
+    ReportAction recorded before the #135 deploy (and, by design
+    below, still the representation for non-share actions)."""
     return credits.hash_input(json.dumps(
         {
             "action_kind": action_kind,
@@ -272,8 +270,76 @@ def action_request_hash(source_result, action_kind: str,
             "source_integrity_digest": source_result.integrity_digest,
             "unit_days": credits.RETENTION_EXTENSION_DAYS
             if action_kind == "retention_extension" else None,
+            "version": 1,
+        },
+        sort_keys=True, separators=(",", ":"),
+    ).encode())
+
+
+def legacy_action_request_hash(source_result, action_kind: str) -> str:
+    """Public name for the pre-#135 hash representation (see above)."""
+    return _legacy_action_request_hash(source_result, action_kind)
+
+
+def action_request_hash(source_result, action_kind: str,
+                        share_format: str | None = None) -> str:
+    """Canonical request hash binding an action to the source snapshot.
+
+    Hash scheme (PR #138 remediation, finding 4 — migration 0014
+    does not rewrite stored ReportAction identities, so hashes
+    recorded before this deploy must keep matching after it):
+
+    - Non-share actions (retention_extension): the hash is
+      byte-identical to the pre-#135 representation — NO
+      ``share_format`` key is included, whether or not a caller
+      passes a format. A pre-deploy retention purchase replayed with
+      its original idempotency key therefore still matches its
+      recorded hash and returns the recorded success.
+    - Share actions (share_create / share_rotate / share_revoke):
+      the hash additionally binds ``share_format``, so replaying a
+      create key with a DIFFERENT format is a key-reuse conflict
+      (409), never a silent second link under the same key.
+    - Legacy share actions: a share action recorded pre-#135 carries
+      the legacy hash (no format key). ``action_hash_matches``
+      accepts that stored hash as a replay match only where the
+      semantics are the same — the pre-#135 era had exactly one
+      link per report, in the format now read as txt — so legacy
+      compatibility applies to txt (or format-less rotate/revoke,
+      which targeted that sole link). A legacy hash never matches a
+      gated-format (pdf/json/csv) replay.
+    """
+    if not action_kind.startswith("share_"):
+        return _legacy_action_request_hash(source_result, action_kind)
+    return credits.hash_input(json.dumps(
+        {
+            "action_kind": action_kind,
+            "source_result_id": str(source_result.id),
+            "source_integrity_digest": source_result.integrity_digest,
+            "unit_days": None,
             "share_format": share_format,
             "version": 1,
         },
         sort_keys=True, separators=(",", ":"),
     ).encode())
+
+
+def action_hash_matches(prior_hash, source_result, action_kind: str,
+                        request_hash: str,
+                        share_format: str | None = None) -> bool:
+    """True when a stored ReportAction hash replays the current request.
+
+    Exact match on the current canonical hash always matches. A
+    stored LEGACY (pre-#135, no-format) hash additionally matches a
+    share action only under the narrow txt semantics documented in
+    ``action_request_hash``; every other mismatch is a key-reuse
+    conflict (the caller returns 409).
+    """
+    if prior_hash == request_hash:
+        return True
+    if prior_hash != _legacy_action_request_hash(source_result, action_kind):
+        return False
+    if action_kind == "share_create":
+        return share_format == DEFAULT_SHARE_FORMAT
+    if action_kind in ("share_rotate", "share_revoke"):
+        return share_format in (None, DEFAULT_SHARE_FORMAT)
+    return False

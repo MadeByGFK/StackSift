@@ -77,10 +77,16 @@
         <div>
           <div class="session-info">{{ link.report }} — {{ link.format|upper }}</div>
           <div class="session-meta">Created {{ link.created_at.strftime('%Y-%m-%d %H:%M UTC') if link.created_at else '' }}</div>
+          {% if link.url %}
           <input type="text" class="share-access-link" readonly value="{{ link.url }}" style="width:100%;box-sizing:border-box;margin-top:6px">
+          {% else %}
+          <div class="session-meta share-access-unrecoverable" style="margin-top:6px">link not recoverable — revoke and create a new link</div>
+          {% endif %}
         </div>
         <div>
+          {% if link.url %}
           <button type="button" class="btn-small share-access-copy">Copy link</button>
+          {% endif %}
           <button type="button" class="btn-small btn-danger share-access-revoke" data-share-id="{{ link.id }}">Revoke</button>
         </div>
       </div>
