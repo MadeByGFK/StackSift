@@ -8,6 +8,9 @@ must FAIL on the pre-remediation tree (75003371) and PASS after:
 3. P2: analyze_path retained every file's complete evidence artifact.
 4. P2: merged severity metadata was lost across per-file group
    clipping, so retained evidence contradicted the combined issue.
+5. P2 (finding 5, on the remediation head dc1415a): the F01
+   bare-order normalization also rewrote ``byte order <n>``, merging
+   distinct byte-order property values into one group.
 The vendored copy carries the identical contract:
 src/web/tests/test_deep_dive_remediation.py.
 """
@@ -16,7 +19,7 @@ import json
 import weakref
 
 import stacksift.analyzer as analyzer
-from stacksift.analyzer import analyze_log_file, analyze_path
+from stacksift.analyzer import analyze_log_file, analyze_path, normalize_issue
 
 
 def _write(tmp_path, name, lines):
@@ -187,3 +190,47 @@ def test_merged_severity_metadata_survives_per_file_clipping(tmp_path):
         "level_counts": {"CRITICAL": 1},
         "peak_level": "CRITICAL",
     }
+
+
+# --- Finding 5 (P2): byte order is a property, not an identifier ----------
+
+def test_f01_byte_order_values_are_not_bare_order_ids():
+    # Codex's repro: the number after "byte order" IS the property
+    # (1234 vs 4321 are distinct byte-ordering encodings), so the
+    # F01 bare-order rule must preserve it verbatim — pre-fix both
+    # lines collapsed to 'Unsupported byte order <id>'.
+    assert normalize_issue("Unsupported byte order 1234") == \
+        "Unsupported byte order 1234"
+    assert normalize_issue("Unsupported byte order 4321") == \
+        "Unsupported byte order 4321"
+    assert normalize_issue("Unsupported byte order 1234") != \
+        normalize_issue("Unsupported byte order 4321")
+    # Positive control: the intended F01 case still normalizes, so
+    # distinct volatile payment order IDs share one template.
+    assert normalize_issue(
+        "Payment failed for order 58291: insufficient funds") == \
+        "Payment failed for order <id>: insufficient funds"
+    assert normalize_issue(
+        "Payment failed for order 69420: insufficient funds") == \
+        "Payment failed for order <id>: insufficient funds"
+
+
+def test_f01_byte_order_groups_stay_distinct_while_payment_orders_group(
+        tmp_path):
+    lines = (
+        [_log("ERROR", "Unsupported byte order 1234", "codec")] * 2
+        + [_log("ERROR", "Unsupported byte order 4321", "codec")] * 2
+        + [_log("ERROR", "Payment failed for order 58291: insufficient funds",
+                "payments")]
+        + [_log("ERROR", "Payment failed for order 69420: insufficient funds",
+                "payments")]
+    )
+    issues = analyze_log_file(str(_write(tmp_path, "f01b.log", lines)))["issues"]
+    # Two distinct byte-order groups (pre-fix they merged into one
+    # 'Unsupported byte order <id>' group of 4)...
+    assert issues["Unsupported byte order 1234"]["count"] == 2
+    assert issues["Unsupported byte order 4321"]["count"] == 2
+    # ...while the two volatile payment order IDs still group as one.
+    assert issues["Payment failed for order <id>: insufficient funds"][
+        "count"] == 2
+    assert len(issues) == 3

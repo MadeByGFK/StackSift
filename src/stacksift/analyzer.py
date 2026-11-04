@@ -487,7 +487,22 @@ _EXCEPTION_CAUSE = re.compile(
 # followed by a bare number with no field name (``order 58291``). This
 # is deliberately contextual: numbers anywhere else (status codes,
 # host/node names, ports, counts) are NOT touched by this rule.
-_BARE_ORDER_ID = re.compile(r"\border \d+\b")
+#
+# PR #137 finding 5: ``byte order <n>`` is a property context, NOT an
+# identifier context — the number encodes the byte-ordering property
+# itself (1234 vs 4321 are the classic little- vs big-endian
+# encodings), so distinct values are distinct failures and must be
+# preserved verbatim. The first alternative matches that phrase so
+# the substitution below can leave it untouched; only a bare
+# ``order <n>`` outside it is normalized.
+_BARE_ORDER_ID = re.compile(r"\b(?i:byte order) \d+\b|\border \d+\b")
+
+
+def _normalize_bare_order_id(match: re.Match) -> str:
+    text = match.group(0)
+    if text.lower().startswith("byte"):
+        return text
+    return "order <id>"
 
 
 def normalize_issue(message: str) -> str:
@@ -501,8 +516,9 @@ def normalize_issue(message: str) -> str:
         cause = msg[len(_WRAPPER_PREFIX):]
         if _EXCEPTION_CAUSE.match(cause):
             msg = cause
-    # 0b. F01: normalize volatile bare order identifiers in context.
-    msg = _BARE_ORDER_ID.sub("order <id>", msg)
+    # 0b. F01: normalize volatile bare order identifiers in context
+    #     (the byte-order property phrase is preserved verbatim).
+    msg = _BARE_ORDER_ID.sub(_normalize_bare_order_id, msg)
     # 1. Field-name-based: normalize the VALUE of known identifier fields,
     #    except fields that identify where it happened (node, host, ...).
     for field in _ID_FIELDS:

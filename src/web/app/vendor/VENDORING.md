@@ -61,6 +61,14 @@ released); and full severity-metadata retention
 evidence cannot contradict the combined issue. The #102 comparison
 collector's example lines get the same capture-time redaction.
 
+**PR #137 remediation — finding 5 (2026-11-03):** the F01
+bare-order normalization was fixed in BOTH copies in the same
+change: `byte order <n>` is a property context, not an identifier
+context — the number encodes the byte-ordering property itself
+(1234 vs 4321), so it is preserved verbatim and distinct byte
+orders stay distinct groups. Bare payment-style `order <n>`
+identifiers outside that phrase still normalize to `order <id>`.
+
 ## Import rewriting
 
 All `from stacksift.X import` statements have been rewritten to
