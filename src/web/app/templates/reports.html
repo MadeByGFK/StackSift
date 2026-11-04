@@ -451,7 +451,17 @@
       if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); }
       if (d._httpOk && d.share_url) { addActiveShareFormatFor(originBtn, createdFormat); }
       if (current !== originBtn) { return; }
-      if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
+      if (d._httpOk && d.share_url) {
+        // PR #138 remediation round 3: the user may have changed
+        // the selected format while this request was in flight.
+        // The per-format state above still applies to the captured
+        // format, but the popup display must reflect the format
+        // selected NOW: never show the captured format's URL under
+        // a different selection — refresh the buttons and message
+        // from the current selection instead.
+        if (createdFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else { shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
+      }
       else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
     });
   });
@@ -463,7 +473,13 @@
               originBtn.getAttribute('data-rotate-key')).then(function (d) {
       if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); }
       if (current !== originBtn) { return; }
-      if (d._httpOk && d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); }
+      if (d._httpOk && d.share_url) {
+        // PR #138 remediation round 3: as in create above, guard
+        // the response-time display against the format selected
+        // NOW, not the captured format.
+        if (rotatedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else { shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); }
+      }
       else { shareMsg.textContent = d.message || d.error || ''; }
     });
   });
@@ -483,9 +499,17 @@
       }
       if (current !== originBtn) { return; }
       if (revoked) {
-        shareMsg.textContent = 'Share link revoked.';
-        if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
-        setShareButtons(false);
+        // PR #138 remediation round 3: as in create above, the
+        // removal applies to the captured format, but the popup
+        // display (message, buttons, link row) must reflect the
+        // format selected NOW when it has changed while the
+        // request was in flight.
+        if (revokedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else {
+          shareMsg.textContent = 'Share link revoked.';
+          if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
+          setShareButtons(false);
+        }
       } else {
         shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
       }

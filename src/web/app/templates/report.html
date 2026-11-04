@@ -287,7 +287,19 @@
             var createdFormat = selectedShareFormat();
             postShare('/reports/{{ report_id }}/share', shareCreateKey).then(function (d) {
               if (d._httpOk) { shareCreateKey = freshShareKey(); }
-              if (d._httpOk && d.share_url) { addActiveShareFormat(createdFormat); shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
+              if (d._httpOk && d.share_url) {
+                addActiveShareFormat(createdFormat);
+                // PR #138 remediation round 3: the user may have
+                // changed the selected format while this request
+                // was in flight. The per-format state above still
+                // applies to the captured format, but the popup
+                // display must reflect the format selected NOW:
+                // never show the captured format's URL under a
+                // different selection — refresh the buttons and
+                // message from the current selection instead.
+                if (createdFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+                else { shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
+              }
               else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
             });
           });
@@ -298,7 +310,14 @@
             var rotatedFormat = selectedShareFormat();
             postShare('/reports/{{ report_id }}/share/rotate', shareRotateKey).then(function (d) {
               if (d._httpOk) { shareRotateKey = freshShareKey(); }
-              if (d._httpOk && d.share_url) { addActiveShareFormat(rotatedFormat); shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); setShareButtons(true); }
+              if (d._httpOk && d.share_url) {
+                addActiveShareFormat(rotatedFormat);
+                // PR #138 remediation round 3: as in create above,
+                // guard the response-time display against the
+                // format selected NOW, not the captured format.
+                if (rotatedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+                else { shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); setShareButtons(true); }
+              }
               else { shareMsg.textContent = d.message || d.error || ''; }
             });
           });
@@ -315,9 +334,17 @@
               if (d._httpOk && d.status === 'revoked') {
                 shareRevokeKey = freshShareKey();
                 removeActiveShareFormat(revokedFormat);
-                shareMsg.textContent = 'Share link revoked.';
-                if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
-                setShareButtons(false);
+                // PR #138 remediation round 3: as in create above,
+                // the removal applies to the captured format, but
+                // the popup display (message, buttons, link row)
+                // must reflect the format selected NOW when it has
+                // changed while the request was in flight.
+                if (revokedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+                else {
+                  shareMsg.textContent = 'Share link revoked.';
+                  if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
+                  setShareButtons(false);
+                }
               } else {
                 shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
               }
