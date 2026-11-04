@@ -99,6 +99,13 @@ COST_COMPARE = 3
 COST_RETENTION_EXTENSION = 1
 RETENTION_EXTENSION_DAYS = 90
 RETENTION_MAX_DAYS = 365
+# Issue #106 Stage 2: founder-ruled 2026-11-03 — an Analysis Report
+# costs 3 credits, charged on SUCCESS only (reserve during generation,
+# net -3 on success, full reversal on failure). "Deep-dive" is the
+# internal identifier only; user-facing copy says "Analysis Report".
+# This constant is the single source for consent, admission, UI copy
+# and error text; never duplicate the numeric price elsewhere.
+COST_DEEP_DIVE = 3
 
 # Signup reward (approved 2026-10-15)
 SIGNUP_REWARD_CREDITS = 3
@@ -125,6 +132,10 @@ RATE_LIMIT_SHARE_ACTIONS = 10
 RATE_LIMIT_OVERSIZE_ANALYSIS = 30
 # Issue #102: explicit 30/hour policy for compare, same reason.
 RATE_LIMIT_COMPARE = 30
+# Issue #106 Stage 2: explicit 10/hour policy for Analysis Report
+# generation (spec proposal, adjustable), so it never relies on
+# _consume_rate()'s unknown-policy fallback.
+RATE_LIMIT_DEEP_DIVE = 10
 
 # Consent validity
 CONSENT_TTL = timedelta(minutes=15)
@@ -756,6 +767,72 @@ def is_export_unlocked(db: Session, user_id, source_result_id) -> bool:
     return unlocked
 
 
+def analysis_key_belongs_to(key, source_result_id) -> bool:
+    """True when a deep_dive operation's key names this source report.
+
+    Canonical keys are ``analysis-{rid}-v1`` plus server ``-retry-``
+    suffixes; the report segment is compared canonically (uppercase /
+    unhyphenated UUID forms tolerated, as with export keys).
+    """
+    if not isinstance(key, str):
+        return False
+    rid = _canonical_uuid_str(source_result_id)
+    if rid is None:
+        rid = str(source_result_id)
+    base = f"analysis-{rid}-v1"
+    if key == base or key.startswith(base + "-retry-"):
+        return True
+    if key.startswith("analysis-"):
+        segment = key[len("analysis-"):].split("-v1", 1)[0]
+        return _canonical_uuid_str(segment) == rid
+    return False
+
+
+def analysis_operations(db: Session, user_id, source_result_id):
+    """All deep_dive operations belonging to one source report (#106)."""
+    ops = db.execute(
+        select(models.Operation).where(
+            models.Operation.user_id == user_id,
+            models.Operation.type == "deep_dive",
+        )
+    ).scalars().all()
+    return [
+        op for op in ops
+        if analysis_key_belongs_to(op.idempotency_key, source_result_id)
+    ]
+
+
+def completed_analysis_result_id(db: Session, user_id, source_result_id):
+    """The derived Analysis Report Result id for a source, or None.
+
+    F4 (PR #139 remediation): only return the id when the derived
+    Result is still available — it exists, is not deleted, and is
+    not expired. The derived report keeps its own 7-day life even
+    when the source is retention-extended, so an expired/deleted
+    derived report must not be linked (report_view would 410);
+    returning None restores the source's normal Analysis action.
+    Expiry/deletion semantics match reports_list/report_view:
+    ``expires_at > now`` and ``deleted_at is None``.
+    """
+    completed = [
+        op for op in analysis_operations(db, user_id, source_result_id)
+        if op.status == "completed" and op.result_id
+    ]
+    if not completed:
+        return None
+    latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
+    derived = db.get(models.Result, latest.result_id)
+    if derived is None:
+        return None
+    if derived.deleted_at is not None:
+        return None
+    if derived.expires_at is None:
+        return None
+    if _as_aware(derived.expires_at) <= _utcnow():
+        return None
+    return latest.result_id
+
+
 def lock_share_rate_bucket(db: Session, owner: str):
     """Ensure and lock FOR UPDATE the ``share:actions`` rate bucket.
 
@@ -802,6 +879,7 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
         "paid:structured_export": RATE_LIMIT_STRUCTURED_EXPORT,
         "paid:batch": RATE_LIMIT_BATCH,
         "paid:retention_extension": RATE_LIMIT_RETENTION_EXTENSION,
+        "paid:deep_dive": RATE_LIMIT_DEEP_DIVE,
         "share:actions": RATE_LIMIT_SHARE_ACTIONS,
     }.get(policy, 30)
     window_start = _utcnow().replace(minute=0, second=0, microsecond=0)

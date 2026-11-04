@@ -49,11 +49,12 @@
       <span class="badge {{ health.color }}">{{ health.label }}</span>
     </div>
     {% if current_user and report_id and not is_demo %}
-    {# Issue #129 + founder UI amendment (2026-11-03): the report page
-       keeps exactly two action buttons — Export and Share — with no
-       explanatory paragraphs. Extend and the share forms moved off
-       this page (My Reports row / the Share popup). Every action is
-       confirmed in a popup BEFORE any charge. #}
+    {# Issue #129 + founder UI amendments (2026-11-03): the report page
+       action row is Export · Analysis · Share (#106 Stage 2 added
+       Analysis after Export by explicit founder amendment to the
+       original exactly-two-buttons rule), with no explanatory
+       paragraphs. Extend moved to the My Reports row. Every charged
+       action is confirmed in a popup BEFORE any charge. #}
     <div class="report-actions" style="margin-top:1rem">
       <span style="display:inline-block;position:relative">
         <button type="button" class="btn-small" id="export-btn" aria-haspopup="true" aria-expanded="false">Export</button>
@@ -74,7 +75,31 @@
           {% endif %}
         </span>
       </span>
+      {# Issue #106 Stage 2 + founder placement amendment (2026-11-03):
+         Analysis sits AFTER Export — Export · Analysis · Share. The
+         click only opens the popup; Cancel/Escape changes no state;
+         Confirm is the charge point and results show in page. #}
+      {% if analysis_result_id %}
+      <a href="/reports/{{ analysis_result_id }}" class="btn-small" style="text-decoration:none">Analysis</a>
+      {% else %}
+      <button type="button" class="btn-small" id="analysis-btn">Analysis</button>
+      {% endif %}
       <button type="button" class="btn-small" id="share-btn">Share</button>
+
+      <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
+        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
+          {% if analysis_eligible %}
+          <p id="analysis-msg" style="margin:0 0 12px">Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.</p>
+          <div id="analysis-link-row" style="display:none;margin-bottom:12px">
+            <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
+          </div>
+          <button type="button" class="btn-small" id="analysis-confirm">Generate Analysis Report</button>
+          {% else %}
+          <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
+          {% endif %}
+          <button type="button" class="btn-small" id="analysis-close">Cancel</button>
+        </div>
+      </div>
 
       <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:340px">
@@ -355,6 +380,54 @@
           linkBox.select();
           if (navigator.clipboard) { navigator.clipboard.writeText(linkBox.value); }
         });
+        var analysisModal = document.getElementById('analysis-modal');
+        var analysisBtn = document.getElementById('analysis-btn');
+        if (analysisBtn && analysisModal) {
+          analysisBtn.addEventListener('click', function () {
+            analysisModal.style.display = 'flex';
+          });
+          document.getElementById('analysis-close').addEventListener('click', function () {
+            analysisModal.style.display = 'none';
+          });
+          var analysisConfirm = document.getElementById('analysis-confirm');
+          if (analysisConfirm) {
+            analysisConfirm.addEventListener('click', function () {
+              analysisConfirm.disabled = true;
+              var fd = new FormData();
+              fd.append('csrf_token', '{{ csrf_token }}');
+              fetch('/reports/{{ report_id }}/deep-dive', { method: 'POST', body: fd, credentials: 'same-origin' })
+                .then(function (r) {
+                  return r.json().then(function (d) { d = d || {}; d._httpStatus = r.status; return d; },
+                    function () { return { _httpStatus: r.status }; });
+                })
+                .then(function (d) {
+                  var msg = document.getElementById('analysis-msg');
+                  if (d.report_url) {
+                    msg.textContent = 'Analysis Report ready.';
+                    var row = document.getElementById('analysis-link-row');
+                    var link = document.getElementById('analysis-view');
+                    link.href = d.report_url;
+                    row.style.display = 'block';
+                    analysisConfirm.style.display = 'none';
+                  } else if (d._httpStatus === 402 && d.purchase_url) {
+                    msg.innerHTML = '';
+                    msg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
+                    var buy = document.createElement('a');
+                    buy.href = d.purchase_url;
+                    buy.textContent = 'Buy credits';
+                    msg.appendChild(buy);
+                    analysisConfirm.disabled = false;
+                  } else {
+                    msg.textContent = d.error || 'Analysis Report generation failed.';
+                    analysisConfirm.disabled = false;
+                  }
+                }, function () {
+                  document.getElementById('analysis-msg').textContent = 'Analysis Report generation failed.';
+                  analysisConfirm.disabled = false;
+                });
+            });
+          }
+        }
       })();
       </script>
     </div>

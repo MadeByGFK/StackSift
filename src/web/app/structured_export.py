@@ -49,15 +49,22 @@ def check_report_kind(payload):
 
     Existing single-file manifests carry no ``report_kind``; an explicit
     ``single``/``analysis`` discriminator is the verified single-file
-    shape. Anything else is deferred, before any charge.
+    shape. Issue #106 Stage 2: ``deep_dive`` (an Analysis Report
+    artifact) is exportable through its own human-readable projection
+    (see generate_export) — never as a raw internal dump. Anything
+    else is deferred, before any charge.
     """
     _require_payload_dict(payload)
     kind = payload.get("report_kind")
-    if kind is None or kind in ("single", "analysis"):
+    if kind is None or kind in ("single", "analysis", "deep_dive"):
         return
     raise UnsupportedReportKind(
         "Structured export is not yet supported for this report type"
     )
+
+
+def is_deep_dive_payload(payload) -> bool:
+    return isinstance(payload, dict) and payload.get("report_kind") == "deep_dive"
 
 
 def safe_download_name(source_filename, source_result_id, export_format):
@@ -83,7 +90,18 @@ def generate_export(payload, export_format, *, deadline_seconds=GENERATION_DEADL
     validate_format(export_format)
     check_report_kind(payload)
     started = clock()
-    if export_format == "csv":
+    if is_deep_dive_payload(payload):
+        # Issue #106 Stage 2: exports of an Analysis Report serve its
+        # public projection only — no internal evidence refs, digests
+        # or generator internals cross into a download.
+        from app import deep_dive as _dd
+        projection = _dd.public_projection(
+            _dd.validate_artifact(payload))
+        if export_format == "csv":
+            data = _dd.projection_to_csv(projection)
+        else:
+            data = _dd.projection_to_json(projection)
+    elif export_format == "csv":
         data = payload_to_csv(payload)
     else:
         data = payload_to_json(payload)
@@ -109,6 +127,9 @@ def validate_exportable(payload, export_format):
     """
     validate_format(export_format)
     check_report_kind(payload)
+    if is_deep_dive_payload(payload):
+        generate_export(payload, export_format)
+        return None
     if export_format == "csv":
         payload_to_csv(payload)
     else:

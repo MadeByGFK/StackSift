@@ -111,6 +111,9 @@ templates.env.globals["structured_export_cost"] = _credits_template_globals.COST
 # single ruled constants ("Extend 90 days — 1 credit").
 templates.env.globals["retention_extension_cost"] = _credits_template_globals.COST_RETENTION_EXTENSION
 templates.env.globals["retention_extension_days"] = _credits_template_globals.RETENTION_EXTENSION_DAYS
+# Issue #106 Stage 2: the Analysis Report price renders from the same
+# single ruled constant everywhere.
+templates.env.globals["analysis_report_cost"] = _credits_template_globals.COST_DEEP_DIVE
 
 # Phase 1: Auth routes (signup, login, OAuth, sessions, settings)
 app.include_router(auth_router)
@@ -2443,10 +2446,11 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     page = max(1, page)
     offset = (page - 1) * per_page
     # Issue #102: comparison reports (type "comparison") list alongside
-    # analyses; PDF-only results stay excluded.
+    # analyses; PDF-only results stay excluded. Issue #106 Stage 2:
+    # Analysis Reports (type "deep_dive") list as their own rows too.
     base_q = db.query(models.Result).filter(
         models.Result.user_id == _user.id,
-        models.Result.type.in_(["analysis", "comparison"]),
+        models.Result.type.in_(["analysis", "comparison", "deep_dive"]),
         models.Result.expires_at > now,
         models.Result.deleted_at.is_(None),
     )
@@ -2456,13 +2460,27 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     from app import credits as _credits_for_list
     reports = []
     for r in results:
+        _manifest_data = None
         try:
             manifest = json.loads(r.storage_manifest)
+            _manifest_data = manifest
             filename = manifest.get("filename", "Unknown file")
             report_kind = manifest.get("report_kind")
         except (json.JSONDecodeError, TypeError):
             filename = "Unknown file"
             report_kind = None
+        # Issue #106 Stage 2: row Analysis state — eligibility comes
+        # from the retained-evidence contract; a completed generation
+        # links straight to the derived report instead of re-charging.
+        _analysis_eligible, _analysis_reason = (False, None)
+        _analysis_result_id = None
+        if r.type == "analysis" and _manifest_data is not None:
+            from app import deep_dive as _dd_for_list
+            _analysis_eligible, _analysis_reason = \
+                _dd_for_list.eligibility_state(_manifest_data)
+            _done = _credits_for_list.completed_analysis_result_id(
+                db, _user.id, r.id)
+            _analysis_result_id = str(_done) if _done else None
         from app.credits import _as_aware
         _sharing_rows = db.query(models.ReportSharing).filter(
             models.ReportSharing.result_id == r.id).all()
@@ -2499,6 +2517,11 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             "share_formats": [
                 (row.share_format or "txt") for row in _sharing_rows
                 if row.token_hash and row.revoked_at is None],
+            # Founder UI amendment (2026-11-03): row actions are
+            # View / Export / Analysis / Share / Extend.
+            "analysis_eligible": _analysis_eligible,
+            "analysis_reason": _analysis_reason,
+            "analysis_result_id": _analysis_result_id,
         })
     return templates.TemplateResponse(request, "reports.html", {
         "reports": reports,
@@ -2533,7 +2556,7 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     result = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == _user.id,
-        models.Result.type.in_(["analysis", "comparison"]),
+        models.Result.type.in_(["analysis", "comparison", "deep_dive"]),
         models.Result.deleted_at.is_(None),
     ).first()
     if not result:
@@ -2552,10 +2575,23 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     data["csrf_token"] = _csrf
     data["report_id"] = str(result.id)
     data["is_historical"] = True
+    # Issue #106 Stage 2: an Analysis Report renders its own template
+    # from the public projection only (no internal refs/digests).
+    if result.type == "deep_dive":
+        from app import deep_dive as _dd_view
+        try:
+            _artifact = _dd_view.validate_artifact(data)
+            data["analysis_projection"] = _dd_view.public_projection(_artifact)
+        except _dd_view.AnalysisError:
+            return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+        data["export_unlocked"] = credits_helpers.is_export_unlocked(
+            db, _user.id, result.id)
+        return templates.TemplateResponse(
+            request, "deep_dive_report.html", data)
     # Issue #105: existing structured-export artifacts for this source get
     # free re-download links on the report page (artifact's own expiry,
     # validated on the download route itself).
-    if result.type == "analysis" and not data.get("report_kind"):
+    if (result.type == "analysis" and not data.get("report_kind")) or result.type == "deep_dive":
         from datetime import datetime as _dt, timezone as _tz
         _arts = db.query(models.Result).filter(
             models.Result.user_id == _user.id,
@@ -2602,6 +2638,16 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         # the per-report unlock state (2 credits once, then free).
         data["export_unlocked"] = credits_helpers.is_export_unlocked(
             db, _user.id, result.id)
+        # Issue #106 Stage 2: Analysis action state (founder placement
+        # amendment: report page is Export / Analysis / Share). Legacy
+        # reports explain unavailability before any charge; a completed
+        # generation links to the derived report.
+        from app import deep_dive as _dd_page
+        data["analysis_eligible"], data["analysis_reason"] = \
+            _dd_page.eligibility_state(data)
+        _done_id = credits_helpers.completed_analysis_result_id(
+            db, _user.id, result.id)
+        data["analysis_result_id"] = str(_done_id) if _done_id else None
     # Older manifests predate the elapsed field; the template requires it.
     data.setdefault("elapsed", 0.0)
     if result.type == "comparison":
@@ -2658,10 +2704,12 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
 
     # Issue #102: PDF export also serves comparison reports (2 credits,
     # standard price); the renderer branches on the result type below.
+    # Issue #106 Stage 2: Analysis Reports export under the SAME #129
+    # per-report unlock (no separate Analysis PDF price).
     result = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == user.id,
-        models.Result.type.in_(["analysis", "comparison"]),
+        models.Result.type.in_(["analysis", "comparison", "deep_dive"]),
         models.Result.deleted_at.is_(None),
     ).first()
     if not result:
@@ -2785,6 +2833,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         from app.pdf_export import generate_report_pdf as _gen_pdf
         from app.pdf_export import generate_comparison_pdf as _gen_cmp_pdf
         from app.pdf_export import generate_batch_pdf as _gen_batch_pdf
+        from app.pdf_export import generate_deep_dive_pdf as _gen_dd_pdf
         try:
             _manifest_data = credits_helpers.result_payload(
                 result, user_id=user.id,
@@ -2792,7 +2841,9 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                 free_request_id=result.free_request_id,
             )
             _filename = _manifest_data.get("filename", "report")
-            if _manifest_data.get("report_kind") == "batch":
+            if result.type == "deep_dive":
+                _pdf_bytes = _gen_dd_pdf(result.storage_manifest, _filename)
+            elif _manifest_data.get("report_kind") == "batch":
                 _pdf_bytes = _gen_batch_pdf(result.storage_manifest, _filename)
             elif result.type == "comparison":
                 _pdf_bytes = _gen_cmp_pdf(result.storage_manifest, _filename)
@@ -2829,7 +2880,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=409)
 
-    from app.pdf_export import generate_report_pdf, generate_comparison_pdf, generate_batch_pdf
+    from app.pdf_export import generate_report_pdf, generate_comparison_pdf, generate_batch_pdf, generate_deep_dive_pdf
     try:
         # Validate source result integrity before generating PDF
         manifest_data = credits_helpers.result_payload(
@@ -2838,7 +2889,9 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
             free_request_id=result.free_request_id,
         )
         filename = manifest_data.get("filename", "report")
-        if manifest_data.get("report_kind") == "batch":
+        if result.type == "deep_dive":
+            pdf_bytes = generate_deep_dive_pdf(result.storage_manifest, filename)
+        elif manifest_data.get("report_kind") == "batch":
             # Issue #103 (trim B5): ONE 2-credit export for the whole
             # combined artifact — the charge above is the standard
             # single COST_PDF admission for this operation.
@@ -2950,7 +3003,7 @@ async def report_export_structured(request: Request, result_id: str, export_form
     source = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == user.id,
-        models.Result.type.in_(("analysis", "comparison")),
+        models.Result.type.in_(("analysis", "comparison", "deep_dive")),
         models.Result.deleted_at.is_(None),
     ).first()
     if not source:
@@ -3277,6 +3330,221 @@ async def structured_export_download(request: Request, export_id: str, db=Depend
         return JSONResponse({"error": "Export has expired or is no longer available"}, status_code=410)
     manifest = dict(manifest, _artifact_id=str(artifact.id))
     return _structured_export_response(export_bytes, manifest)
+
+
+# ---------------------------------------------------------------------------
+# Issue #106 Stage 2: Analysis Report generation.
+#
+# POST /reports/{id}/deep-dive — 3 credits (COST_DEEP_DIVE), charged on
+# SUCCESS only: reserve -> generate from the retained-evidence snapshot
+# -> store + complete in one settlement; full release on any failure.
+# Canonical identity is owner + source UUID/digest + grouping/evidence/
+# generator/schema versions; the same identity replays the saved
+# artifact free and never re-charges. Legacy (pre-evidence) sources,
+# comparisons, batches and Analysis Reports themselves reject with 422
+# BEFORE any reservation. The derived report is a distinct Result of
+# type "deep_dive" with its own 7-day retention and its own #129
+# export unlock; the source report is never modified.
+# ---------------------------------------------------------------------------
+
+@app.post("/reports/{result_id}/deep-dive")
+async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db)):
+    """Generate the paid Analysis Report for a completed owned report."""
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import deep_dive as dd
+    from datetime import datetime, timezone
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return err
+
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+
+    source = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not source:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    # An Analysis Report cannot be generated from another Analysis
+    # Report, a comparison or a batch (spec: reject before reservation).
+    if source.type != "analysis":
+        return JSONResponse(
+            {"error": "Analysis Reports are not available for this report type"},
+            status_code=422)
+    if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    try:
+        payload = credits_helpers.result_payload(
+            source, user_id=user.id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+
+    # Kind + evidence gates BEFORE any reservation or charge.
+    try:
+        dd.check_eligibility(payload)
+    except dd.UnsupportedReportKind:
+        return JSONResponse(
+            {"error": "Analysis Reports are not available for this report type"},
+            status_code=422)
+    except dd.InsufficientEvidence as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+    cost = credits_helpers.COST_DEEP_DIVE
+    request_hash = dd.analysis_request_hash(source, payload)
+    base_key = f"analysis-{rid}-v1"
+
+    # Serialize discovery + admission under the global:paid lock (the
+    # first scope admit_paid_operation locks), held through the
+    # admission commit — the structured-export pattern (PR #125 F1).
+    credits_helpers.lock_global_paid_scope(db)
+    attempts = credits_helpers.analysis_operations(db, user.id, rid)
+    if any(op.status == "reserved" for op in attempts):
+        db.rollback()
+        return JSONResponse(
+            {"error": "Analysis Report generation already in progress. "
+                      "Please wait and try again."},
+            status_code=409)
+    completed = [op for op in attempts
+                 if op.status == "completed" and op.result_id
+                 and op.request_hash == request_hash]
+    if completed:
+        latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
+        artifact = db.get(models.Result, latest.result_id)
+        if artifact is not None:
+            try:
+                manifest = credits_helpers.result_payload(
+                    artifact, user_id=user.id, operation_id=latest.id)
+                dd.validate_artifact(
+                    manifest, expected_source_id=rid,
+                    expected_source_integrity_digest=source.integrity_digest)
+            except Exception:
+                db.rollback()
+                return JSONResponse(
+                    {"error": "Previously generated Analysis Report is "
+                              "no longer available."},
+                    status_code=410)
+            db.rollback()
+            return JSONResponse({
+                "status": "completed",
+                "analysis_result_id": str(artifact.id),
+                "report_url": f"/reports/{artifact.id}",
+                "cost": cost,
+                "replayed": True,
+            })
+        db.rollback()
+        return JSONResponse(
+            {"error": "Previously generated Analysis Report is no longer available."},
+            status_code=410)
+
+    # A completed attempt under a DIFFERENT canonical identity (e.g. a
+    # generator-version bump) never auto-charges on view, but this
+    # explicit Confirm POST is the new purchase the spec requires: it
+    # gets a fresh retry identity instead of replaying.
+    has_prior = any(
+        op.status in ("failed", "expired") for op in attempts) or any(
+        op.status == "completed" for op in attempts)
+    idempotency_key = (
+        f"{base_key}-retry-{_uuid.uuid4().hex[:8]}" if has_prior else base_key)
+
+    if credits_helpers.get_eligible_credits(db, user.id) < cost:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Analysis Report costs "
+                      f"{cost} credits.",
+             "purchase_url": "/credits"},
+            status_code=402)
+
+    consent = credits_helpers.create_consent(
+        db, user_id=user.id, operation_type="deep_dive",
+        input_hash=request_hash, max_cost=cost,
+    )
+    db.flush()
+    worker_id = f"deep-dive-{_uuid.uuid4().hex[:8]}"
+    try:
+        op = credits_helpers.admit_paid_operation(
+            db, user_id=user.id, operation_type="deep_dive",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            cost=cost, consent_id=consent.id, worker_id=worker_id,
+        )
+        if op.worker_id != worker_id or op.status != "reserved":
+            db.rollback()
+            return JSONResponse(
+                {"error": "Analysis Report generation already in progress. "
+                          "Please wait and try again."},
+                status_code=409)
+        db.commit()
+    except credits_helpers.InsufficientCredits:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Analysis Report costs "
+                      f"{cost} credits.",
+             "purchase_url": "/credits"},
+            status_code=402)
+    except credits_helpers.AdmissionError as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+    def _release(failure_code, exc=None):
+        import logging as _logging
+        if exc is not None:
+            _logging.getLogger(__name__).exception(
+                "Analysis Report failed (%s)", failure_code,
+                exc_info=(type(exc), exc, exc.__traceback__))
+        try:
+            credits_helpers.release_operation(
+                db, op.id, worker_id, str(failure_code)[:50])
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    # Generation runs on the validated snapshot only (no re-parse).
+    try:
+        artifact_data = dd.build_deep_dive(
+            payload, source_result_id=rid,
+            source_integrity_digest=source.integrity_digest)
+    except Exception as e:
+        _release("generation_failed", e)
+        return JSONResponse(
+            {"error": "Analysis Report generation failed"}, status_code=500)
+
+    try:
+        artifact = credits_helpers.store_result(
+            db, user.id, op.id, artifact_data, result_type="deep_dive",
+            severity=source.severity if source.severity is not None
+            else "__default__")
+        credits_helpers.complete_operation(
+            db, op.id, worker_id, result_id=artifact.id,
+            lease_generation=op.lease_generation)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        _release("storage_failed", e)
+        return JSONResponse(
+            {"error": "Failed to store Analysis Report"}, status_code=500)
+
+    return JSONResponse({
+        "status": "completed",
+        "analysis_result_id": str(artifact.id),
+        "report_url": f"/reports/{artifact.id}",
+        "cost": cost,
+    })
 
 
 # ---------------------------------------------------------------------------
