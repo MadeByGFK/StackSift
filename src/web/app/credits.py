@@ -803,7 +803,17 @@ def analysis_operations(db: Session, user_id, source_result_id):
 
 
 def completed_analysis_result_id(db: Session, user_id, source_result_id):
-    """The derived Analysis Report Result id for a source, or None."""
+    """The derived Analysis Report Result id for a source, or None.
+
+    F4 (PR #139 remediation): only return the id when the derived
+    Result is still available — it exists, is not deleted, and is
+    not expired. The derived report keeps its own 7-day life even
+    when the source is retention-extended, so an expired/deleted
+    derived report must not be linked (report_view would 410);
+    returning None restores the source's normal Analysis action.
+    Expiry/deletion semantics match reports_list/report_view:
+    ``expires_at > now`` and ``deleted_at is None``.
+    """
     completed = [
         op for op in analysis_operations(db, user_id, source_result_id)
         if op.status == "completed" and op.result_id
@@ -811,6 +821,15 @@ def completed_analysis_result_id(db: Session, user_id, source_result_id):
     if not completed:
         return None
     latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
+    derived = db.get(models.Result, latest.result_id)
+    if derived is None:
+        return None
+    if derived.deleted_at is not None:
+        return None
+    if derived.expires_at is None:
+        return None
+    if _as_aware(derived.expires_at) <= _utcnow():
+        return None
     return latest.result_id
 
 

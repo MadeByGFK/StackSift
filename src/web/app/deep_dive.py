@@ -202,7 +202,18 @@ def _claim(text, refs):
 
 def _symptom_and_cause(template: str, refs):
     low = template.lower()
-    if "refused" in low:
+    # F1 (PR #139 remediation): predicates must require BOTH the
+    # relevant context AND failure semantics. A bare "refused" (e.g.
+    # "Payment refused by fraud policy") does not establish a refused
+    # network connection, and a bare "exhausted" (e.g. "Disk space
+    # exhausted") or a bare pool mention (e.g. "Connection pool
+    # reconfigured successfully") does not establish pool exhaustion.
+    # Unsupported shapes fall through to the default/abstention
+    # branch below.
+    _has_connection_context = (
+        "connection" in low or "connect" in low)
+    _has_refused_failure = "refused" in low
+    if _has_refused_failure and _has_connection_context:
         return (
             "The retained messages record connection attempts that "
             "were refused by the destination.",
@@ -222,7 +233,13 @@ def _symptom_and_cause(template: str, refs):
             "Check the recorded time span for this group and whether "
             "the same service shows related timeout messages.",
         )
-    if "exhausted" in low or "pool" in low and "connection" in low:
+    _has_pool_context = "pool" in low
+    _has_exhaustion_failure = (
+        "exhausted" in low or "exhaustion" in low
+        or "no connections available" in low
+        or "no available connections" in low
+        or "out of connections" in low)
+    if _has_pool_context and _has_exhaustion_failure:
         return (
             "The retained messages record a resource pool reporting "
             "that it was exhausted.",

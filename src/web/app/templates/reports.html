@@ -193,7 +193,15 @@
           <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-reason="{{ report.analysis_reason or '' }}">Analysis</button>
           {% endif %}
         {% endif %}
+        {# Issue #106 Stage 2 / PR #139 F2: no Share for Analysis
+           Report rows — sharing is defined for source reports only
+           and _share_owner_gate admits only analysis/comparison, so
+           a Share button on a deep_dive row always 404s (dead
+           button). Mirrors the Extend suppression below; the
+           server-side 404 rejection is retained. #}
+        {% if report.type != 'deep_dive' %}
         <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
+        {% endif %}
         {# Issue #106 Stage 2: no Extend for Analysis Report rows —
            the retention route admits only analysis/comparison
            sources, so an Extend form on a deep_dive row would POST
@@ -573,16 +581,26 @@
     analysisModal.style.display = 'none';
   });
   analysisConfirm.addEventListener('click', function () {
-    if (!analysisCurrent) { return; }
+    // PR #139 F3: capture the ORIGINATING button/report at request
+    // start, mirroring the share popup's originating-button capture
+    // (PR #132 finding 6 above). The shared analysis modal must
+    // only be written when the popup still belongs to that report;
+    // a stale response for report A must never overwrite report
+    // B's popup (result link, failure, or 402 message) or hide
+    // B's Generate button.
+    var originBtn = analysisCurrent;
+    if (!originBtn) { return; }
+    var originReportId = originBtn.getAttribute('data-report');
     analysisConfirm.disabled = true;
     var fd = new FormData();
     fd.append('csrf_token', '{{ csrf_token }}');
-    fetch('/reports/' + analysisCurrent.getAttribute('data-report') + '/deep-dive', { method: 'POST', body: fd, credentials: 'same-origin' })
+    fetch('/reports/' + originReportId + '/deep-dive', { method: 'POST', body: fd, credentials: 'same-origin' })
       .then(function (r) {
         return r.json().then(function (d) { d = d || {}; d._httpStatus = r.status; return d; },
           function () { return { _httpStatus: r.status }; });
       })
       .then(function (d) {
+        if (analysisCurrent !== originBtn) { return; }
         if (d.report_url) {
           analysisMsg.textContent = 'Analysis Report ready.';
           var link = document.getElementById('analysis-view');
@@ -602,6 +620,7 @@
           analysisConfirm.disabled = false;
         }
       }, function () {
+        if (analysisCurrent !== originBtn) { return; }
         analysisMsg.textContent = 'Analysis Report generation failed.';
         analysisConfirm.disabled = false;
       });
