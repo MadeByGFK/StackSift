@@ -309,10 +309,18 @@ def _create_share_token(auth_env, rid, csrf, key="followup-share-1"):
 
 def test_shared_pdf_expired_legacy_uppercase_key_returns_identical_404(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
-    token = _create_share_token(auth_env, rid, csrf)
     anon = _anon_client()
     pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    # Issue #135: the PDF is shared through a pdf-FORMAT link (the
+    # export above unlocked the report, so creation is allowed).
+    resp = auth_env.client.post(
+        f"/reports/{rid}/share",
+        data={"csrf_token": csrf, "idempotency_key": "followup-pdf-share-1",
+              "format": "pdf"})
+    assert resp.status_code == 200, resp.text[:400]
+    import re as _re
+    token = _re.search(r"([0-9a-f]{64})", resp.json()["share_url"]).group(1)
     # Legacy storage: the completed PDF operation's key carries the
     # noncanonical uppercase report segment.
     _rewrite_pdf_op_key(auth_env, user_id, f"pdf-{str(rid).upper()}")

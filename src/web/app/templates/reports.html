@@ -182,7 +182,7 @@
             {% endif %}
           </span>
         </span>
-        <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}">Share</button>
+        <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
         <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
@@ -232,6 +232,16 @@
 <div id="share-modal" class="modal" style="display:none">
   <div class="modal-card">
     <p id="share-msg"></p>
+    {# Issue #135: format choice — TXT free; PDF/JSON/CSV locked
+       until the report's export unlock (the server refuses locked
+       formats with 402 until the unlock is bought via Export). #}
+    <fieldset id="share-format-choice" style="border:none;margin:0 0 12px;padding:0">
+      <legend style="margin-bottom:6px">Format</legend>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="txt" checked> TXT (free)</label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="pdf"> PDF<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="json"> JSON<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="csv"> CSV<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+    </fieldset>
     <div id="share-link-row" style="display:none;margin-bottom:12px">
       <input type="text" id="share-link" readonly>
       <button type="button" class="btn btn-ghost" id="share-copy">Copy link</button>
@@ -299,14 +309,67 @@
     revokeBtn.style.display = active ? '' : 'none';
   }
   var current = null;
+  // PR #138 remediation (finding 1): share state is PER FORMAT, not
+  // report-wide. Each row button carries data-formats (the formats
+  // with an active link for that report); the shared popup's
+  // Create/Rotate/Revoke visibility follows the SELECTED format for
+  // the CURRENT report, so a second format's link can be created
+  // without revoking the first.
+  function activeFormatsFor(btn) {
+    var raw = btn ? btn.getAttribute('data-formats') : '';
+    return raw ? raw.split(',').filter(function (f) { return f; }) : [];
+  }
+  function setActiveFormatsFor(btn, formats) {
+    if (!btn) { return; }
+    btn.setAttribute('data-formats', formats.join(','));
+    btn.setAttribute('data-active', formats.length ? '1' : '');
+  }
+  function shareFormatIsActiveFor(btn, fmt) {
+    return activeFormatsFor(btn).indexOf(fmt) !== -1;
+  }
+  function addActiveShareFormatFor(btn, fmt) {
+    var formats = activeFormatsFor(btn);
+    if (formats.indexOf(fmt) === -1) { formats.push(fmt); }
+    setActiveFormatsFor(btn, formats);
+  }
+  function removeActiveShareFormatFor(btn, fmt) {
+    setActiveFormatsFor(btn, activeFormatsFor(btn).filter(function (f) { return f !== fmt; }));
+  }
+  // PR #138 remediation round 2: track which format the URL
+  // currently shown in the link row belongs to (for the report in
+  // `current`). The server renders no per-format URLs into this
+  // page, so on a format change the row may be shown only for that
+  // format; any other format's URL must be hidden AND cleared so
+  // it can neither be copied/distributed under the wrong format
+  // nor resurrected by switching back. Reset on every popup open.
+  var displayedShareFormat = null;
+  function clearDisplayedLink() {
+    displayedShareFormat = null;
+    linkBox.value = '';
+    mailto.href = 'mailto:';
+    linkRow.style.display = 'none';
+  }
+  function refreshShareButtonsForSelectedFormat() {
+    if (!current) { return; }
+    var fmt = selectedShareFormat();
+    var active = shareFormatIsActiveFor(current, fmt);
+    setShareButtons(active);
+    if (displayedShareFormat !== fmt) {
+      clearDisplayedLink();
+    } else if (linkBox.value) {
+      linkRow.style.display = 'block';
+    }
+    shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+  }
   function resolveShareUrl(url) {
     // PR #132 finding 3: the server returns a hostless /s/<token>
     // path when APP_BASE_URL is unset; resolve it against this
     // origin before it reaches the copy field or the mailto body.
     return new URL(url, window.location.origin).href;
   }
-  function showLink(url) {
+  function showLink(url, fmt) {
     var absoluteUrl = resolveShareUrl(url);
+    displayedShareFormat = fmt || selectedShareFormat();
     linkBox.value = absoluteUrl;
     mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(absoluteUrl);
     linkRow.style.display = 'block';
@@ -325,10 +388,18 @@
     }
     return hex;
   }
+  function selectedShareFormat() {
+    var el = document.querySelector('input[name="share-format"]:checked');
+    return el ? el.value : 'txt';
+  }
+  document.querySelectorAll('input[name="share-format"]').forEach(function (el) {
+    el.addEventListener('change', refreshShareButtonsForSelectedFormat);
+  });
   function postShare(path, key) {
     var fd = new FormData();
     fd.append('csrf_token', '{{ csrf_token }}');
     fd.append('idempotency_key', key);
+    fd.append('format', selectedShareFormat());
     return fetch(path, { method: 'POST', body: fd, credentials: 'same-origin' })
       .then(function (r) {
         // PR #132 finding 2: keep the HTTP status with the payload
@@ -348,12 +419,18 @@
   document.querySelectorAll('.share-open').forEach(function (btn) {
     btn.addEventListener('click', function () {
       current = btn;
-      linkRow.style.display = 'none';
-      var active = btn.getAttribute('data-active') === '1';
+      clearDisplayedLink();
+      var txtRadio = document.querySelector('input[name="share-format"][value="txt"]');
+      if (txtRadio) { txtRadio.checked = true; }
+      var active = shareFormatIsActiveFor(btn, 'txt');
       createBtn.style.display = active ? 'none' : '';
       rotateBtn.style.display = active ? '' : 'none';
       revokeBtn.style.display = active ? '' : 'none';
       shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+      var unlocked = btn.getAttribute('data-unlocked') === '1';
+      document.querySelectorAll('.share-lock-note').forEach(function (n) {
+        n.style.display = unlocked ? 'none' : '';
+      });
       shareModal.style.display = 'flex';
     });
   });
@@ -368,29 +445,48 @@
   createBtn.addEventListener('click', function () {
     var originBtn = current;
     if (!originBtn) { return; }
+    var createdFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share',
               originBtn.getAttribute('data-create-key')).then(function (d) {
       if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); }
-      if (d._httpOk && d.share_url) { originBtn.setAttribute('data-active', '1'); }
+      if (d._httpOk && d.share_url) { addActiveShareFormatFor(originBtn, createdFormat); }
       if (current !== originBtn) { return; }
-      if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); setShareButtons(true); }
+      if (d._httpOk && d.share_url) {
+        // PR #138 remediation round 3: the user may have changed
+        // the selected format while this request was in flight.
+        // The per-format state above still applies to the captured
+        // format, but the popup display must reflect the format
+        // selected NOW: never show the captured format's URL under
+        // a different selection — refresh the buttons and message
+        // from the current selection instead.
+        if (createdFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else { shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
+      }
       else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
     });
   });
   rotateBtn.addEventListener('click', function () {
     var originBtn = current;
     if (!originBtn) { return; }
+    var rotatedFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share/rotate',
               originBtn.getAttribute('data-rotate-key')).then(function (d) {
       if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); }
       if (current !== originBtn) { return; }
-      if (d._httpOk && d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url); }
+      if (d._httpOk && d.share_url) {
+        // PR #138 remediation round 3: as in create above, guard
+        // the response-time display against the format selected
+        // NOW, not the captured format.
+        if (rotatedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else { shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); }
+      }
       else { shareMsg.textContent = d.message || d.error || ''; }
     });
   });
   revokeBtn.addEventListener('click', function () {
     var originBtn = current;
     if (!originBtn) { return; }
+    var revokedFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share/revoke',
               originBtn.getAttribute('data-revoke-key')).then(function (d) {
       // PR #132 finding 2: claim "revoked" only when the server
@@ -399,13 +495,21 @@
       var revoked = d._httpOk && d.status === 'revoked';
       if (revoked) {
         originBtn.setAttribute('data-revoke-key', freshShareKey());
-        originBtn.setAttribute('data-active', '');
+        removeActiveShareFormatFor(originBtn, revokedFormat);
       }
       if (current !== originBtn) { return; }
       if (revoked) {
-        shareMsg.textContent = 'Share link revoked.';
-        linkRow.style.display = 'none';
-        setShareButtons(false);
+        // PR #138 remediation round 3: as in create above, the
+        // removal applies to the captured format, but the popup
+        // display (message, buttons, link row) must reflect the
+        // format selected NOW when it has changed while the
+        // request was in flight.
+        if (revokedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else {
+          shareMsg.textContent = 'Share link revoked.';
+          if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
+          setShareButtons(false);
+        }
       } else {
         shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
       }

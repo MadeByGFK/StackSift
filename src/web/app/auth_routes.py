@@ -199,6 +199,60 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
     balance_summary = credits_helpers.get_balance_summary(db, user.id)
     purchases = credits_helpers.list_completed_purchases(db, user.id)
     pack_names = {pid: p["name"] for pid, p in stripe_billing_helpers.PACKS.items()}
+    # Issue #135: Report Access — every ACTIVE share link for this
+    # account (report, format, created time, copyable live link).
+    # Links whose report has expired or been deleted serve nothing,
+    # so they are not listed as active. The raw token is shown ONLY
+    # here, to the owner; public lookup uses the stored hash.
+    import json as _json
+    import os as _os
+    from datetime import datetime as _dt, timezone as _tz
+
+    from app import models as _models
+
+    _origin = _os.environ.get("APP_BASE_URL", "").rstrip("/")
+    share_links = []
+    # PR #138 remediation (finding 2): do NOT filter on raw_token —
+    # active pre-#135 legacy rows have raw_token NULL (the token was
+    # never stored) yet their links still serve, so they must be
+    # listed (as txt) with a working revoke. Their URL is simply not
+    # recoverable; the template renders an explicit note for them.
+    _sharings = (
+        db.query(_models.ReportSharing)
+        .filter(
+            _models.ReportSharing.owner_user_id == user.id,
+            _models.ReportSharing.revoked_at.is_(None),
+            _models.ReportSharing.token_hash.isnot(None),
+        )
+        .order_by(_models.ReportSharing.created_at.desc())
+        .all()
+    )
+    for _row in _sharings:
+        _result = db.get(_models.Result, _row.result_id)
+        if _result is None or _result.deleted_at is not None:
+            continue
+        _expires = _result.expires_at
+        if _expires is not None and _expires.tzinfo is None:
+            _expires = _expires.replace(tzinfo=_tz.utc)
+        if _expires is not None and _expires <= _dt.now(_tz.utc):
+            continue
+        try:
+            _filename = _json.loads(_result.storage_manifest).get(
+                "filename", "Report")
+        except (ValueError, TypeError, AttributeError):
+            _filename = "Report"
+        share_links.append({
+            "id": str(_row.id),
+            "result_id": str(_row.result_id),
+            "report": _filename,
+            "format": (_row.share_format or "txt"),
+            "created_at": _row.created_at,
+            # Legacy rows (raw_token NULL) have no recoverable URL:
+            # url stays None and the template renders the explicit
+            # not-recoverable note instead of a broken link.
+            "url": f"{_origin}/s/{_row.raw_token}" if _row.raw_token else None,
+            "link_recoverable": bool(_row.raw_token),
+        })
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -212,6 +266,7 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "balance_summary": balance_summary,
             "purchases": purchases,
             "pack_names": pack_names,
+            "share_links": share_links,
         },
     )
 
