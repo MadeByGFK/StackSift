@@ -29,6 +29,31 @@ from app import auth, credits, models
 TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SHARE_PATH_PATTERN = re.compile(r"/s/[0-9a-f]{64}")
 
+# Issue #135: the formats a share link can serve. TXT is free; the
+# other three require the report's #129 export unlock at creation.
+SHARE_FORMATS = ("pdf", "txt", "json", "csv")
+GATED_SHARE_FORMATS = ("pdf", "json", "csv")
+DEFAULT_SHARE_FORMAT = "txt"
+
+
+def normalize_share_format(value) -> str | None:
+    """Canonical share format for a request value, or None if invalid.
+
+    A missing/empty value defaults to txt (the free text share, and
+    the format pre-#135 clients created implicitly)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return DEFAULT_SHARE_FORMAT
+    if not isinstance(value, str):
+        return None
+    fmt = value.strip().lower()
+    return fmt if fmt in SHARE_FORMATS else None
+
+
+def share_format_of(sharing) -> str:
+    """The format a sharing row serves; NULL (pre-#135) reads as txt."""
+    fmt = getattr(sharing, "share_format", None)
+    return fmt if fmt in SHARE_FORMATS else DEFAULT_SHARE_FORMAT
+
 
 def share_limit_key(ip: str) -> str:
     """Isolated limiter key for public share traffic (draft §7)."""
@@ -233,8 +258,13 @@ class SharePathRedactionFilter(logging.Filter):
         return True
 
 
-def action_request_hash(source_result, action_kind: str) -> str:
-    """Canonical request hash binding an action to the source snapshot."""
+def action_request_hash(source_result, action_kind: str,
+                        share_format: str | None = None) -> str:
+    """Canonical request hash binding an action to the source snapshot.
+
+    Issue #135: share actions also bind the link format, so replaying
+    a create key with a DIFFERENT format is a key-reuse conflict
+    (409), never a silent second link under the same key."""
     return credits.hash_input(json.dumps(
         {
             "action_kind": action_kind,
@@ -242,6 +272,7 @@ def action_request_hash(source_result, action_kind: str) -> str:
             "source_integrity_digest": source_result.integrity_digest,
             "unit_days": credits.RETENTION_EXTENSION_DAYS
             if action_kind == "retention_extension" else None,
+            "share_format": share_format,
             "version": 1,
         },
         sort_keys=True, separators=(",", ":"),

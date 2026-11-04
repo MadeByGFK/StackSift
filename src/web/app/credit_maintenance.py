@@ -94,14 +94,16 @@ def cleanup_results(db):
     # expired/deleted reports in the same commit. Read-time expiry checks
     # on the share route are the primary guard; this only ensures a stale
     # hash does not linger. Entitlement-free sharing rows and the
-    # ReportAction audit identities are preserved (hashes only, no raw
-    # tokens exist to leak).
+    # ReportAction audit identities are preserved. Issue #135 adds a
+    # raw_token column (Settings redisplay), cleared here together
+    # with the hash so no usable token lingers for an expired report.
     if expired_ids:
         sharings = db.scalars(select(M.ReportSharing).where(
             M.ReportSharing.result_id.in_(expired_ids),
             M.ReportSharing.token_hash.isnot(None)))
         for sharing in sharings:
             sharing.token_hash = None
+            sharing.raw_token = None
             sharing.revoked_at = C._utcnow()
             sharing.generation += 1
     db.commit()

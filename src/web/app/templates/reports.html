@@ -182,7 +182,7 @@
             {% endif %}
           </span>
         </span>
-        <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}">Share</button>
+        <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
         <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
@@ -232,6 +232,16 @@
 <div id="share-modal" class="modal" style="display:none">
   <div class="modal-card">
     <p id="share-msg"></p>
+    {# Issue #135: format choice — TXT free; PDF/JSON/CSV locked
+       until the report's export unlock (the server refuses locked
+       formats with 402 until the unlock is bought via Export). #}
+    <fieldset id="share-format-choice" style="border:none;margin:0 0 12px;padding:0">
+      <legend style="margin-bottom:6px">Format</legend>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="txt" checked> TXT (free)</label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="pdf"> PDF<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="json"> JSON<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="csv"> CSV<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+    </fieldset>
     <div id="share-link-row" style="display:none;margin-bottom:12px">
       <input type="text" id="share-link" readonly>
       <button type="button" class="btn btn-ghost" id="share-copy">Copy link</button>
@@ -325,10 +335,15 @@
     }
     return hex;
   }
+  function selectedShareFormat() {
+    var el = document.querySelector('input[name="share-format"]:checked');
+    return el ? el.value : 'txt';
+  }
   function postShare(path, key) {
     var fd = new FormData();
     fd.append('csrf_token', '{{ csrf_token }}');
     fd.append('idempotency_key', key);
+    fd.append('format', selectedShareFormat());
     return fetch(path, { method: 'POST', body: fd, credentials: 'same-origin' })
       .then(function (r) {
         // PR #132 finding 2: keep the HTTP status with the payload
@@ -354,6 +369,10 @@
       rotateBtn.style.display = active ? '' : 'none';
       revokeBtn.style.display = active ? '' : 'none';
       shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+      var unlocked = btn.getAttribute('data-unlocked') === '1';
+      document.querySelectorAll('.share-lock-note').forEach(function (n) {
+        n.style.display = unlocked ? 'none' : '';
+      });
       shareModal.style.display = 'flex';
     });
   });

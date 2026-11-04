@@ -87,6 +87,17 @@
       <div id="share-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
           <p id="share-msg" style="margin:0 0 12px">{% if share_active %}Sharing is on for this report.{% endif %}</p>
+          {# Issue #135: format choice — TXT is free; PDF/JSON/CSV are
+             locked until the report's 2-credit export unlock (#129).
+             Choosing a locked format is refused by the server (402)
+             until the unlock is bought via Export. #}
+          <fieldset id="share-format-choice" style="border:none;margin:0 0 12px;padding:0">
+            <legend style="margin-bottom:6px">Format</legend>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="txt" checked> TXT (free)</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="pdf"{% if not export_unlocked %} data-locked="1"{% endif %}> PDF{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="json"{% if not export_unlocked %} data-locked="1"{% endif %}> JSON{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="csv"{% if not export_unlocked %} data-locked="1"{% endif %}> CSV{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
+          </fieldset>
           <div id="share-link-row" style="display:none;margin-bottom:12px">
             <input type="text" id="share-link" readonly style="width:100%;box-sizing:border-box;margin-bottom:8px">
             <button type="button" class="btn-small" id="share-copy">Copy link</button>
@@ -186,10 +197,15 @@
         var shareCreateKey = '{{ share_create_key }}';
         var shareRotateKey = '{{ share_rotate_key }}';
         var shareRevokeKey = '{{ share_revoke_key }}';
+        function selectedShareFormat() {
+          var el = document.querySelector('input[name="share-format"]:checked');
+          return el ? el.value : 'txt';
+        }
         function postShare(path, key) {
           var fd = new FormData();
           fd.append('csrf_token', '{{ csrf_token }}');
           fd.append('idempotency_key', key);
+          fd.append('format', selectedShareFormat());
           return fetch(path, { method: 'POST', body: fd, credentials: 'same-origin' })
             .then(function (r) {
               // PR #132 finding 2: keep the HTTP status with the

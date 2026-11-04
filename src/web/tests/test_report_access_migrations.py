@@ -41,11 +41,20 @@ def test_report_access_tables_and_uniqueness(migrated_engine):
     with factory() as db:
         user, result = _user_and_result(db)
         db.add(M.ReportSharing(result_id=result.id, owner_user_id=user.id,
-                               token_hash="a" * 64, generation=1))
+                               token_hash="a" * 64, generation=1,
+                               share_format="txt"))
         db.commit()
-        # One sharing row per report.
+        # PREMISE CHANGED (issue #135): sharing is one row per
+        # (report, format), not one per report — a second row for a
+        # DIFFERENT format is legal...
         db.add(M.ReportSharing(result_id=result.id, owner_user_id=user.id,
-                               token_hash="b" * 64, generation=1))
+                               token_hash="b" * 64, generation=1,
+                               share_format="pdf"))
+        db.commit()
+        # ...but a second row for the SAME (report, format) is not.
+        db.add(M.ReportSharing(result_id=result.id, owner_user_id=user.id,
+                               token_hash="d" * 64, generation=1,
+                               share_format="txt"))
         with pytest.raises(IntegrityError):
             db.commit()
         db.rollback()

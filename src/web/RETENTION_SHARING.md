@@ -30,24 +30,46 @@ What shipped, and the operational boundaries an operator must know.
 
 ## Share links
 
-- 256-bit tokens (`auth.generate_token`), stored **hash-only**
-  (`auth.hash_token`, SHA-256) in `report_sharing.token_hash`. The raw
-  token is revealed exactly once, in the create/rotate response. A lost
-  link is recovered by free rotation, never by re-display — the server
-  cannot redisplay what it does not store.
-- One active token per report; `generation` fences stale replays, and the
-  permanent `report_actions` identity rows make create/rotate/revoke and
-  retention replays safe forever (including after receipt payloads are
-  cleaned up).
-- Public route `GET /s/{token}` is a bearer capability, not a session: it
-  sets no cookies, loads no owner identity, and mutates nothing. Unknown,
-  malformed, tampered, revoked, rotated, expired, deleted or corrupt
-  tokens all return the identical 404 body and headers. Revocation takes
-  effect at commit for every new request; copies already delivered to
-  recipients cannot be retracted.
-- A PDF is reachable at `GET /s/{token}/pdf` **only** when a paid,
-  unexpired PDF Result exists for that report. CSV/JSON are not shared
-  in v1. Public sharing is single-file reports only; compare/batch are
+- 256-bit tokens (`auth.generate_token`), stored as a SHA-256 hash
+  (`auth.hash_token`, `report_sharing.token_hash`) used for public
+  lookup. Issue #135: the raw token is ALSO stored
+  (`report_sharing.raw_token`) because Settings -> Report Access must
+  list a copyable live link per link — hash-only storage cannot
+  redisplay it. The raw token is exposed only to the owning user on
+  the authenticated Settings page, and is cleared with the hash on
+  revoke and on retention cleanup.
+- One active token per (report, format) — #135 rework: the Share
+  popup (report page + My Reports) offers PDF / TXT / JSON / CSV and
+  each link serves ONLY its format. TXT is FREE with no unlock;
+  PDF/JSON/CSV link creation requires the report's #129 2-credit
+  export unlock (refused 402 pre-unlock, no charge and no link; the
+  unlock itself is bought via Export, never via sharing). Link
+  creation/rotate/revoke never charge.
+- Public route `GET /s/{token}` serves the report as a FILE in the
+  link's format (txt = the plain-text report, csv/json = the
+  structured exports, pdf = the paid PDF artifact or an on-the-fly
+  generation for an export-unlocked report with no PDF operation) —
+  the #107 recipient web view (`shared_report.html`) is REPLACED and
+  removed. It is a bearer capability, not a session: no cookies, no
+  owner identity, no mutation. Unknown, malformed, tampered, revoked,
+  rotated, expired, deleted or corrupt tokens all return the
+  identical 404 body and headers. Revocation takes effect at commit
+  for every new request; copies already delivered cannot be
+  retracted. The legacy `GET /s/{token}/pdf` subroute remains only
+  for pdf-format links.
+- Settings -> Report Access lists every active link for the account
+  (report, format, created time, copyable link) with a per-link
+  Revoke (`POST /settings/report-access/{id}/revoke`, owner-only,
+  immediate). Rotate is not a Settings control in v1 — reshare
+  (copy), revoke, plus creating a fresh link covers it; the
+  per-report rotate endpoint remains as the lost-token recovery on
+  the report/My Reports popups.
+- `generation` fences stale replays, and the permanent
+  `report_actions` identity rows make create/rotate/revoke and
+  retention replays safe forever (including after receipt payloads
+  are cleaned up). Share-action request hashes bind the format, so
+  replaying a create key with a different format is a 409 conflict.
+- Public sharing is single-file reports only; compare/batch are
   rejected with 422 before link creation.
 - Abuse limiting: `PostgresRateLimiter` 30/min, 300/hr per trusted IP,
   isolated `s:` key namespace, no `request_id` replay bypass, fail-closed

@@ -2464,8 +2464,8 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             filename = "Unknown file"
             report_kind = None
         from app.credits import _as_aware
-        _sharing_row = db.query(models.ReportSharing).filter(
-            models.ReportSharing.result_id == r.id).first()
+        _sharing_rows = db.query(models.ReportSharing).filter(
+            models.ReportSharing.result_id == r.id).all()
         reports.append({
             "id": str(r.id),
             "filename": filename,
@@ -2491,9 +2491,14 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             "share_revoke_key": uuid_module.uuid4().hex,
             "export_unlocked": _credits_for_list.is_export_unlocked(
                 db, _user.id, r.id),
-            "share_active": bool(
-                _sharing_row and _sharing_row.token_hash
-                and _sharing_row.revoked_at is None),
+            "share_active": any(
+                row.token_hash and row.revoked_at is None
+                for row in _sharing_rows),
+            # Issue #135: formats that already have an active link,
+            # so the Share popup can mark them per format.
+            "share_formats": [
+                (row.share_format or "txt") for row in _sharing_rows
+                if row.token_hash and row.revoked_at is None],
         })
     return templates.TemplateResponse(request, "reports.html", {
         "reports": reports,
@@ -2586,10 +2591,13 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         data["share_create_key"] = uuid_module.uuid4().hex
         data["share_rotate_key"] = uuid_module.uuid4().hex
         data["share_revoke_key"] = uuid_module.uuid4().hex
-        _sharing = db.query(models.ReportSharing).filter(
-            models.ReportSharing.result_id == result.id).first()
-        data["share_active"] = bool(
-            _sharing and _sharing.token_hash and _sharing.revoked_at is None)
+        _sharings = db.query(models.ReportSharing).filter(
+            models.ReportSharing.result_id == result.id).all()
+        data["share_active"] = any(
+            row.token_hash and row.revoked_at is None for row in _sharings)
+        data["share_formats"] = [
+            (row.share_format or "txt") for row in _sharings
+            if row.token_hash and row.revoked_at is None]
         # Issue #129: the report page's Export confirm copy reflects
         # the per-report unlock state (2 credits once, then free).
         data["export_unlocked"] = credits_helpers.is_export_unlocked(
@@ -3741,9 +3749,42 @@ def _share_source_gate(db, user, source):
     return None
 
 
+def _find_sharing(db, source_id, share_format):
+    """The sharing row for (report, format) — #135: one per format."""
+    from sqlalchemy import select as _select
+    from app import models
+    from app import report_access as _ra
+    rows = db.execute(
+        _select(models.ReportSharing).where(
+            models.ReportSharing.result_id == source_id)
+    ).scalars().all()
+    for row in rows:
+        if _ra.share_format_of(row) == share_format:
+            return row
+    return None
+
+
+def _active_sharings(db, source_id):
+    from sqlalchemy import select as _select
+    from app import models
+    return [row for row in db.execute(
+        _select(models.ReportSharing).where(
+            models.ReportSharing.result_id == source_id)
+    ).scalars().all()
+        if row.token_hash and row.revoked_at is None]
+
+
 @app.post("/reports/{result_id}/share")
 async def report_share_create(request: Request, result_id: str, db=Depends(get_db)):
-    """Create a share link — FREE (trim T1). Reveals the token once."""
+    """Create a share link for ONE format — FREE (trim T1).
+
+    Issue #135: the popup's format choice (pdf/txt/json/csv; missing
+    defaults to txt) is bound into the link. TXT is always free.
+    pdf/json/csv require the report's #129 export unlock: pre-unlock
+    creation is refused 402 (no charge, no link, no action row beyond
+    the rate/replay bookkeeping below) — the unlock itself is bought
+    through the export routes, never through sharing. Post-unlock
+    creation charges nothing beyond that unlock."""
     from fastapi.responses import JSONResponse
     from sqlalchemy import select as _select
     from app import auth as auth_helpers
@@ -3755,7 +3796,14 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
     if err is not None:
         return err
     source, idempotency_key = ctx
-    request_hash = _ra.action_request_hash(source, "share_create")
+    share_format = _ra.normalize_share_format(
+        form.get("format") or form.get("share_format"))
+    if share_format is None:
+        return JSONResponse(
+            {"error": "Share format must be one of PDF, TXT, JSON, CSV."},
+            status_code=400)
+    request_hash = _ra.action_request_hash(
+        source, "share_create", share_format=share_format)
     # Finding 2: lock the share:actions bucket BEFORE the replay
     # lookup and hold it through settlement, so the lookup below is
     # authoritative under the lock (concurrent same-key requests
@@ -3777,6 +3825,21 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
     if gate is not None:
         db.rollback()
         return gate
+    # Issue #135 format gate (the teeth of this rework): pdf/json/csv
+    # links require the report's #129 export unlock. Checked BEFORE
+    # any rate consumption, link row, or action record, so a denied
+    # creation leaves nothing behind and charges nothing.
+    if share_format in _ra.GATED_SHARE_FORMATS and not (
+            credits_helpers.is_export_unlocked(db, user.id, source.id)):
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Sharing as {share_format.upper()} requires this "
+                      "report's export unlock (2 credits, via Export). "
+                      "TXT sharing is always free.",
+             "code": "export_unlock_required",
+             "export_unlocked": False,
+             "format": share_format},
+            status_code=402)
     try:
         credits_helpers._consume_rate(db, "share:actions", str(user.id))
     except credits_helpers.AdmissionError:
@@ -3784,11 +3847,13 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
         return JSONResponse(
             {"error": "Too many share actions. Please try again later."},
             status_code=429)
-    sharing = db.execute(
-        _select(models.ReportSharing).where(
-            models.ReportSharing.result_id == source.id)
-        .with_for_update().execution_options(populate_existing=True)
-    ).scalar_one_or_none()
+    sharing = _find_sharing(db, source.id, share_format)
+    if sharing is not None:
+        sharing = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.id == sharing.id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
     if sharing is not None and sharing.token_hash and sharing.revoked_at is None:
         # Finding 1: record this no-op create outcome (with the
         # existing active sharing's generation) in the SAME
@@ -3802,18 +3867,22 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
         db.commit()
         return JSONResponse({
             "status": "already_shared",
-            "message": "This report already has a share link. "
-                       "Rotate the link to get a new copyable URL.",
+            "message": "This report already has a share link for that "
+                       "format. Rotate the link to get a new copyable URL.",
+            "format": share_format,
         })
     raw_token = auth_helpers.generate_token()
     if sharing is None:
         sharing = models.ReportSharing(
             result_id=source.id, owner_user_id=user.id,
             token_hash=auth_helpers.hash_token(raw_token), generation=1,
+            share_format=share_format, raw_token=raw_token,
         )
         db.add(sharing)
     else:
         sharing.token_hash = auth_helpers.hash_token(raw_token)
+        sharing.raw_token = raw_token
+        sharing.share_format = share_format
         sharing.generation += 1
         sharing.revoked_at = None
     db.flush()
@@ -3823,6 +3892,7 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
     return JSONResponse({
         "status": "created",
         "share_url": _share_url(request, raw_token),
+        "format": share_format,
     })
 
 
@@ -3840,7 +3910,18 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
     if err is not None:
         return err
     source, idempotency_key = ctx
-    request_hash = _ra.action_request_hash(source, "share_rotate")
+    # Issue #135: rotate targets ONE format's link. An explicit format
+    # names it; without one, the report's sole active link (or its txt
+    # link) is the unambiguous target.
+    _rotate_fmt_raw = form.get("format") or form.get("share_format")
+    _rotate_fmt = _ra.normalize_share_format(_rotate_fmt_raw) \
+        if _rotate_fmt_raw else None
+    if _rotate_fmt_raw and _rotate_fmt is None:
+        return JSONResponse(
+            {"error": "Share format must be one of PDF, TXT, JSON, CSV."},
+            status_code=400)
+    request_hash = _ra.action_request_hash(
+        source, "share_rotate", share_format=_rotate_fmt)
     # Finding 2: lock before the authoritative replay lookup (see
     # report_share_create).
     credits_helpers.lock_share_rate_bucket(db, str(user.id))
@@ -3867,11 +3948,38 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
         return JSONResponse(
             {"error": "Too many share actions. Please try again later."},
             status_code=429)
-    sharing = db.execute(
-        _select(models.ReportSharing).where(
-            models.ReportSharing.result_id == source.id)
-        .with_for_update().execution_options(populate_existing=True)
-    ).scalar_one_or_none()
+    if _rotate_fmt is not None:
+        sharing = _find_sharing(db, source.id, _rotate_fmt)
+    else:
+        # No format named: a single row (active OR revoked — rotate is
+        # the reshare-after-revoke recovery) is unambiguous; with
+        # several rows prefer the sole active one, then the txt one.
+        _all_rows = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.result_id == source.id)
+        ).scalars().all()
+        actives = [row for row in _all_rows
+                   if row.token_hash and row.revoked_at is None]
+        sharing = None
+        if len(_all_rows) == 1:
+            sharing = _all_rows[0]
+        elif len(actives) == 1:
+            sharing = actives[0]
+        elif _all_rows:
+            sharing = next(
+                (row for row in _all_rows
+                 if _ra.share_format_of(row) == "txt"), None)
+            if sharing is None:
+                db.rollback()
+                return JSONResponse(
+                    {"error": "Specify which format's link to rotate."},
+                    status_code=409)
+    if sharing is not None:
+        sharing = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.id == sharing.id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
     if sharing is None:
         db.commit()
         return JSONResponse(
@@ -3879,6 +3987,7 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
             status_code=409)
     raw_token = auth_helpers.generate_token()
     sharing.token_hash = auth_helpers.hash_token(raw_token)
+    sharing.raw_token = raw_token
     sharing.generation += 1
     sharing.revoked_at = None
     db.flush()
@@ -3888,6 +3997,7 @@ async def report_share_rotate(request: Request, result_id: str, db=Depends(get_d
     return JSONResponse({
         "status": "rotated",
         "share_url": _share_url(request, raw_token),
+        "format": _ra.share_format_of(sharing),
     })
 
 
@@ -3905,7 +4015,18 @@ async def report_share_revoke(request: Request, result_id: str, db=Depends(get_d
     if err is not None:
         return err
     source, idempotency_key = ctx
-    request_hash = _ra.action_request_hash(source, "share_revoke")
+    # Issue #135: an explicit format revokes only that format's link;
+    # without one, revoke kills EVERY active link for the report
+    # (the pre-#135 single-link behaviour, and the safe default).
+    _revoke_fmt_raw = form.get("format") or form.get("share_format")
+    _revoke_fmt = _ra.normalize_share_format(_revoke_fmt_raw) \
+        if _revoke_fmt_raw else None
+    if _revoke_fmt_raw and _revoke_fmt is None:
+        return JSONResponse(
+            {"error": "Share format must be one of PDF, TXT, JSON, CSV."},
+            status_code=400)
+    request_hash = _ra.action_request_hash(
+        source, "share_revoke", share_format=_revoke_fmt)
     # Finding 2: lock before the authoritative replay lookup (see
     # report_share_create).
     credits_helpers.lock_share_rate_bucket(db, str(user.id))
@@ -3924,29 +4045,195 @@ async def report_share_revoke(request: Request, result_id: str, db=Depends(get_d
         return JSONResponse(
             {"error": "Too many share actions. Please try again later."},
             status_code=429)
-    sharing = db.execute(
-        _select(models.ReportSharing).where(
-            models.ReportSharing.result_id == source.id)
-        .with_for_update().execution_options(populate_existing=True)
-    ).scalar_one_or_none()
+    if _revoke_fmt is not None:
+        _targets = []
+        _row = _find_sharing(db, source.id, _revoke_fmt)
+        if _row is not None:
+            _targets = [_row]
+    else:
+        _targets = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.result_id == source.id)
+        ).scalars().all()
     generation = 0
-    if sharing is not None:
+    for sharing in _targets:
+        sharing = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.id == sharing.id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if sharing is None:
+            continue
         if sharing.token_hash is not None or sharing.revoked_at is None:
             sharing.token_hash = None
+            sharing.raw_token = None
             sharing.revoked_at = credits_helpers._utcnow()
             sharing.generation += 1
-        generation = sharing.generation
-        db.flush()
+        generation = max(generation, sharing.generation)
+    db.flush()
     _record_share_action(db, user, source, "share_revoke", idempotency_key,
                          request_hash, generation)
     db.commit()
     return JSONResponse({"status": "revoked"})
 
 
-@app.get("/s/{token}", response_class=HTMLResponse)
+@app.post("/settings/report-access/{sharing_id}/revoke")
+async def settings_report_access_revoke(request: Request, sharing_id: str,
+                                        db=Depends(get_db)):
+    """Revoke ONE share link from Settings -> Report Access (#135).
+
+    Owner-only (session + CSRF), FREE, immediate: the row's token hash
+    and raw token are cleared in this commit, so the very next public
+    request for that token gets the identical unavailable response.
+    Other formats' links for the same report are untouched."""
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import report_access as _ra
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return err
+    try:
+        sid = _uuid.UUID(sharing_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid link ID"}, status_code=400)
+    sharing = db.execute(
+        _select(models.ReportSharing).where(
+            models.ReportSharing.id == sid,
+            models.ReportSharing.owner_user_id == user.id)
+        .with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if sharing is None:
+        db.rollback()
+        return JSONResponse({"error": "Share link not found"}, status_code=404)
+    source = db.get(models.Result, sharing.result_id)
+    if source is None:
+        db.rollback()
+        return JSONResponse({"error": "Share link not found"}, status_code=404)
+    idempotency_key = str(form.get("idempotency_key") or _uuid.uuid4().hex)
+    request_hash = _ra.action_request_hash(
+        source, "share_revoke",
+        share_format=_ra.share_format_of(sharing))
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
+    prior, err = _share_action_replay(
+        db, user, source, "share_revoke", idempotency_key, request_hash)
+    if err is not None:
+        db.rollback()
+        return err
+    if prior is not None:
+        db.rollback()
+        return JSONResponse({"status": "revoked"})
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
+    if sharing.token_hash is not None or sharing.revoked_at is None:
+        sharing.token_hash = None
+        sharing.raw_token = None
+        sharing.revoked_at = credits_helpers._utcnow()
+        sharing.generation += 1
+    db.flush()
+    _record_share_action(db, user, source, "share_revoke", idempotency_key,
+                         request_hash, sharing.generation)
+    db.commit()
+    return JSONResponse({"status": "revoked"})
+
+
+def _share_file_response(db, token, sharing, result, payload, share_format):
+    """Serve a shared report IN the link's format only (#135).
+
+    Returns a Response, or None for the caller to render the identical
+    unavailable 404. Content is generated from the validated source
+    payload with the same generators the owner's export routes use,
+    so the shared file's content is the report's exact content:
+    txt = render_text_report, csv/json = structured_export, pdf =
+    the paid-PDF artifact when one exists, else on-the-fly generation
+    for an export-unlocked report with no PDF operation (the #129 §5
+    path the old /pdf subroute used). The share route never charges.
+    """
+    from fastapi.responses import Response
+    from app import report_access as _ra
+    filename = payload.get("filename", "report")
+    if share_format == "txt":
+        text = render_text_report(payload)
+        db.expire_all()
+        if _ra.lookup_shared(db, token) is None:
+            return None
+        headers = _share_headers({
+            "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.txt"',
+        })
+        return Response(content=text, media_type="text/plain; charset=utf-8",
+                        headers=headers)
+    if share_format in ("csv", "json"):
+        from app import structured_export as _se
+        try:
+            data = _se.generate_export(payload, share_format)
+        except Exception:
+            return None
+        db.expire_all()
+        if _ra.lookup_shared(db, token) is None:
+            return None
+        headers = _share_headers({
+            "Content-Disposition": f'attachment; filename="{_se.safe_download_name(filename, result.id, share_format)}"',
+        })
+        return Response(content=data,
+                        media_type=_se.MEDIA_TYPES[share_format],
+                        headers=headers)
+    if share_format == "pdf":
+        pdf = _ra.find_shareable_pdf(db, result)
+        if pdf is None:
+            # #129 §5 / #107 T6, as in the old subroute: on-the-fly
+            # generation ONLY when no PDF was ever generated but the
+            # report is export-unlocked; an expired generated PDF
+            # keeps the identical-404 outcome.
+            if _ra.has_pdf_export_operation(db, result) \
+                    or not _ra.is_export_unlocked(db, result):
+                return None
+            from app.pdf_export import generate_report_pdf as _gen_share_pdf
+            try:
+                pdf_bytes = _gen_share_pdf(
+                    result.storage_manifest, payload.get("filename", "report"))
+            except Exception:
+                return None
+            db.expire_all()
+            if _ra.lookup_shared(db, token) is None:
+                return None
+            headers = _share_headers({
+                "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.pdf"',
+            })
+            return Response(content=pdf_bytes, media_type="application/pdf",
+                            headers=headers)
+        _pdf_result, pdf_bytes = pdf
+        db.expire_all()
+        if _ra.lookup_shared(db, token) is None:
+            return None
+        headers = _share_headers({
+            "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.pdf"',
+        })
+        return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers=headers)
+    return None
+
+
+@app.get("/s/{token}")
 async def shared_report_view(request: Request, token: str, db=Depends(get_db)):
-    """Public read-only shared report. Bearer capability, not a session:
-    sets no cookies, loads no owner identity, mutates nothing."""
+    """Public shared report FILE (#135, replacing the #107 web view).
+
+    Bearer capability, not a session: sets no cookies, loads no owner
+    identity, mutates nothing. The link serves ONLY its own format;
+    unknown/malformed/revoked/expired tokens get the one identical
+    unavailable response."""
     from app import report_access as _ra
     limited = _share_rate_limited(request)
     if limited is not None:
@@ -3962,29 +4249,20 @@ async def shared_report_view(request: Request, token: str, db=Depends(get_db)):
     again = _ra.lookup_shared(db, token)
     if again is None or again[0].id != sharing.id:
         return _share_unavailable()
-    projection = _ra.public_projection(payload)
-    # Finding 4: per-response CSP nonce for the dynamic chart rules.
-    import secrets as _secrets
-    nonce = _secrets.token_urlsafe(16)
-    chart_css, chart_classes = _share_chart_style(projection)
-    projection = {**projection, "csp_nonce": nonce,
-                  "chart_css": chart_css, "chart_classes": chart_classes}
-    response = templates.TemplateResponse(
-        request, "shared_report.html", projection)
-    for key, value in _share_headers(nonce=nonce).items():
-        response.headers[key] = value
+    response = _share_file_response(
+        db, token, sharing, result, payload, _ra.share_format_of(sharing))
+    if response is None:
+        return _share_unavailable()
     return response
 
 
 @app.get("/s/{token}/pdf")
 async def shared_report_pdf(request: Request, token: str, db=Depends(get_db)):
-    """PDF through a share link — ONLY a paid, unexpired PDF (trim T3).
-
-    Any other case (no PDF ever paid for, PDF expired, token invalid)
-    is the same identical 404 as the text route. CSV/JSON are not
-    shared in v1 and have no route here.
-    """
-    from fastapi.responses import Response
+    """Legacy PDF subroute (#107 T3), kept under #135 ONLY for links
+    whose own format is PDF: a pdf-format link serves the PDF here
+    exactly as at /s/{token}; every other link format — and every
+    invalid token — gets the same identical 404, because a link
+    serves ONLY its chosen format."""
     from app import report_access as _ra
     limited = _share_rate_limited(request)
     if limited is not None:
@@ -3993,40 +4271,10 @@ async def shared_report_pdf(request: Request, token: str, db=Depends(get_db)):
     if found is None:
         return _share_unavailable()
     sharing, result, payload = found
-    pdf = _ra.find_shareable_pdf(db, result)
-    if pdf is None:
-        # Issue #129 §5: an export-unlocked report counts as having
-        # its PDF export purchased. When the unlock was bought with a
-        # CSV/JSON first generation, no PDF artifact exists — generate
-        # the PDF on the fly from the validated source (the share
-        # route never charges anyone). A PDF that WAS generated but
-        # has expired keeps the #107 T6 outcome (identical 404): the
-        # on-the-fly path applies only when no PDF operation exists.
-        if _ra.has_pdf_export_operation(db, result) \
-                or not _ra.is_export_unlocked(db, result):
-            return _share_unavailable()
-        from app.pdf_export import generate_report_pdf as _gen_share_pdf
-        try:
-            pdf_bytes = _gen_share_pdf(
-                result.storage_manifest, payload.get("filename", "report"))
-        except Exception:
-            return _share_unavailable()
-        db.expire_all()
-        if _ra.lookup_shared(db, token) is None:
-            return _share_unavailable()
-        filename = payload.get("filename", "report")
-        headers = _share_headers({
-            "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.pdf"',
-        })
-        return Response(content=pdf_bytes, media_type="application/pdf",
-                        headers=headers)
-    pdf_result, pdf_bytes = pdf
-    db.expire_all()
-    if _ra.lookup_shared(db, token) is None:
+    if _ra.share_format_of(sharing) != "pdf":
         return _share_unavailable()
-    filename = payload.get("filename", "report")
-    headers = _share_headers({
-        "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.pdf"',
-    })
-    return Response(content=pdf_bytes, media_type="application/pdf",
-                    headers=headers)
+    response = _share_file_response(db, token, sharing, result, payload, "pdf")
+    if response is None:
+        return _share_unavailable()
+    return response
+

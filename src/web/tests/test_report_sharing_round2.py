@@ -159,36 +159,27 @@ def test_f3_uvicorn_access_record_redaction_preserves_formatting():
 # ---------------- F4 ----------------
 
 def test_f4_shared_page_nonce_csp_and_no_inline_styles(paid_env):
+    """PREMISE CHANGED (issue #135): the shared web page — and with
+    it the nonce'd chart styles (Finding 4) — is replaced by
+    per-format FILE serving. The default txt link now serves
+    text/plain under the strict base CSP (no nonce, never
+    'unsafe-inline'); the identical-404 keeps the same base CSP."""
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
-    # Fixture report with deterministic chart data: the SAMPLE_LOG
-    # payload has timeline/severity/service data (existing tests rely
-    # on it rendering). Create + share it.
     rid = _make_report(env, uid)
     resp = _create_share(env, rid, csrf, key="f4-create")
     assert resp.status_code == 200, resp.text[:400]
     token = _token_from(resp)
     r = _anon_client().get(f"/s/{token}")
     assert r.status_code == 200, r.text[:300]
+    assert r.headers["content-type"].startswith("text/plain")
     csp = r.headers.get("content-security-policy", "")
-    m = re.search(r"'nonce-([^']+)'", csp)
-    assert m, f"CSP carries no nonce: {csp}"
-    nonce = m.group(1)
     assert "unsafe-inline" not in csp
+    assert "'nonce-" not in csp
     assert "default-src 'none'" in csp
     assert "frame-ancestors 'none'" in csp
-    # The nonced style block exists and matches the header nonce.
-    sm = re.search(r'<style nonce="([^"]+)">(.*?)</style>', r.text, re.S)
-    assert sm, "no nonced <style> block in shared page"
-    assert sm.group(1) == nonce
-    css = sm.group(2)
-    # No inline style attributes anywhere on the shared page.
-    assert "style=" not in r.text.replace(
-        f'<style nonce="{nonce}">', "<style>"), r.text[:2000]
-    # Generated rules carry percentage dimensions for the charts.
-    assert re.search(r"\.ss-dyn-[a-z0-9-]+\{(?:height|width):[0-9]", css), css[:500]
-    assert "%" in css
-    # The identical-404 page needs no nonce and keeps the base CSP.
+    assert "<style" not in r.text
+    assert "style=" not in r.text
     miss = _anon_client().get(f"/s/{'0' * 64}")
     assert miss.status_code == 404
     assert "'nonce-" not in miss.headers.get("content-security-policy", "")

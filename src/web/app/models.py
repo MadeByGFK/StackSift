@@ -727,12 +727,20 @@ class PaymentReconciliation(Base):
 # ---------------------------------------------------------------------------
 # Issue #107: retention extension + shareable report links.
 #
-# ReportSharing is the ONE sharing row per report: it carries only the
-# SHA-256 hash of the current 256-bit bearer token (raw tokens are never
-# stored), a generation counter fencing stale create/rotate replays, and
-# revocation state. Sharing is FREE (founder ruling 2026-11-01, trim T1):
+# ReportSharing was, under #107, the ONE sharing row per report. Issue
+# #135 reworks it to ONE row per (report, format): each row carries the
+# SHA-256 hash of its current 256-bit bearer token (the lookup key), a
+# generation counter fencing stale create/rotate replays, revocation
+# state, the link's format (pdf/txt/json/csv) and — #135 ONLY — the raw
+# token, because Settings -> Report Access must list a copyable live
+# link per link ("copy = reshare"), which hash-only storage cannot
+# redisplay. The raw token is exposed ONLY to the owning user on the
+# authenticated Settings page; public lookup still goes through the
+# hash. Sharing creation is FREE (founder ruling 2026-11-01, trim T1):
 # there is deliberately NO entitlement/operation column — no charge,
-# consent, or admission exists for create/rotate/revoke, ever.
+# consent, or admission exists for create/rotate/revoke, ever. The
+# #129 export unlock GATES creation of pdf/json/csv links; it is not a
+# charge collected by sharing.
 #
 # ReportAction is the permanent, append-only identity record for owner
 # actions on a report (retention purchases and free share actions). It
@@ -747,10 +755,18 @@ class ReportSharing(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     result_id = Column(GUID(), ForeignKey("results.id", ondelete="CASCADE"),
-                       nullable=False, unique=True, index=True)
+                       nullable=False, index=True)
     owner_user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
                            nullable=False, index=True)
     token_hash = Column(String(64), nullable=True, unique=True, index=True)
+    # Issue #135: the format this link serves (pdf|txt|json|csv). NULL
+    # on pre-#135 rows, which are treated as txt (the old free text
+    # share) if they are ever read.
+    share_format = Column(String(10), nullable=True)
+    # Issue #135: raw bearer token, stored ONLY so the owner's
+    # Settings -> Report Access page can list/copy the live link.
+    # Cleared together with token_hash on revoke/cleanup.
+    raw_token = Column(String(64), nullable=True)
     generation = Column(Integer, nullable=False, default=0)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -758,6 +774,8 @@ class ReportSharing(Base):
 
     __table_args__ = (
         CheckConstraint("generation >= 0", name="ck_report_sharing_generation_nonneg"),
+        UniqueConstraint("result_id", "share_format",
+                         name="uq_report_sharing_result_format"),
     )
 
 

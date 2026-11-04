@@ -1,13 +1,15 @@
-"""Issue #107: shareable report links — FREE (APPROVED trim T1).
+"""Issue #107 shareable links, as reworked by issue #135.
 
 Sharing costs nothing, ever: no charge/consent/admission for create,
-rotate, or revoke. Hash-only 256-bit tokens (auth.generate_token /
-hash_token precedent), once-only reveal, free rotation as recovery,
-one active token per report, generation fencing, identical 404 for
+rotate, or revoke. 256-bit tokens; public lookup is by the SHA-256
+hash (the raw token is additionally stored for the owner's
+Settings -> Report Access copyable-link list, #135). One active
+token per (report, format); generation fencing; identical 404 for
 unknown/malformed/tampered/revoked/rotated/expired/deleted/corrupt.
 
-T3: a PDF is reachable via the share link ONLY when a paid, unexpired
-PDF Result exists; CSV/JSON are NOT shared in v1.
+#135: GET /s/<token> serves the report FILE in the link's format
+(the recipient web view is gone); TXT is the free default format;
+PDF/JSON/CSV link creation requires the #129 export unlock.
 T4: public sharing is single-file only; compare/batch get 422 BEFORE
 link creation.
 """
@@ -81,6 +83,11 @@ def _setup_shared(env):
 
 
 def test_create_share_is_free_and_stores_hash_only(paid_env):
+    """PREMISE CHANGED (issue #135): Settings -> Report Access must
+    list a copyable live link, which hash-only storage cannot
+    redisplay — the row now ALSO stores the raw token in its
+    dedicated raw_token column for owner-only Settings display.
+    The lookup hash, generation fencing and free-ness are unchanged."""
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
     rid = _make_report(env, uid)
@@ -92,20 +99,25 @@ def test_create_share_is_free_and_stores_hash_only(paid_env):
         row = db.query(M.ReportSharing).filter(M.ReportSharing.result_id == rid).one()
         assert row.token_hash == auth.hash_token(token)
         assert row.token_hash != token
+        assert row.raw_token == token  # #135: Settings redisplay only
+        assert row.share_format == "txt"  # default format
         assert row.generation == 1 and row.revoked_at is None
-        blob = json.dumps([str(c) for c in row.__dict__.values()])
-        assert token not in blob
         # No paid operation was created for the free share action.
         assert db.query(M.Operation).filter(M.Operation.user_id == uid).count() == 0
         assert C.verify_account_invariants(db, uid) == []
 
 
 def test_shared_view_anonymous_no_owner_identity_or_controls(paid_env):
+    """PREMISE CHANGED (issue #135): the recipient web view is gone —
+    the default (txt) link serves the plain-text report FILE. The
+    anonymity assertions carry over to the file body/headers."""
     env = paid_env
     email, uid, csrf, rid, token = _setup_shared(env)
     anon = _anon_client()
     r = anon.get(f"/s/{token}")
     assert r.status_code == 200, r.text[:300]
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "attachment" in r.headers.get("content-disposition", "")
     assert "test.log" in r.text
     assert email not in r.text
     assert str(rid) not in r.text
@@ -233,29 +245,52 @@ def test_share_actions_owner_only_and_csrf(paid_env):
 
 
 def test_shared_pdf_only_when_paid_and_unexpired(paid_env):
+    """PREMISE CHANGED (issue #135): a PDF is shared through a
+    pdf-FORMAT link, not a subroute of a text link. Creation is
+    blocked pre-unlock; post-unlock the pdf link serves the PDF;
+    the PDF artifact's own expiry (T6) still kills it, while the
+    txt link is unaffected."""
     env = paid_env
     email, uid, csrf, rid, token = _setup_shared(env)
     anon = _anon_client()
-    # No paid PDF exists yet -> identical-style 404 on the PDF route.
+    # The txt link does not serve PDF at the old subroute.
     assert anon.get(f"/s/{token}/pdf").status_code == 404
+    # Pre-unlock, creating a pdf link is refused (402, no charge).
+    blocked = env.client.post(
+        f"/reports/{rid}/share",
+        data={"csrf_token": csrf, "idempotency_key": "pdf-blocked",
+              "format": "pdf"})
+    assert blocked.status_code == 402, blocked.text[:300]
     pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
-    got = anon.get(f"/s/{token}/pdf")
+    created = env.client.post(
+        f"/reports/{rid}/share",
+        data={"csrf_token": csrf, "idempotency_key": "pdf-link-1",
+              "format": "pdf"})
+    assert created.status_code == 200, created.text[:300]
+    pdf_token = _token_from(created)
+    got = anon.get(f"/s/{pdf_token}")
     assert got.status_code == 200, got.text[:300]
     assert got.content[:4] == b"%PDF"
     assert "application/pdf" in got.headers.get("content-type", "")
+    # The legacy subroute works for a pdf-format link too.
+    assert anon.get(f"/s/{pdf_token}/pdf").content[:4] == b"%PDF"
     # PDF shareability dies with the PDF Result's own expiry (T6).
     with env.sessions() as db:
         pdf_result = db.query(M.Result).filter(
             M.Result.user_id == uid, M.Result.type == "pdf").one()
         pdf_result.expires_at = C._utcnow() - timedelta(minutes=1)
         db.commit()
-    assert anon.get(f"/s/{token}/pdf").status_code == 404
+    assert anon.get(f"/s/{pdf_token}").status_code == 404
+    assert anon.get(f"/s/{pdf_token}/pdf").status_code == 404
     # The text share itself is unaffected.
     assert anon.get(f"/s/{token}").status_code == 200
 
 
 def test_csv_json_not_shared_in_v1(paid_env):
+    """PREMISE CHANGED (issue #135): CSV/JSON ARE shared now — but
+    only through their own format links. The old per-format
+    subroutes of a txt link still serve nothing."""
     env = paid_env
     email, uid, csrf, rid, token = _setup_shared(env)
     anon = _anon_client()
@@ -289,6 +324,10 @@ def test_public_view_mutates_nothing_and_token_selects_nothing_else(paid_env):
 
 
 def test_shared_view_escapes_log_html(paid_env):
+    """PREMISE CHANGED (issue #135): there is no shared web page to
+    inject into — the txt link serves text/plain, so log HTML is
+    inert file content, delivered with a non-HTML content type and
+    an attachment disposition (never rendered as markup)."""
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
     payload = _payload("evil.log")
@@ -302,8 +341,9 @@ def test_shared_view_escapes_log_html(paid_env):
     anon = _anon_client()
     r = anon.get(f"/s/{token}")
     assert r.status_code == 200, r.text[:300]
-    assert "<script>alert" not in r.text
-    assert "&lt;script&gt;" in r.text
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "attachment" in r.headers.get("content-disposition", "")
+    assert "<html" not in r.text.lower()
 
 
 def test_shared_headers_on_hit_and_miss(paid_env):

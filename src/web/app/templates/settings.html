@@ -68,6 +68,27 @@
       <p>No credit purchases yet.</p>
       {% endif %}
     </div>
+    <div class="settings-card" id="report-access">
+      <h2>Report Access</h2>
+      <p>Active share links for your reports. Anyone holding a link can download that report in the link's format. Copy a link to reshare it; revoke a link to stop it working immediately.</p>
+      {% if share_links %}
+      {% for link in share_links %}
+      <div class="session-row report-access-row" data-share-id="{{ link.id }}">
+        <div>
+          <div class="session-info">{{ link.report }} — {{ link.format|upper }}</div>
+          <div class="session-meta">Created {{ link.created_at.strftime('%Y-%m-%d %H:%M UTC') if link.created_at else '' }}</div>
+          <input type="text" class="share-access-link" readonly value="{{ link.url }}" style="width:100%;box-sizing:border-box;margin-top:6px">
+        </div>
+        <div>
+          <button type="button" class="btn-small share-access-copy">Copy link</button>
+          <button type="button" class="btn-small btn-danger share-access-revoke" data-share-id="{{ link.id }}">Revoke</button>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <p>No active share links.</p>
+      {% endif %}
+    </div>
     <div class="settings-card">
       <h2>Connected accounts</h2>
       <p>Link Google or GitHub to sign in with one click.</p>
@@ -125,6 +146,28 @@ async function revokeSession(id) {
   if (resp.ok) location.reload();
   else alert("Failed to revoke session.");
 }
+document.querySelectorAll('.share-access-copy').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var input = btn.closest('.report-access-row').querySelector('.share-access-link');
+    var url = input.value;
+    if (!/^https?:\/\//.test(url)) { url = new URL(url, window.location.origin).href; input.value = url; }
+    input.select();
+    if (navigator.clipboard) { navigator.clipboard.writeText(url); }
+  });
+});
+document.querySelectorAll('.share-access-revoke').forEach(function (btn) {
+  btn.addEventListener('click', async function () {
+    var fd = new FormData();
+    fd.append('csrf_token', csrfToken);
+    fd.append('idempotency_key', (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()));
+    let resp;
+    try { resp = await fetch('/settings/report-access/' + btn.getAttribute('data-share-id') + '/revoke', {
+      method: "POST", body: fd, credentials: "same-origin",
+    }); } catch (_) { alert("Unable to connect. Please try again."); return; }
+    if (resp.ok) location.reload();
+    else alert("Failed to revoke share link.");
+  });
+});
 async function revokeAll() {
   if (!confirm("Log out all other devices?")) return;
   let resp;
