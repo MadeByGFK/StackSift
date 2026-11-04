@@ -342,6 +342,16 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           });
         }
       } catch (_) {
+        // Network failure: nothing was downloaded and no modal is
+        // shown (pre-existing behaviour); the finally below still
+        // re-enables the button.
+      } finally {
+        // Issue #136 consistency fix (the #129 closure quirk): the
+        // submit button was previously re-enabled ONLY on a network
+        // exception, so after a completed PDF download — and after
+        // an error response — the PDF menu item stayed disabled for
+        // the rest of the session until a page reload. Re-enabling
+        // in finally keeps the disable as an in-flight guard only.
         button.disabled = false;
       }
     });

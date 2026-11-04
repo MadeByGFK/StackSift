@@ -338,10 +338,16 @@ def test_analysis_view_renders_without_internal_labels(auth_env):
 
 
 def test_report_page_analysis_action_after_export(auth_env):
+    # PREMISE CHANGED (issue #136, one job per page): the Export ·
+    # Analysis · Share button row collapsed into ONE "Actions" menu.
+    # The placement rule survives inside the menu: the Export items
+    # come first, then Analysis, then Share.
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
-    export_at = page.text.index('id="export-btn"')
+    assert page.text.count('id="actions-btn"') == 1
+    assert 'id="export-btn"' not in page.text
+    export_at = page.text.index(f'action="/reports/{rid}/pdf"')
     analysis_at = page.text.index('id="analysis-btn"')
     share_at = page.text.index('id="share-btn"')
     assert export_at < analysis_at < share_at
