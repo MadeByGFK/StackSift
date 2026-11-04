@@ -164,11 +164,26 @@
           // or the mailto body.
           return new URL(url, window.location.origin).href;
         }
-        function showLink(url) {
+        // PR #138 remediation round 2: track which format the URL
+        // currently shown in the link row belongs to. The server
+        // renders no per-format URLs into this page, so on a format
+        // change the row may be shown only for that format; any
+        // other format's URL must be hidden AND cleared so it can
+        // neither be copied/distributed under the wrong format nor
+        // resurrected by switching back.
+        var displayedShareFormat = null;
+        function showLink(url, fmt) {
           var absoluteUrl = resolveShareUrl(url);
+          displayedShareFormat = fmt || selectedShareFormat();
           linkBox.value = absoluteUrl;
           mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(absoluteUrl);
           linkRow.style.display = 'block';
+        }
+        function clearDisplayedLink() {
+          displayedShareFormat = null;
+          linkBox.value = '';
+          mailto.href = 'mailto:';
+          linkRow.style.display = 'none';
         }
         function setShareButtons(active) {
           // PR #132 follow-up (P2): toggle the always-rendered
@@ -221,9 +236,18 @@
           shareActiveFormats = shareActiveFormats.filter(function (f) { return f !== fmt; });
         }
         function refreshShareButtonsForSelectedFormat() {
-          var active = shareFormatIsActive(selectedShareFormat());
+          var fmt = selectedShareFormat();
+          var active = shareFormatIsActive(fmt);
           setShareButtons(active);
-          if (!active) { linkRow.style.display = 'none'; }
+          if (displayedShareFormat !== fmt) {
+            // PR #138 round 2: the displayed URL (if any) belongs
+            // to another format — hide the row and clear the stale
+            // URL/marker, for inactive formats as before and now
+            // also when the newly selected format is itself active.
+            clearDisplayedLink();
+          } else if (linkBox.value) {
+            linkRow.style.display = 'block';
+          }
           shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
         }
         document.querySelectorAll('input[name="share-format"]').forEach(function (el) {
@@ -263,7 +287,7 @@
             var createdFormat = selectedShareFormat();
             postShare('/reports/{{ report_id }}/share', shareCreateKey).then(function (d) {
               if (d._httpOk) { shareCreateKey = freshShareKey(); }
-              if (d._httpOk && d.share_url) { addActiveShareFormat(createdFormat); shareMsg.textContent = 'Share link created:'; showLink(d.share_url); setShareButtons(true); }
+              if (d._httpOk && d.share_url) { addActiveShareFormat(createdFormat); shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
               else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
             });
           });
@@ -274,7 +298,7 @@
             var rotatedFormat = selectedShareFormat();
             postShare('/reports/{{ report_id }}/share/rotate', shareRotateKey).then(function (d) {
               if (d._httpOk) { shareRotateKey = freshShareKey(); }
-              if (d._httpOk && d.share_url) { addActiveShareFormat(rotatedFormat); shareMsg.textContent = 'New share link:'; showLink(d.share_url); setShareButtons(true); }
+              if (d._httpOk && d.share_url) { addActiveShareFormat(rotatedFormat); shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); setShareButtons(true); }
               else { shareMsg.textContent = d.message || d.error || ''; }
             });
           });
@@ -292,7 +316,7 @@
                 shareRevokeKey = freshShareKey();
                 removeActiveShareFormat(revokedFormat);
                 shareMsg.textContent = 'Share link revoked.';
-                linkRow.style.display = 'none';
+                if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
                 setShareButtons(false);
               } else {
                 shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';

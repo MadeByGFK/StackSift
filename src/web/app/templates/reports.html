@@ -335,11 +335,30 @@
   function removeActiveShareFormatFor(btn, fmt) {
     setActiveFormatsFor(btn, activeFormatsFor(btn).filter(function (f) { return f !== fmt; }));
   }
+  // PR #138 remediation round 2: track which format the URL
+  // currently shown in the link row belongs to (for the report in
+  // `current`). The server renders no per-format URLs into this
+  // page, so on a format change the row may be shown only for that
+  // format; any other format's URL must be hidden AND cleared so
+  // it can neither be copied/distributed under the wrong format
+  // nor resurrected by switching back. Reset on every popup open.
+  var displayedShareFormat = null;
+  function clearDisplayedLink() {
+    displayedShareFormat = null;
+    linkBox.value = '';
+    mailto.href = 'mailto:';
+    linkRow.style.display = 'none';
+  }
   function refreshShareButtonsForSelectedFormat() {
     if (!current) { return; }
-    var active = shareFormatIsActiveFor(current, selectedShareFormat());
+    var fmt = selectedShareFormat();
+    var active = shareFormatIsActiveFor(current, fmt);
     setShareButtons(active);
-    if (!active) { linkRow.style.display = 'none'; }
+    if (displayedShareFormat !== fmt) {
+      clearDisplayedLink();
+    } else if (linkBox.value) {
+      linkRow.style.display = 'block';
+    }
     shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
   }
   function resolveShareUrl(url) {
@@ -348,8 +367,9 @@
     // origin before it reaches the copy field or the mailto body.
     return new URL(url, window.location.origin).href;
   }
-  function showLink(url) {
+  function showLink(url, fmt) {
     var absoluteUrl = resolveShareUrl(url);
+    displayedShareFormat = fmt || selectedShareFormat();
     linkBox.value = absoluteUrl;
     mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(absoluteUrl);
     linkRow.style.display = 'block';
@@ -399,7 +419,7 @@
   document.querySelectorAll('.share-open').forEach(function (btn) {
     btn.addEventListener('click', function () {
       current = btn;
-      linkRow.style.display = 'none';
+      clearDisplayedLink();
       var txtRadio = document.querySelector('input[name="share-format"][value="txt"]');
       if (txtRadio) { txtRadio.checked = true; }
       var active = shareFormatIsActiveFor(btn, 'txt');
@@ -431,18 +451,19 @@
       if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); }
       if (d._httpOk && d.share_url) { addActiveShareFormatFor(originBtn, createdFormat); }
       if (current !== originBtn) { return; }
-      if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url); setShareButtons(true); }
+      if (d._httpOk && d.share_url) { shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
       else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
     });
   });
   rotateBtn.addEventListener('click', function () {
     var originBtn = current;
     if (!originBtn) { return; }
+    var rotatedFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share/rotate',
               originBtn.getAttribute('data-rotate-key')).then(function (d) {
       if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); }
       if (current !== originBtn) { return; }
-      if (d._httpOk && d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url); }
+      if (d._httpOk && d.share_url) { shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); }
       else { shareMsg.textContent = d.message || d.error || ''; }
     });
   });
@@ -463,7 +484,7 @@
       if (current !== originBtn) { return; }
       if (revoked) {
         shareMsg.textContent = 'Share link revoked.';
-        linkRow.style.display = 'none';
+        if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
         setShareButtons(false);
       } else {
         shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
