@@ -39,6 +39,36 @@ This is a web-app-local addition, not an upstream change — do not
 overwrite it on a vendor sync without re-applying the collector. The
 SHASUMS entry for `analyzer.py` tracks this local version.
 
+**Issue #106 Stage 1 (2026-11-03):** the F01/F04/F05 core corrections
+(bare-order-ID contextual normalization, peak group severity, anchored
+request-handler wrapper normalization) and the always-on retained
+`diagnostic_evidence` capture were applied to BOTH `analyzer.py`
+copies (this vendored one and `src/stacksift/analyzer.py`) in the same
+change — the copies differ only by the #102 comparison collector and
+import rewriting. Do not overwrite the comparison collector on a
+vendor sync.
+
+**PR #137 remediation (2026-11-03):** the four Codex findings were
+fixed in BOTH copies in the same change: batched (not per-excerpt)
+evidence-size enforcement; capture-time redaction of retained
+excerpts/metadata in the analyzer itself — this vendored copy imports
+`redact_secrets` from `app.redact` (the separately vendored redact
+module, see "What is NOT vendored" below), the CLI copy from
+`stacksift.redact`; incremental cross-file evidence merging in
+`analyze_path` (one bounded accumulator, per-file artifacts
+released); and full severity-metadata retention
+(`severity_metadata`) across the 1,000-group excerpt cap so merged
+evidence cannot contradict the combined issue. The #102 comparison
+collector's example lines get the same capture-time redaction.
+
+**PR #137 remediation — finding 5 (2026-11-03):** the F01
+bare-order normalization was fixed in BOTH copies in the same
+change: `byte order <n>` is a property context, not an identifier
+context — the number encodes the byte-ordering property itself
+(1234 vs 4321), so it is preserved verbatim and distinct byte
+orders stay distinct groups. Bare payment-style `order <n>`
+identifiers outside that phrase still normalize to `order <id>`.
+
 ## Import rewriting
 
 All `from stacksift.X import` statements have been rewritten to
