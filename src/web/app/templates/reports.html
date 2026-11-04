@@ -182,12 +182,29 @@
             {% endif %}
           </span>
         </span>
+        {# Issue #106 Stage 2 + founder amendment: row order is
+           View / Export / Analysis / Share / Extend. Analysis opens
+           the shared popup below; an existing Analysis Report links
+           straight to it (no second charge). #}
+        {% if report.type == 'analysis' %}
+          {% if report.analysis_result_id %}
+          <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Analysis</a>
+          {% else %}
+          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-reason="{{ report.analysis_reason or '' }}">Analysis</button>
+          {% endif %}
+        {% endif %}
         <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
+        {# Issue #106 Stage 2: no Extend for Analysis Report rows —
+           the retention route admits only analysis/comparison
+           sources, so an Extend form on a deep_dive row would POST
+           to a 404 (dead button). Normal reports keep Extend. #}
+        {% if report.type != 'deep_dive' %}
         <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
           <button type="submit" class="btn btn-ghost">Extend</button>
         </form>
+        {% endif %}
       </div>
     </li>
     {% endfor %}
@@ -226,6 +243,17 @@
     <p id="ss-confirm-text"></p>
     <button type="button" class="btn btn-primary" id="ss-confirm-yes">Continue</button>
     <button type="button" class="btn btn-ghost" id="ss-confirm-no">Cancel</button>
+  </div>
+</div>
+
+<div id="analysis-modal" class="modal" style="display:none">
+  <div class="modal-card">
+    <p id="analysis-msg"></p>
+    <div id="analysis-link-row" style="display:none;margin-bottom:12px">
+      <a class="btn btn-primary" id="analysis-view" href="#">View Analysis Report</a>
+    </div>
+    <button type="button" class="btn btn-primary" id="analysis-confirm">Generate Analysis Report</button>
+    <button type="button" class="btn btn-ghost" id="analysis-close">Cancel</button>
   </div>
 </div>
 
@@ -518,6 +546,65 @@
   document.getElementById('share-copy').addEventListener('click', function () {
     linkBox.select();
     if (navigator.clipboard) { navigator.clipboard.writeText(linkBox.value); }
+  });
+  // Issue #106 Stage 2: Analysis popup — the click only opens it;
+  // Cancel changes no state; Confirm is the charge point and the
+  // outcome renders in the popup (never a navigation to raw JSON).
+  var analysisModal = document.getElementById('analysis-modal');
+  var analysisMsg = document.getElementById('analysis-msg');
+  var analysisConfirm = document.getElementById('analysis-confirm');
+  var analysisCurrent = null;
+  document.querySelectorAll('.analysis-open').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      analysisCurrent = btn;
+      document.getElementById('analysis-link-row').style.display = 'none';
+      if (btn.getAttribute('data-eligible') === '1') {
+        analysisMsg.textContent = 'Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.';
+        analysisConfirm.style.display = '';
+        analysisConfirm.disabled = false;
+      } else {
+        analysisMsg.textContent = btn.getAttribute('data-reason') || '';
+        analysisConfirm.style.display = 'none';
+      }
+      analysisModal.style.display = 'flex';
+    });
+  });
+  document.getElementById('analysis-close').addEventListener('click', function () {
+    analysisModal.style.display = 'none';
+  });
+  analysisConfirm.addEventListener('click', function () {
+    if (!analysisCurrent) { return; }
+    analysisConfirm.disabled = true;
+    var fd = new FormData();
+    fd.append('csrf_token', '{{ csrf_token }}');
+    fetch('/reports/' + analysisCurrent.getAttribute('data-report') + '/deep-dive', { method: 'POST', body: fd, credentials: 'same-origin' })
+      .then(function (r) {
+        return r.json().then(function (d) { d = d || {}; d._httpStatus = r.status; return d; },
+          function () { return { _httpStatus: r.status }; });
+      })
+      .then(function (d) {
+        if (d.report_url) {
+          analysisMsg.textContent = 'Analysis Report ready.';
+          var link = document.getElementById('analysis-view');
+          link.href = d.report_url;
+          document.getElementById('analysis-link-row').style.display = 'block';
+          analysisConfirm.style.display = 'none';
+        } else if (d._httpStatus === 402 && d.purchase_url) {
+          analysisMsg.textContent = '';
+          analysisMsg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
+          var buy = document.createElement('a');
+          buy.href = d.purchase_url;
+          buy.textContent = 'Buy credits';
+          analysisMsg.appendChild(buy);
+          analysisConfirm.disabled = false;
+        } else {
+          analysisMsg.textContent = d.error || 'Analysis Report generation failed.';
+          analysisConfirm.disabled = false;
+        }
+      }, function () {
+        analysisMsg.textContent = 'Analysis Report generation failed.';
+        analysisConfirm.disabled = false;
+      });
   });
 })();
 </script>
