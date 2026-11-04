@@ -54,37 +54,45 @@
        Analysis after Export by explicit founder amendment to the
        original exactly-two-buttons rule), with no explanatory
        paragraphs. Extend moved to the My Reports row. Every charged
-       action is confirmed in a popup BEFORE any charge. #}
+       action is confirmed in a popup BEFORE any charge.
+       Issue #136 (one job per page — Report = read): the whole row
+       collapses into ONE "Actions" menu holding the SAME actions in
+       the SAME order (Export PDF/CSV/JSON, then Analysis, then
+       Share). No capability, charge, or confirmation behaviour
+       changed: the export forms keep their data-confirm popups and
+       the Analysis/Share items open the existing modals (or, for an
+       existing Analysis Report, link to it) exactly as the old
+       buttons did. #}
     <div class="report-actions" style="margin-top:1rem">
       <span style="display:inline-block;position:relative">
-        <button type="button" class="btn-small" id="export-btn" aria-haspopup="true" aria-expanded="false">Export</button>
-        <span id="export-dropdown" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:8px;padding:6px;min-width:150px">
+        <button type="button" class="btn-small" id="actions-btn" aria-haspopup="true" aria-expanded="false">Actions</button>
+        <span id="actions-menu" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:8px;padding:6px;min-width:170px">
           <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">PDF</button>
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export PDF</button>
           </form>
           {% if not report_kind %}
           <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">CSV</button>
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export CSV</button>
           </form>
           <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">JSON</button>
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export JSON</button>
           </form>
           {% endif %}
+          {# Issue #106 Stage 2: Analysis sits AFTER the Export items
+             inside the menu — the click only opens the popup;
+             Cancel/Escape changes no state; Confirm is the charge
+             point and results show in page. #}
+          {% if analysis_result_id %}
+          <a href="/reports/{{ analysis_result_id }}" class="btn-small" style="display:block;text-decoration:none">Analysis</a>
+          {% else %}
+          <button type="button" class="btn-small" id="analysis-btn" style="display:block;width:100%;text-align:left">Analysis</button>
+          {% endif %}
+          <button type="button" class="btn-small" id="share-btn" style="display:block;width:100%;text-align:left">Share</button>
         </span>
       </span>
-      {# Issue #106 Stage 2 + founder placement amendment (2026-11-03):
-         Analysis sits AFTER Export — Export · Analysis · Share. The
-         click only opens the popup; Cancel/Escape changes no state;
-         Confirm is the charge point and results show in page. #}
-      {% if analysis_result_id %}
-      <a href="/reports/{{ analysis_result_id }}" class="btn-small" style="text-decoration:none">Analysis</a>
-      {% else %}
-      <button type="button" class="btn-small" id="analysis-btn">Analysis</button>
-      {% endif %}
-      <button type="button" class="btn-small" id="share-btn">Share</button>
 
       <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
@@ -142,13 +150,19 @@
 
       <script>
       (function () {
-        var exportBtn = document.getElementById('export-btn');
-        var dropdown = document.getElementById('export-dropdown');
-        exportBtn.addEventListener('click', function () {
-          var open = dropdown.style.display === 'block';
-          dropdown.style.display = open ? 'none' : 'block';
-          exportBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
-        });
+        var actionsBtn = document.getElementById('actions-btn');
+        var actionsMenu = document.getElementById('actions-menu');
+        function closeActionsMenu() {
+          if (actionsMenu) { actionsMenu.style.display = 'none'; }
+          if (actionsBtn) { actionsBtn.setAttribute('aria-expanded', 'false'); }
+        }
+        if (actionsBtn && actionsMenu) {
+          actionsBtn.addEventListener('click', function () {
+            var open = actionsMenu.style.display === 'block';
+            actionsMenu.style.display = open ? 'none' : 'block';
+            actionsBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+          });
+        }
         var modal = document.getElementById('ss-confirm');
         var text = document.getElementById('ss-confirm-text');
         var pending = null;
@@ -300,6 +314,7 @@
             });
         }
         document.getElementById('share-btn').addEventListener('click', function () {
+          closeActionsMenu();
           refreshShareButtonsForSelectedFormat();
           shareModal.style.display = 'flex';
         });
@@ -384,6 +399,7 @@
         var analysisBtn = document.getElementById('analysis-btn');
         if (analysisBtn && analysisModal) {
           analysisBtn.addEventListener('click', function () {
+            closeActionsMenu();
             analysisModal.style.display = 'flex';
           });
           document.getElementById('analysis-close').addEventListener('click', function () {

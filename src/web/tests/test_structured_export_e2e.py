@@ -219,13 +219,17 @@ def test_report_page_shows_priced_forms_and_download_link(auth_env):
     # page now carries ONE Export button with a format dropdown and a
     # Share button — no per-format priced buttons, no microcopy. The
     # charged first generation still returns a free re-download URL.
+    # PREMISE-CHANGED again by issue #136 (one job per page): the
+    # Export dropdown and Share button collapsed into ONE "Actions"
+    # menu whose items are the Export format forms and Share.
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
     assert f"/reports/{rid}/exports/csv" in page.text
     assert f"/reports/{rid}/exports/json" in page.text
     assert f"/reports/{rid}/pdf" in page.text
-    assert ">Export</button>" in page.text
+    assert ">Actions</button>" in page.text
+    assert ">Export PDF</button>" in page.text
     assert ">Share</button>" in page.text
     assert "Export CSV (" not in page.text
     assert "Export JSON (" not in page.text

@@ -212,15 +212,24 @@ def test_my_reports_row_actions_follow_unlock(auth_env):
 # --- Report page UI contract ----------------------------------------------------
 
 def test_report_page_two_buttons_no_microcopy_popups(auth_env):
+    # PREMISE CHANGED (issue #136, one job per page): the #129
+    # Export · Share button row (plus the #106 Analysis button) is
+    # superseded by ONE "Actions" menu holding the same actions.
+    # The no-microcopy / no-forms-on-page / popup contracts below
+    # are unchanged from #129; only the container changed. The full
+    # #136 contract lives in test_issue136_actions_menu.py.
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
-    # Exactly the two action buttons (dropdown items are PDF/CSV/JSON).
-    assert ">Export</button>" in page.text
-    assert ">Share</button>" in page.text
+    # Exactly one Actions menu; the old top-level buttons are gone
+    # and the menu items carry the Export format labels.
+    assert page.text.count('id="actions-btn"') == 1
+    assert ">Actions</button>" in page.text
+    assert 'id="export-btn"' not in page.text
+    assert ">Export PDF</button>" in page.text
+    assert ">Export CSV</button>" in page.text
+    assert ">Export JSON</button>" in page.text
     assert "Export PDF (2 credits)" not in page.text
-    assert "Export CSV" not in page.text
-    assert "Export JSON" not in page.text
     # No explanatory microcopy / paragraphs for the actions.
     for gone in (
         "Charged 2 credits only when the PDF is first generated",

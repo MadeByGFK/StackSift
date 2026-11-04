@@ -25,6 +25,12 @@
     counts; each file's own section below is its individual report. No
     single cross-file cause is claimed.</p>
     {% if current_user and report_id %}
+    {# Issue #136 decision: LEFT as a single direct button — a batch
+       report has exactly ONE action (PDF export; CSV/JSON are not
+       offered for batch reports), so there is nothing to consolidate
+       into an Actions menu, and a one-item menu would only hide the
+       2-credit price this button shows up front behind an extra
+       click. One action control, no account-level actions. #}
     <div class="report-actions" style="margin-top:1rem">
       <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
