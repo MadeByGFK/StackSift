@@ -53,6 +53,7 @@
   .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.err{background:var(--err)} .dot.neutral{background:var(--muted)}
   .info{flex:1;min-width:0}
   .name{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .kind-title{font-size:13px;font-weight:600;color:var(--accent);letter-spacing:.01em;margin-bottom:2px}
   .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;color:var(--muted);font-size:13px}
   .sep{opacity:.5}
   .expiry{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:rgba(157,177,204,.08);font-size:12px}
@@ -154,9 +155,18 @@
     <li class="card">
       <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warn{% elif report.severity == 'errors' %} err{% else %} neutral{% endif %}"></span></div>
       <div class="info">
+        {# Issue #144: Analysis Report (deep_dive) rows carry an
+           "Analysis Report" title above the filename so they are
+           distinguishable from source report rows. #}
+        {% if report.type == 'deep_dive' %}
+        <div class="kind-title">Analysis Report</div>
+        {% endif %}
         <div class="name">{{ report.filename }}</div>
         <div class="meta">
-          <span>Analyzed {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
+          {# Issue #144: deep_dive rows were Created (derived), not
+             Analyzed; source rows (analysis/comparison/batch) keep
+             "Analyzed". #}
+          <span>{% if report.type == 'deep_dive' %}Created{% else %}Analyzed{% endif %} {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
           <span>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
           <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}">Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
         </div>
