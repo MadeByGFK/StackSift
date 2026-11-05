@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift Analysis Report — {{ filename }}</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/credits">Credits</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <section class="report-head">
+    <h2>Analysis Report — {{ filename }}</h2>
+    <div class="meta">{{ analysis_projection.summary }}</div>
+    {% if current_user and report_id %}
+    {# Issue #106 Stage 2 + #129: this report carries its OWN export
+       unlock — the first format costs 2 credits once, then every
+       format is free. No separate Analysis PDF price.
+       Issue #136 (one job per page): the Export dropdown becomes the
+       same single "Actions" menu as the source report page, holding
+       the identical export forms with their data-confirm popups —
+       this page has no Analysis/Share actions of its own. #}
+    <div class="report-actions" style="margin-top:1rem">
+      <span style="display:inline-block;position:relative">
+        <button type="button" class="btn-small" id="actions-btn" aria-haspopup="true" aria-expanded="false">Actions</button>
+        <span id="actions-menu" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:8px;padding:6px;min-width:170px">
+          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export PDF</button>
+          </form>
+          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export CSV</button>
+          </form>
+          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export JSON</button>
+          </form>
+        </span>
+      </span>
+
+      <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
+        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:340px">
+          <p id="ss-confirm-text" style="margin:0 0 14px"></p>
+          <button type="button" class="btn-small" id="ss-confirm-yes">Continue</button>
+          <button type="button" class="btn-small" id="ss-confirm-no">Cancel</button>
+        </div>
+      </div>
+
+      <script>
+      (function () {
+        var actionsBtn = document.getElementById('actions-btn');
+        var actionsMenu = document.getElementById('actions-menu');
+        if (actionsBtn && actionsMenu) {
+          actionsBtn.addEventListener('click', function () {
+            var open = actionsMenu.style.display === 'block';
+            actionsMenu.style.display = open ? 'none' : 'block';
+            actionsBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+          });
+        }
+        var modal = document.getElementById('ss-confirm');
+        var text = document.getElementById('ss-confirm-text');
+        var pending = null;
+        document.querySelectorAll('form[data-confirm]').forEach(function (f) {
+          f.addEventListener('submit', function (e) {
+            if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            pending = f;
+            text.textContent = f.getAttribute('data-confirm');
+            modal.style.display = 'flex';
+          });
+        });
+        document.getElementById('ss-confirm-yes').addEventListener('click', function () {
+          modal.style.display = 'none';
+          if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
+        });
+        document.getElementById('ss-confirm-no').addEventListener('click', function () {
+          modal.style.display = 'none';
+          pending = null;
+        });
+      })();
+      </script>
+    </div>
+    {% endif %}
+  </section>
+
+  {% for group in analysis_projection.groups %}
+  <div class="card" style="margin-top:16px">
+    <h3 class="section-title" style="margin-top:0">[{{ group.level }}] {{ group.template }} <span style="color:var(--muted);font-weight:400">× {{ group.count }}</span></h3>
+    {% for text in group.observations %}<p>{{ text }}</p>{% endfor %}
+    {% for text in group.explanations %}<p>{{ text }}</p>{% endfor %}
+    <p><strong>What this may mean:</strong></p>
+    {% for text in group.possible_causes %}<p>{{ text }}</p>{% endfor %}
+    <p><strong>Suggested first checks:</strong></p>
+    {% for text in group.first_checks %}<p>{{ text }}</p>{% endfor %}
+    {% if group.excerpts %}
+    <p><strong>Evidence:</strong></p>
+    {% for excerpt in group.excerpts %}
+    <p><code>{{ excerpt.text }}</code> <span style="color:var(--muted)">(analysis line {{ excerpt.analysis_line_number }})</span></p>
+    {% endfor %}
+    {% endif %}
+    {% for limit in group.limitations %}<p style="color:var(--muted)">{{ limit }}</p>{% endfor %}
+  </div>
+  {% endfor %}
+
+  <div class="actions" style="margin-top:28px">
+    <a href="/reports"><button type="button" class="btn-primary">Back to My Reports</button></a>
+  </div>
+
+  <footer>
+    StackSift · a Goodfolk Digital project · <a href="https://github.com/MadeByGFK/StackSift">CLI on GitHub</a>
+  </footer>
+
+</div>
+{% include 'auth_form_script.html' %}
+{% include "nav_script.html" %}
+</body>
+</html>

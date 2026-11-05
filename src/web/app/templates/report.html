@@ -33,7 +33,6 @@
 
   {% if is_demo %}
   <div class="demo-banner">Sample report — this is what StackSift does with your logs. <a href="/">Analyze your own →</a></div>
-  <div class="demo-banner" style="margin-top:8px">Made for handoffs: the PDF export is built to attach to the incident ticket or pass along at shift change.</div>
   {% endif %}
 
   <section class="report-head">
@@ -50,12 +49,403 @@
       <span class="badge {{ health.color }}">{{ health.label }}</span>
     </div>
     {% if current_user and report_id and not is_demo %}
+    {# Issue #129 + founder UI amendments (2026-11-03): the report page
+       action row is Export · Analysis · Share (#106 Stage 2 added
+       Analysis after Export by explicit founder amendment to the
+       original exactly-two-buttons rule), with no explanatory
+       paragraphs. Extend moved to the My Reports row. Every charged
+       action is confirmed in a popup BEFORE any charge.
+       Issue #136 (one job per page — Report = read): the whole row
+       collapses into ONE "Actions" menu holding the SAME actions in
+       the SAME order (Export PDF/CSV/JSON, then Analysis, then
+       Share). No capability, charge, or confirmation behaviour
+       changed: the export forms keep their data-confirm popups and
+       the Analysis/Share items open the existing modals (or, for an
+       existing Analysis Report, link to it) exactly as the old
+       buttons did. #}
     <div class="report-actions" style="margin-top:1rem">
-      <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
-      </form>
-      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Charged 2 credits only when the PDF is first generated &mdash; re-downloads are free. Attach it to the incident ticket or hand it off at shift change.</p>
+      <span style="display:inline-block;position:relative">
+        <button type="button" class="btn-small" id="actions-btn" aria-haspopup="true" aria-expanded="false">Actions</button>
+        <span id="actions-menu" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:8px;padding:6px;min-width:170px">
+          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export PDF</button>
+          </form>
+          {% if not report_kind %}
+          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export CSV</button>
+          </form>
+          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export JSON</button>
+          </form>
+          {% endif %}
+          {# Issue #106 Stage 2: Analysis sits AFTER the Export items
+             inside the menu — the click only opens the popup;
+             Cancel/Escape changes no state; Confirm is the charge
+             point and results show in page. #}
+          {% if analysis_result_id %}
+          <a href="/reports/{{ analysis_result_id }}" class="btn-small" style="display:block;text-decoration:none">Analysis</a>
+          {% else %}
+          <button type="button" class="btn-small" id="analysis-btn" style="display:block;width:100%;text-align:left">Analysis</button>
+          {% endif %}
+          <button type="button" class="btn-small" id="share-btn" style="display:block;width:100%;text-align:left">Share</button>
+        </span>
+      </span>
+
+      <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
+        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
+          {% if analysis_eligible %}
+          <p id="analysis-msg" style="margin:0 0 12px">Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.</p>
+          <div id="analysis-link-row" style="display:none;margin-bottom:12px">
+            <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
+          </div>
+          <button type="button" class="btn-small" id="analysis-confirm">Generate Analysis Report</button>
+          {% else %}
+          <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
+          {% endif %}
+          <button type="button" class="btn-small" id="analysis-close">Cancel</button>
+        </div>
+      </div>
+
+      <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
+        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:340px">
+          <p id="ss-confirm-text" style="margin:0 0 14px"></p>
+          <button type="button" class="btn-small" id="ss-confirm-yes">Continue</button>
+          <button type="button" class="btn-small" id="ss-confirm-no">Cancel</button>
+        </div>
+      </div>
+
+      <div id="share-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
+        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
+          {% set share_txt_active = share_formats is defined and share_formats and 'txt' in share_formats %}
+          <p id="share-msg" style="margin:0 0 12px">{% if share_txt_active %}Sharing is on for this report.{% endif %}</p>
+          {# Issue #135: format choice — TXT is free; PDF/JSON/CSV are
+             locked until the report's 2-credit export unlock (#129).
+             Choosing a locked format is refused by the server (402)
+             until the unlock is bought via Export. #}
+          <fieldset id="share-format-choice" style="border:none;margin:0 0 12px;padding:0">
+            <legend style="margin-bottom:6px">Format</legend>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="txt" checked> TXT (free)</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="pdf"{% if not export_unlocked %} data-locked="1"{% endif %}> PDF{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="json"{% if not export_unlocked %} data-locked="1"{% endif %}> JSON{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="csv"{% if not export_unlocked %} data-locked="1"{% endif %}> CSV{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
+          </fieldset>
+          <div id="share-link-row" style="display:none;margin-bottom:12px">
+            <input type="text" id="share-link" readonly style="width:100%;box-sizing:border-box;margin-bottom:8px">
+            <button type="button" class="btn-small" id="share-copy">Copy link</button>
+            <a class="btn-small" id="share-mailto" href="mailto:">Open in email</a>
+          </div>
+          {# PR #132 follow-up (P2): ALL share controls are always
+             rendered; visibility follows the share state so a link
+             created in this popup can be rotated/revoked (and a
+             revoked one re-created) without a page reload. #}
+          <button type="button" class="btn-small" id="share-create"{% if share_txt_active %} style="display:none"{% endif %}>Create share link</button>
+          <button type="button" class="btn-small" id="share-rotate"{% if not share_txt_active %} style="display:none"{% endif %}>Rotate link</button>
+          <button type="button" class="btn-small" id="share-revoke"{% if not share_txt_active %} style="display:none"{% endif %}>Revoke link</button>
+          <button type="button" class="btn-small" id="share-close">Close</button>
+        </div>
+      </div>
+
+      <script>
+      (function () {
+        var actionsBtn = document.getElementById('actions-btn');
+        var actionsMenu = document.getElementById('actions-menu');
+        function closeActionsMenu() {
+          if (actionsMenu) { actionsMenu.style.display = 'none'; }
+          if (actionsBtn) { actionsBtn.setAttribute('aria-expanded', 'false'); }
+        }
+        if (actionsBtn && actionsMenu) {
+          actionsBtn.addEventListener('click', function () {
+            var open = actionsMenu.style.display === 'block';
+            actionsMenu.style.display = open ? 'none' : 'block';
+            actionsBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+          });
+        }
+        var modal = document.getElementById('ss-confirm');
+        var text = document.getElementById('ss-confirm-text');
+        var pending = null;
+        document.querySelectorAll('form[data-confirm]').forEach(function (f) {
+          f.addEventListener('submit', function (e) {
+            if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
+            e.preventDefault();
+            // PR #132 follow-up (P1): this listener is registered
+            // BEFORE auth_form_script.html's PDF fetch listener
+            // (this inline script precedes that include), so
+            // stopImmediatePropagation keeps the PDF fetch — and
+            // its 2-credit charge — from firing while the
+            // confirmation popup is open. Cancel therefore sends
+            // nothing at all.
+            e.stopImmediatePropagation();
+            pending = f;
+            text.textContent = f.getAttribute('data-confirm');
+            modal.style.display = 'flex';
+          });
+        });
+        document.getElementById('ss-confirm-yes').addEventListener('click', function () {
+          modal.style.display = 'none';
+          if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
+        });
+        document.getElementById('ss-confirm-no').addEventListener('click', function () {
+          modal.style.display = 'none';
+          pending = null;
+        });
+        var shareModal = document.getElementById('share-modal');
+        var shareMsg = document.getElementById('share-msg');
+        var linkRow = document.getElementById('share-link-row');
+        var linkBox = document.getElementById('share-link');
+        var mailto = document.getElementById('share-mailto');
+        function resolveShareUrl(url) {
+          // PR #132 finding 3: the server returns a hostless
+          // /s/<token> path when APP_BASE_URL is unset; resolve it
+          // against this origin before it reaches the copy field
+          // or the mailto body.
+          return new URL(url, window.location.origin).href;
+        }
+        // PR #138 remediation round 2: track which format the URL
+        // currently shown in the link row belongs to. The server
+        // renders no per-format URLs into this page, so on a format
+        // change the row may be shown only for that format; any
+        // other format's URL must be hidden AND cleared so it can
+        // neither be copied/distributed under the wrong format nor
+        // resurrected by switching back.
+        var displayedShareFormat = null;
+        function showLink(url, fmt) {
+          var absoluteUrl = resolveShareUrl(url);
+          displayedShareFormat = fmt || selectedShareFormat();
+          linkBox.value = absoluteUrl;
+          mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(absoluteUrl);
+          linkRow.style.display = 'block';
+        }
+        function clearDisplayedLink() {
+          displayedShareFormat = null;
+          linkBox.value = '';
+          mailto.href = 'mailto:';
+          linkRow.style.display = 'none';
+        }
+        function setShareButtons(active) {
+          // PR #132 follow-up (P2): toggle the always-rendered
+          // share controls to match the current share state,
+          // immediately on create/revoke success.
+          var c = document.getElementById('share-create');
+          var r = document.getElementById('share-rotate');
+          var v = document.getElementById('share-revoke');
+          if (c) { c.style.display = active ? 'none' : ''; }
+          if (r) { r.style.display = active ? '' : 'none'; }
+          if (v) { v.style.display = active ? '' : 'none'; }
+        }
+        function freshShareKey() {
+          // PR #132 finding 1: after a successful share action the
+          // used idempotency key is replaced with a fresh one, so a
+          // later action (revoke -> rotate -> revoke) never replays
+          // an earlier action's key as a no-op.
+          if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+            return window.crypto.randomUUID();
+          }
+          var hex = '';
+          for (var i = 0; i < 32; i++) {
+            hex += Math.floor(Math.random() * 16).toString(16);
+          }
+          return hex;
+        }
+        var shareCreateKey = '{{ share_create_key }}';
+        var shareRotateKey = '{{ share_rotate_key }}';
+        var shareRevokeKey = '{{ share_revoke_key }}';
+        function selectedShareFormat() {
+          var el = document.querySelector('input[name="share-format"]:checked');
+          return el ? el.value : 'txt';
+        }
+        // PR #138 remediation (finding 1): share state is PER FORMAT,
+        // not report-wide. share_formats (rendered by the server)
+        // lists the formats with an active link; Create/Rotate/Revoke
+        // visibility follows the SELECTED format, so after creating a
+        // TXT link, selecting PDF/JSON/CSV shows Create for that
+        // format (a second format's link can be created without
+        // revoking the first), and Rotate/Revoke show only for a
+        // format that actually has a link.
+        var shareActiveFormats = {{ (share_formats if share_formats is defined and share_formats else [])|tojson }};
+        function shareFormatIsActive(fmt) {
+          return shareActiveFormats.indexOf(fmt) !== -1;
+        }
+        function addActiveShareFormat(fmt) {
+          if (!shareFormatIsActive(fmt)) { shareActiveFormats.push(fmt); }
+        }
+        function removeActiveShareFormat(fmt) {
+          shareActiveFormats = shareActiveFormats.filter(function (f) { return f !== fmt; });
+        }
+        function refreshShareButtonsForSelectedFormat() {
+          var fmt = selectedShareFormat();
+          var active = shareFormatIsActive(fmt);
+          setShareButtons(active);
+          if (displayedShareFormat !== fmt) {
+            // PR #138 round 2: the displayed URL (if any) belongs
+            // to another format — hide the row and clear the stale
+            // URL/marker, for inactive formats as before and now
+            // also when the newly selected format is itself active.
+            clearDisplayedLink();
+          } else if (linkBox.value) {
+            linkRow.style.display = 'block';
+          }
+          shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+        }
+        document.querySelectorAll('input[name="share-format"]').forEach(function (el) {
+          el.addEventListener('change', refreshShareButtonsForSelectedFormat);
+        });
+        function postShare(path, key) {
+          var fd = new FormData();
+          fd.append('csrf_token', '{{ csrf_token }}');
+          fd.append('idempotency_key', key);
+          fd.append('format', selectedShareFormat());
+          return fetch(path, { method: 'POST', body: fd, credentials: 'same-origin' })
+            .then(function (r) {
+              // PR #132 finding 2: keep the HTTP status with the
+              // payload so callers check success before reporting
+              // it (a 429 revoke leaves the link active and must
+              // surface as an error, not as "revoked").
+              return r.json().then(function (d) {
+                d = d || {};
+                d._httpOk = r.ok;
+                d._httpStatus = r.status;
+                return d;
+              }, function () {
+                return { _httpOk: r.ok, _httpStatus: r.status };
+              });
+            });
+        }
+        document.getElementById('share-btn').addEventListener('click', function () {
+          closeActionsMenu();
+          refreshShareButtonsForSelectedFormat();
+          shareModal.style.display = 'flex';
+        });
+        document.getElementById('share-close').addEventListener('click', function () {
+          shareModal.style.display = 'none';
+        });
+        var create = document.getElementById('share-create');
+        if (create) {
+          create.addEventListener('click', function () {
+            var createdFormat = selectedShareFormat();
+            postShare('/reports/{{ report_id }}/share', shareCreateKey).then(function (d) {
+              if (d._httpOk) { shareCreateKey = freshShareKey(); }
+              if (d._httpOk && d.share_url) {
+                addActiveShareFormat(createdFormat);
+                // PR #138 remediation round 3: the user may have
+                // changed the selected format while this request
+                // was in flight. The per-format state above still
+                // applies to the captured format, but the popup
+                // display must reflect the format selected NOW:
+                // never show the captured format's URL under a
+                // different selection — refresh the buttons and
+                // message from the current selection instead.
+                if (createdFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+                else { shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
+              }
+              else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
+            });
+          });
+        }
+        var rotate = document.getElementById('share-rotate');
+        if (rotate) {
+          rotate.addEventListener('click', function () {
+            var rotatedFormat = selectedShareFormat();
+            postShare('/reports/{{ report_id }}/share/rotate', shareRotateKey).then(function (d) {
+              if (d._httpOk) { shareRotateKey = freshShareKey(); }
+              if (d._httpOk && d.share_url) {
+                addActiveShareFormat(rotatedFormat);
+                // PR #138 remediation round 3: as in create above,
+                // guard the response-time display against the
+                // format selected NOW, not the captured format.
+                if (rotatedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+                else { shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); setShareButtons(true); }
+              }
+              else { shareMsg.textContent = d.message || d.error || ''; }
+            });
+          });
+        }
+        var revoke = document.getElementById('share-revoke');
+        if (revoke) {
+          revoke.addEventListener('click', function () {
+            var revokedFormat = selectedShareFormat();
+            postShare('/reports/{{ report_id }}/share/revoke', shareRevokeKey).then(function (d) {
+              // PR #132 finding 2: claim "revoked" only when the
+              // server actually revoked (HTTP success + revoked
+              // status). A 429 leaves the link active: surface the
+              // error and keep the link row visible.
+              if (d._httpOk && d.status === 'revoked') {
+                shareRevokeKey = freshShareKey();
+                removeActiveShareFormat(revokedFormat);
+                // PR #138 remediation round 3: as in create above,
+                // the removal applies to the captured format, but
+                // the popup display (message, buttons, link row)
+                // must reflect the format selected NOW when it has
+                // changed while the request was in flight.
+                if (revokedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+                else {
+                  shareMsg.textContent = 'Share link revoked.';
+                  if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
+                  setShareButtons(false);
+                }
+              } else {
+                shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
+              }
+            });
+          });
+        }
+        document.getElementById('share-copy').addEventListener('click', function () {
+          linkBox.select();
+          if (navigator.clipboard) { navigator.clipboard.writeText(linkBox.value); }
+        });
+        var analysisModal = document.getElementById('analysis-modal');
+        var analysisBtn = document.getElementById('analysis-btn');
+        if (analysisBtn && analysisModal) {
+          analysisBtn.addEventListener('click', function () {
+            closeActionsMenu();
+            analysisModal.style.display = 'flex';
+          });
+          document.getElementById('analysis-close').addEventListener('click', function () {
+            analysisModal.style.display = 'none';
+          });
+          var analysisConfirm = document.getElementById('analysis-confirm');
+          if (analysisConfirm) {
+            analysisConfirm.addEventListener('click', function () {
+              analysisConfirm.disabled = true;
+              var fd = new FormData();
+              fd.append('csrf_token', '{{ csrf_token }}');
+              fetch('/reports/{{ report_id }}/deep-dive', { method: 'POST', body: fd, credentials: 'same-origin' })
+                .then(function (r) {
+                  return r.json().then(function (d) { d = d || {}; d._httpStatus = r.status; return d; },
+                    function () { return { _httpStatus: r.status }; });
+                })
+                .then(function (d) {
+                  var msg = document.getElementById('analysis-msg');
+                  if (d.report_url) {
+                    msg.textContent = 'Analysis Report ready.';
+                    var row = document.getElementById('analysis-link-row');
+                    var link = document.getElementById('analysis-view');
+                    link.href = d.report_url;
+                    row.style.display = 'block';
+                    analysisConfirm.style.display = 'none';
+                  } else if (d._httpStatus === 402 && d.purchase_url) {
+                    msg.innerHTML = '';
+                    msg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
+                    var buy = document.createElement('a');
+                    buy.href = d.purchase_url;
+                    buy.textContent = 'Buy credits';
+                    msg.appendChild(buy);
+                    analysisConfirm.disabled = false;
+                  } else {
+                    msg.textContent = d.error || 'Analysis Report generation failed.';
+                    analysisConfirm.disabled = false;
+                  }
+                }, function () {
+                  document.getElementById('analysis-msg').textContent = 'Analysis Report generation failed.';
+                  analysisConfirm.disabled = false;
+                });
+            });
+          }
+        }
+      })();
+      </script>
     </div>
     {% endif %}
   </section>

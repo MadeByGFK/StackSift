@@ -5,8 +5,9 @@
 - Entry points: credits page buy forms (signed-in only) + insufficient-credits
   flow (402 page CTA, PDF 402 JSON purchase_url, badge/modal links).
 - Anonymous users are routed to signup/login, never to Stripe.
-- Test mode enforced: live keys refused before any network call; nothing
-  here enables live mode.
+- Mode follows the configured key (issue #126): both test and live keys
+  are accepted; unset keys fail closed and unrecognized key shapes are
+  refused before any network call.
 
 Stripe's HTTP API is faked at the httpx boundary — no network, no keys.
 """
@@ -132,17 +133,32 @@ def test_secret_key_missing_refuses(checkout_env, monkeypatch):
         stripe_billing._secret_key()
 
 
-def test_live_key_refused_without_network(checkout_env, monkeypatch):
+def test_secret_key_accepts_test_and_live_keys(checkout_env, monkeypatch):
+    # Issue #126 premise-changed test: _secret_key used to refuse live keys.
+    from app import stripe_billing
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc123")
+    assert stripe_billing._secret_key() == "sk_test_abc123"
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc123")
+    assert stripe_billing._secret_key() == "sk_live_abc123"
+
+
+def test_live_key_checkout_session_created(checkout_env, monkeypatch):
+    # Issue #126 premise-changed test: a live key used to be refused before
+    # any network call; it now constructs the session request (mocked).
     from app import stripe_billing
 
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc123")
     captured = []
     monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
-    with pytest.raises(stripe_billing.LiveKeyRefused):
-        stripe_billing.create_checkout_session(
-            user_id="u1", pack_id="starter", purchase_id="p1",
-            success_url="https://x/s", cancel_url="https://x/c")
-    assert captured == [], "live key must never reach the network"
+    url, session_id = stripe_billing.create_checkout_session(
+        user_id="u1", pack_id="starter", purchase_id="p1",
+        success_url="https://x/s", cancel_url="https://x/c")
+    assert session_id == "cs_test_1"
+    assert url == "https://checkout.stripe.com/pay/cs_test_1"
+    assert len(captured) == 1
+    assert captured[0]["auth"][0] == "sk_live_abc123"
+    assert captured[0]["data"]["line_items[0][price]"] == PACK_PRICES["starter"]
 
 
 def test_unrecognized_key_format_refused(checkout_env, monkeypatch):
@@ -311,7 +327,9 @@ def test_checkout_503_when_stripe_unconfigured(checkout_env, monkeypatch):
         assert db.query(models.CreditPurchase).count() == 0
 
 
-def test_checkout_refuses_live_key(checkout_env, monkeypatch):
+def test_checkout_accepts_live_key(checkout_env, monkeypatch):
+    # Issue #126 premise-changed test: the route used to answer 500 for a
+    # live key without any network call; it now creates the session.
     from app import stripe_billing
 
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc123")
@@ -320,8 +338,11 @@ def test_checkout_refuses_live_key(checkout_env, monkeypatch):
     _, csrf = _login(checkout_env)
     resp = checkout_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
-    assert resp.status_code == 500
-    assert captured == [], "live key must never reach the network"
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["checkout_url"].startswith(
+        "https://checkout.stripe.com/pay/")
+    assert len(captured) == 1
+    assert captured[0]["auth"][0] == "sk_live_abc123"
 
 
 def test_checkout_rate_limited(checkout_env, monkeypatch):
@@ -359,10 +380,10 @@ def test_402_page_carries_buy_credits_cta(checkout_env):
     }
     request = Request(scope)
     response = _analysis_response(
-        request, 402, message="Insufficient Power-Up credits.", buy_credits=True)
+        request, 402, message="Insufficient credits.", buy_credits=True)
     assert response.status_code == 402
     body = response.body.decode()
-    assert "Insufficient Power-Up credits." in body
+    assert "Insufficient credits." in body
     assert 'href="/credits"' in body and "Buy credits" in body
 
 

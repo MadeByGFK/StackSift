@@ -503,7 +503,14 @@ def test_fresh_analysis_result_shows_pdf_export_button(env):
             models.Result.user_id == env.uid).one()
         rid = str(result.id)
     assert f"/reports/{rid}/pdf" in resp.text
-    assert "Export PDF (2 credits)" in resp.text
+    # PREMISE-CHANGED by issue #129 + founder UI amendment: the single
+    # Export button (with format dropdown) replaces the old priced
+    # per-format "Export PDF (2 credits)" button on the report page.
+    # PREMISE-CHANGED again by issue #136 (one job per page): that
+    # dropdown is now the single "Actions" menu on the report page.
+    assert ">Actions</button>" in resp.text
+    assert ">Export PDF</button>" in resp.text
+    assert "Export PDF (2 credits)" not in resp.text
 
     # Replay of the same request (no re-analysis) shows the button too.
     resp2 = env.client.post(

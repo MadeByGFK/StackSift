@@ -3,6 +3,7 @@ from collections import Counter
 from pathlib import Path
 
 from stacksift.parser import parse_log_line
+from stacksift.redact import redact_secrets
 from stacksift.scanner import find_log_files
 
 
@@ -31,6 +32,374 @@ _TELEMETRY_FIELDS = {
 # Maximum correlation samples per issue template (bounded).
 # If truncated, the issue gets "correlation_truncated": True.
 _MAX_CORRELATION_SAMPLES = 20
+
+# --- Issue #106 Stage 1: grouping version, peak severity, evidence -------
+# F01/F04/F05 are CORE correctness fixes (approved #106 spec, Stage 1):
+# they change the grouping template and the recorded group level for
+# standard and premium output alike. GROUPING_VERSION identifies the
+# corrected grouping so retained evidence can name the rules it was
+# captured under.
+GROUPING_VERSION = "106-stage1-v1"
+DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION = 1
+
+_LEVEL_RANK = {"WARN": 0, "ERROR": 1, "CRITICAL": 2}
+
+
+def _peak_level(a: str, b: str) -> str:
+    """Highest of two severities under WARN < ERROR < CRITICAL (F04)."""
+    return a if _LEVEL_RANK.get(a, -1) >= _LEVEL_RANK.get(b, -1) else b
+
+
+# Retained diagnostic-evidence bounds (#106 Stage 1). Excerpt sampling
+# starts from the comparison collector's policy: at most 2 excerpts per
+# observed severity per group, each at most 1,024 characters.
+MAX_DIAGNOSTIC_EVIDENCE_GROUPS = 1000
+MAX_DIAGNOSTIC_EVIDENCE_BYTES = 8 * 1024 * 1024
+MAX_DIAGNOSTIC_EXCERPTS_PER_LEVEL = 2
+MAX_DIAGNOSTIC_EXCERPT_CHARS = 1024
+
+
+def _redact_retained(value):
+    """Redact a value retained in evidence at capture time.
+
+    The web path feeds the analyzer already-redacted lines, but the
+    CLI path feeds the original file — so capture itself must redact,
+    or retained excerpts can carry credentials the grouping template
+    omits (PR #137 Codex P2). Redaction is idempotent for the
+    already-redacted web input: ``[REDACTED]`` placeholders are not
+    re-matched, so web results are unchanged.
+    """
+    return redact_secrets(value) if isinstance(value, str) else value
+
+
+# Conservative serialized-size floors for batched trimming (PR #137
+# Codex P1). Each floor provably UNDERSTATES the bytes removing the
+# entry actually saves — the serialized element itself (keys, quotes,
+# separators) is larger, escaping only expands text, and flipping a
+# truncation flag False->True only shrinks the document — so when the
+# accumulated floors cover the excess, one re-measurement confirms the
+# bound; the verify loop re-trims if an estimate ever falls short.
+_EXCERPT_SERIALIZED_FLOOR = 110   # plus len(text)
+_GROUP_SERIALIZED_FLOOR = 80      # plus len(template)
+_METADATA_SERIALIZED_FLOOR = 35   # plus len(template)
+
+
+def _enforce_evidence_size(evidence: dict) -> None:
+    """Trim retained evidence in place to the serialized-size bound.
+
+    Excerpts are dropped first (newest group, newest excerpt); whole
+    groups are dropped only when no excerpts remain; per-group
+    severity metadata is dropped only as a last resort when neither
+    remains. Every trim is disclosed via the evidence truncation
+    flags — never silently.
+
+    Trimming is BATCHED (PR #137 Codex P1): the document is serialized
+    once per batch, entries are removed until their conservative
+    serialized-size floors cover the excess, and the result is
+    re-measured. The previous implementation re-serialized the whole
+    document for every single excerpt removed — O(excerpts x size),
+    which timed out on multi-MB inputs with many groups.
+    """
+    import json as _json
+
+    groups = evidence["groups"]
+    metadata = evidence.get("severity_metadata")
+    size = len(_json.dumps(evidence).encode("utf-8"))
+    while size > MAX_DIAGNOSTIC_EVIDENCE_BYTES:
+        excess = size - MAX_DIAGNOSTIC_EVIDENCE_BYTES
+        # Phase 1: excerpts, newest group first, newest excerpt first
+        # (a group is drained before moving to the next-newest — the
+        # same order as removing one excerpt at a time).
+        removed = 0
+        trimmed = False
+        for template in reversed(list(groups)):
+            group = groups[template]
+            while group["excerpts"] and removed < excess:
+                excerpt = group["excerpts"].pop()
+                removed += _EXCERPT_SERIALIZED_FLOOR + len(
+                    excerpt.get("text") or "")
+                group["excerpts_truncated"] = True
+                trimmed = True
+            if removed >= excess:
+                break
+        if trimmed:
+            evidence["truncated"] = True
+            size = len(_json.dumps(evidence).encode("utf-8"))
+            continue
+        # Phase 2: whole excerpt groups (newest first, as popitem),
+        # only when no excerpts remain anywhere. Severity metadata
+        # for a dropped group is retained (see phase 3).
+        removed = 0
+        dropped = False
+        while groups and removed < excess:
+            template, _group = groups.popitem()
+            removed += _GROUP_SERIALIZED_FLOOR + len(template)
+            dropped = True
+        if dropped:
+            evidence["groups_truncated"] = True
+            evidence["truncated"] = True
+            size = len(_json.dumps(evidence).encode("utf-8"))
+            continue
+        # Phase 3: severity metadata, last resort only — reached only
+        # when no excerpt groups remain, so retained counts alone
+        # still exceed the bound (pathological template volume).
+        if metadata:
+            removed = 0
+            dropped_meta = False
+            while metadata and removed < excess:
+                template = next(reversed(metadata))
+                del metadata[template]
+                removed += _METADATA_SERIALIZED_FLOOR + len(template)
+                dropped_meta = True
+            if dropped_meta:
+                evidence["groups_truncated"] = True
+                evidence["truncated"] = True
+                size = len(_json.dumps(evidence).encode("utf-8"))
+                continue
+        break
+
+
+class _DiagnosticEvidenceBuilder:
+    """Bounded retained-evidence capture at the parse/group point.
+
+    Generalizes the opt-in comparison collector (#102): the same branch
+    that groups an entry records, for the corrected template, the
+    per-severity observed counts and bounded redacted excerpts of the
+    analysis lines that produced the group. Excerpt text and retained
+    metadata fields are redacted AT CAPTURE (see _redact_retained), so
+    coordinates are labeled "analysis line" — they are not claimed to
+    be original physical source lines.
+
+    Severity metadata (level_counts + peak) is tracked separately for
+    EVERY observed group, even when the group's excerpt capture is
+    clipped by the group cap (PR #137 Codex P2): counts are small, and
+    losing them made merged evidence contradict the combined issue.
+    """
+
+    def __init__(self) -> None:
+        self.groups: dict = {}
+        self.metadata: dict = {}
+        self.groups_truncated = False
+        self._seq = 0
+
+    def record(self, template, level, line_number, raw_text,
+               timestamp, service) -> None:
+        # Severity metadata is retained for ALL groups, uncapped.
+        meta = self.metadata.get(template)
+        if meta is None:
+            meta = {"level_counts": {}, "peak_level": level}
+            self.metadata[template] = meta
+        meta["level_counts"][level] = meta["level_counts"].get(level, 0) + 1
+        meta["peak_level"] = _peak_level(meta["peak_level"], level)
+        group = self.groups.get(template)
+        if group is None:
+            if len(self.groups) >= MAX_DIAGNOSTIC_EVIDENCE_GROUPS:
+                self.groups_truncated = True
+                return
+            group = {
+                "excerpts": [],
+                "excerpts_truncated": False,
+                "_captured": {},
+            }
+            self.groups[template] = group
+        captured = group["_captured"].get(level, 0)
+        if captured >= MAX_DIAGNOSTIC_EXCERPTS_PER_LEVEL:
+            group["excerpts_truncated"] = True
+            return
+        # Redact BEFORE truncation so no secret (or secret fragment
+        # straddling the excerpt cap) is retained.
+        text = _redact_retained(raw_text)
+        text_truncated = False
+        if len(text) > MAX_DIAGNOSTIC_EXCERPT_CHARS:
+            text = text[:MAX_DIAGNOSTIC_EXCERPT_CHARS]
+            text_truncated = True
+            group["excerpts_truncated"] = True
+        group["_captured"][level] = captured + 1
+        self._seq += 1
+        group["excerpts"].append({
+            "evidence_id": f"ev-{self._seq:06d}",
+            "level": level,
+            "analysis_line_number": line_number,
+            "text": text,
+            "text_truncated": text_truncated,
+            "timestamp": _redact_retained(timestamp),
+            "service": _redact_retained(service),
+        })
+
+    def build(self) -> dict:
+        groups = {}
+        truncated = self.groups_truncated
+        for template, group in self.groups.items():
+            if group["excerpts_truncated"]:
+                truncated = True
+            meta = self.metadata[template]
+            groups[template] = {
+                "level_counts": dict(meta["level_counts"]),
+                "peak_level": meta["peak_level"],
+                "excerpts": [dict(e) for e in group["excerpts"]],
+                "excerpts_truncated": group["excerpts_truncated"],
+            }
+        evidence = {
+            "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+            "grouping_version": GROUPING_VERSION,
+            "coordinate": "analysis line",
+            "groups": groups,
+            "severity_metadata": {
+                template: {
+                    "level_counts": dict(meta["level_counts"]),
+                    "peak_level": meta["peak_level"],
+                }
+                for template, meta in self.metadata.items()
+            },
+            "groups_truncated": self.groups_truncated,
+            "truncated": truncated,
+        }
+        _enforce_evidence_size(evidence)
+        return evidence
+
+
+class _DiagnosticEvidenceMerger:
+    """Incremental cross-file diagnostic-evidence merger.
+
+    analyze_path feeds each file's evidence in as that file is
+    processed and then releases the per-file artifact (PR #137 Codex
+    P2): only this ONE bounded accumulator is retained across files,
+    instead of a list holding every file's complete evidence until
+    the end. Severity counts sum from the FULL per-file severity
+    metadata (not just the excerpt-clipped groups), peak levels merge
+    by peak, excerpts keep the per-severity capture cap, and evidence
+    IDs are re-sequenced so the merged artifact carries stable,
+    unique IDs. Analysis-line numbers remain coordinates within their
+    own source file. For inputs whose per-file capture was not
+    clipped, the merged output is identical to merging the per-file
+    ``groups`` maps directly.
+    """
+
+    def __init__(self) -> None:
+        self.groups: dict = {}
+        self.metadata: dict = {}
+        self.groups_truncated = False
+        self.truncated = False
+        self._seq = 0
+        # Templates some file knew only through severity metadata —
+        # that file's excerpt capture for the group was clipped whole,
+        # so a merged group for the template honestly reports its
+        # excerpts as truncated (excerpts only; severity metadata for
+        # the group is complete — see add()).
+        self._excerpt_clipped: set = set()
+
+    def add(self, ev) -> None:
+        """Merge ONE per-file evidence artifact, then release it."""
+        if not ev:
+            return
+        self.groups_truncated = (
+            self.groups_truncated or bool(ev.get("groups_truncated")))
+        self.truncated = self.truncated or bool(ev.get("truncated"))
+        ev_groups = ev.get("groups", {})
+        # Full severity metadata first. Artifacts built before the
+        # separate metadata map existed fall back to their groups'
+        # counts (identical when nothing was clipped).
+        meta_source = ev.get("severity_metadata")
+        if meta_source is None:
+            meta_source = {
+                template: {
+                    "level_counts": group.get("level_counts", {}),
+                    "peak_level": group.get("peak_level"),
+                }
+                for template, group in ev_groups.items()
+            }
+        for template, meta in meta_source.items():
+            combined_meta = self.metadata.get(template)
+            if combined_meta is None:
+                combined_meta = {"level_counts": {}, "peak_level": None}
+                self.metadata[template] = combined_meta
+            for lvl, count in meta.get("level_counts", {}).items():
+                combined_meta["level_counts"][lvl] = (
+                    combined_meta["level_counts"].get(lvl, 0) + count)
+            peak = meta.get("peak_level")
+            if peak:
+                combined_meta["peak_level"] = (
+                    _peak_level(combined_meta["peak_level"], peak)
+                    if combined_meta["peak_level"] else peak)
+            if template not in ev_groups:
+                self._excerpt_clipped.add(template)
+        for template, group in ev_groups.items():
+            combined = self.groups.get(template)
+            if combined is None:
+                if len(self.groups) >= MAX_DIAGNOSTIC_EVIDENCE_GROUPS:
+                    self.groups_truncated = True
+                    self.truncated = True
+                    self._excerpt_clipped.add(template)
+                    continue
+                combined = {
+                    "excerpts": [],
+                    "excerpts_truncated": False,
+                    "_captured": {},
+                }
+                self.groups[template] = combined
+            combined["excerpts_truncated"] = (
+                combined["excerpts_truncated"]
+                or bool(group.get("excerpts_truncated")))
+            for excerpt in group["excerpts"]:
+                lvl = excerpt["level"]
+                if combined["_captured"].get(lvl, 0) >= \
+                        MAX_DIAGNOSTIC_EXCERPTS_PER_LEVEL:
+                    combined["excerpts_truncated"] = True
+                    continue
+                combined["_captured"][lvl] = \
+                    combined["_captured"].get(lvl, 0) + 1
+                self._seq += 1
+                merged_excerpt = dict(excerpt)
+                merged_excerpt["evidence_id"] = f"ev-{self._seq:06d}"
+                combined["excerpts"].append(merged_excerpt)
+
+    def build(self) -> dict:
+        out_groups = {}
+        truncated = self.truncated
+        for template, group in self.groups.items():
+            excerpts_truncated = (
+                group["excerpts_truncated"]
+                or template in self._excerpt_clipped)
+            if excerpts_truncated:
+                truncated = True
+            meta = self.metadata.get(template) or {
+                "level_counts": {}, "peak_level": None}
+            out_groups[template] = {
+                "level_counts": dict(meta["level_counts"]),
+                "peak_level": meta["peak_level"],
+                "excerpts": group["excerpts"],
+                "excerpts_truncated": excerpts_truncated,
+            }
+        evidence = {
+            "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+            "grouping_version": GROUPING_VERSION,
+            "coordinate": "analysis line",
+            "groups": out_groups,
+            "severity_metadata": {
+                template: {
+                    "level_counts": dict(meta["level_counts"]),
+                    "peak_level": meta["peak_level"],
+                }
+                for template, meta in self.metadata.items()
+            },
+            "groups_truncated": self.groups_truncated,
+            "truncated": truncated,
+        }
+        _enforce_evidence_size(evidence)
+        return evidence
+
+
+def _merge_diagnostic_evidence(evidences) -> dict:
+    """Merge per-file diagnostic evidence (analyze_path cross-file leg).
+
+    Thin batch wrapper over the incremental merger analyze_path uses
+    file-by-file; kept for callers that already hold the artifacts.
+    """
+    merger = _DiagnosticEvidenceMerger()
+    for ev in evidences:
+        merger.add(ev)
+    return merger.build()
+
 
 
 def _bucket_key(timestamp: str) -> str | None:
@@ -106,9 +475,50 @@ def _keep_or_normalize(match: re.Match) -> str:
     return f"{match.group(1)}=<n>"
 
 
+# F05 (#106): the anchored request-handler wrapper, stripped ONLY when
+# the remainder is a recognized exception-bearing cause (an exception
+# type ending in Error/Exception/Fault/Timeout followed by ":"). Other
+# wrappers and other causes keep their literal identity.
+_WRAPPER_PREFIX = "Request handler failed: "
+_EXCEPTION_CAUSE = re.compile(
+    r"^[A-Z][A-Za-z0-9_]*(?:Error|Exception|Fault|Timeout):")
+
+# F01 (#106): a volatile BARE order identifier — the word "order"
+# followed by a bare number with no field name (``order 58291``). This
+# is deliberately contextual: numbers anywhere else (status codes,
+# host/node names, ports, counts) are NOT touched by this rule.
+#
+# PR #137 finding 5: ``byte order <n>`` is a property context, NOT an
+# identifier context — the number encodes the byte-ordering property
+# itself (1234 vs 4321 are the classic little- vs big-endian
+# encodings), so distinct values are distinct failures and must be
+# preserved verbatim. The first alternative matches that phrase so
+# the substitution below can leave it untouched; only a bare
+# ``order <n>`` outside it is normalized.
+_BARE_ORDER_ID = re.compile(r"\b(?i:byte order) \d+\b|\border \d+\b")
+
+
+def _normalize_bare_order_id(match: re.Match) -> str:
+    text = match.group(0)
+    if text.lower().startswith("byte"):
+        return text
+    return "order <id>"
+
+
 def normalize_issue(message: str) -> str:
     """Return the grouping template for a log message."""
     msg = message
+    # 0a. F05: unwrap the anchored request-handler wrapper when it wraps
+    #     a recognized exception-bearing cause, so the wrapped and bare
+    #     forms of the same failure share one group identity. Occurrence
+    #     totals are preserved — this is grouping, not deduplication.
+    if msg.startswith(_WRAPPER_PREFIX):
+        cause = msg[len(_WRAPPER_PREFIX):]
+        if _EXCEPTION_CAUSE.match(cause):
+            msg = cause
+    # 0b. F01: normalize volatile bare order identifiers in context
+    #     (the byte-order property phrase is preserved verbatim).
+    msg = _BARE_ORDER_ID.sub(_normalize_bare_order_id, msg)
     # 1. Field-name-based: normalize the VALUE of known identifier fields,
     #    except fields that identify where it happened (node, host, ...).
     for field in _ID_FIELDS:
@@ -134,6 +544,9 @@ def analyze_log_file(file_path: str) -> dict:
     level_counts = Counter()
     service_counts = Counter()
     issue_counts = {}
+    # Issue #106 Stage 1: retained diagnostic evidence, always captured
+    # for new analyses (additive key; see _DiagnosticEvidenceBuilder).
+    diagnostic_evidence = _DiagnosticEvidenceBuilder()
     events = []
     first_seen = None
     last_seen = None
@@ -188,6 +601,18 @@ def analyze_log_file(file_path: str) -> dict:
 
                 issue = issue_counts[template]
                 issue["count"] += 1
+                # F04 (#106): the group's recorded level is the PEAK
+                # observed severity, not the first-seen one. Individual
+                # level_counts and occurrence counts are unchanged and
+                # source events are never relabeled.
+                issue["level"] = _peak_level(issue["level"], entry.level)
+                # #106 Stage 1: retained diagnostic evidence, recorded
+                # at this same parse/group point so every excerpt maps
+                # to the corrected issue key and an actual processed
+                # (redacted analysis) line.
+                diagnostic_evidence.record(
+                    template, entry.level, total_lines,
+                    line.rstrip("\n"), entry.timestamp, entry.service)
 
                 # Preserve structured evidence (Phase A — no behavior change)
                 fields = extract_structured_fields(entry.message)
@@ -271,6 +696,7 @@ def analyze_log_file(file_path: str) -> dict:
         "events": events,
         "first_seen": first_seen,
         "last_seen": last_seen,
+        "diagnostic_evidence": diagnostic_evidence.build(),
     }
 
 
@@ -291,9 +717,17 @@ def analyze_path(input_path: str) -> dict:
     parsed_lines = 0
     malformed_lines = 0
     scanned_files = []
+    # PR #137 Codex P2: merge each file's evidence into ONE bounded
+    # accumulator as it is produced and release the per-file artifact
+    # — the previous list retained every file's complete evidence
+    # until all files were processed.
+    evidence_merger = _DiagnosticEvidenceMerger()
 
     for log_file in log_files:
         results = analyze_log_file(str(log_file))
+        if results.get("diagnostic_evidence") is not None:
+            evidence_merger.add(results["diagnostic_evidence"])
+            results["diagnostic_evidence"] = None
 
         scanned_files.append(results["file"])
         total_lines += results["total_lines"]
@@ -325,6 +759,9 @@ def analyze_path(input_path: str) -> dict:
 
             combined = combined_issue_counts[message]
             combined["count"] += issue_data["count"]
+            # F04 (#106): cross-file merge also takes the peak level.
+            combined["level"] = _peak_level(
+                combined["level"], issue_data["level"])
             # Merge Phase A structured evidence
             combined["services"].update(issue_data.get("services", []))
             for field, values in issue_data.get("correlation", {}).items():
@@ -377,4 +814,5 @@ def analyze_path(input_path: str) -> dict:
         "events": combined_events,
         "first_seen": first_seen,
         "last_seen": last_seen,
+        "diagnostic_evidence": evidence_merger.build(),
     }

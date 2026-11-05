@@ -24,7 +24,14 @@ function wireAuthForm(form) {
         method: 'POST', credentials: 'same-origin', body: new FormData(form),
       });
       const result = await response.json();
-      if (output) output.textContent = result.error || (typeof result.detail === 'string' ? result.detail : '') || result.message || 'Unable to complete this request. Please try again.';
+      // ISSUE-130: a form may opt into a confirmation modal on success via
+      // data-success-modal="<message>" (the password-reset form is the
+      // first user). The modal replaces the inline status text so the
+      // completed action ends with an explicit acknowledgement, which
+      // hands the browser to data-success-url. Errors are untouched:
+      // they still land in the status element exactly as before.
+      const successModal = response.ok && form.hasAttribute('data-success-modal');
+      if (output && !successModal) output.textContent = result.error || (typeof result.detail === 'string' ? result.detail : '') || result.message || 'Unable to complete this request. Please try again.';
       if (notifyFeedback && output) {
         output.classList.toggle('notify-success', response.ok);
         output.classList.toggle('notify-error', !response.ok);
@@ -36,7 +43,9 @@ function wireAuthForm(form) {
           if (emailInput) emailInput.value = '';
         }
       }
-      if (response.ok && form.dataset.successUrl) location.assign(form.dataset.successUrl);
+      if (successModal) {
+        showSuccessModal(form.dataset.successModal, form.dataset.successUrl);
+      } else if (response.ok && form.dataset.successUrl) location.assign(form.dataset.successUrl);
       // ISSUE-68: the credits-page buy forms (data-checkout-form) receive the
       // Stripe Checkout URL as JSON and hand the browser to Stripe.
       if (form.hasAttribute('data-checkout-form') && response.ok && result.checkout_url) location.assign(result.checkout_url);
@@ -50,6 +59,45 @@ function wireAuthForm(form) {
     }
   });
 }
+// ISSUE-130: one-button confirmation modal, in the same visual pattern as
+// the credit/error modals below. The action it confirms has ALREADY
+// completed server-side, so every dismissal path (OK, Escape, overlay
+// click) is an acknowledgement: close the modal and, when a target URL is
+// given, navigate to it — there is nothing left to do on the old page
+// (a used reset form cannot be resubmitted).
+function showSuccessModal(message, url) {
+  const old = document.getElementById('success-modal');
+  if (old) old.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'success-modal';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;';
+  const card = document.createElement('div');
+  card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
+  card.setAttribute('role', 'alertdialog');
+  card.setAttribute('aria-label', message);
+  const msg = document.createElement('p');
+  msg.style.cssText = 'margin:0 0 1rem 0;font-size:1.05rem;';
+  msg.textContent = message;
+  card.appendChild(msg);
+  const ok = document.createElement('button');
+  ok.type = 'button';
+  ok.textContent = 'OK';
+  ok.style.cssText = 'display:block;width:100%;padding:0.7rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;border:none;cursor:pointer;font:inherit;';
+  card.appendChild(ok);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  function acknowledge() {
+    document.removeEventListener('keydown', esc);
+    overlay.remove();
+    if (url) location.assign(url);
+  }
+  function esc(e) { if (e.key === 'Escape') acknowledge(); }
+  ok.addEventListener('click', acknowledge);
+  overlay.addEventListener('click', e => { if (e.target === overlay) acknowledge(); });
+  document.addEventListener('keydown', esc);
+  ok.focus();
+}
+
 for (const form of document.querySelectorAll('form[data-auth-form]')) {
   wireAuthForm(form);
 }
@@ -294,6 +342,16 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           });
         }
       } catch (_) {
+        // Network failure: nothing was downloaded and no modal is
+        // shown (pre-existing behaviour); the finally below still
+        // re-enables the button.
+      } finally {
+        // Issue #136 consistency fix (the #129 closure quirk): the
+        // submit button was previously re-enabled ONLY on a network
+        // exception, so after a completed PDF download — and after
+        // an error response — the PDF menu item stayed disabled for
+        // the rest of the session until a page reload. Re-enabling
+        // in finally keeps the disable as an in-flight guard only.
         button.disabled = false;
       }
     });

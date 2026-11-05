@@ -53,6 +53,7 @@
   .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.err{background:var(--err)} .dot.neutral{background:var(--muted)}
   .info{flex:1;min-width:0}
   .name{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .kind-title{font-size:13px;font-weight:600;color:var(--accent);letter-spacing:.01em;margin-bottom:2px}
   .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;color:var(--muted);font-size:13px}
   .sep{opacity:.5}
   .expiry{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:rgba(157,177,204,.08);font-size:12px}
@@ -65,6 +66,17 @@
   .btn-primary{background:var(--accent);color:var(--bg)}
   .btn-primary:hover{background:#e0bd4a}
   .btn-primary .cost{font-weight:500;opacity:.75}
+
+  /* Issue #129: Export dropdown + popup modals */
+  .menu-wrap{position:relative;display:inline-block}
+  .menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:150px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  .menu form{margin:0}
+  .menu-item{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font:inherit;font-size:14px;font-weight:600;padding:8px 10px;border-radius:6px;cursor:pointer}
+  .menu-item:hover{background:var(--panel-hover)}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50}
+  .modal-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:420px;width:90%}
+  .modal-card p{margin:0 0 14px}
+  .modal-card input[type=text]{width:100%;box-sizing:border-box;margin-bottom:8px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:inherit;font-size:13px}
 
   /* Pagination */
   .pager{display:flex;align-items:center;justify-content:space-between;margin-top:28px}
@@ -143,19 +155,75 @@
     <li class="card">
       <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warn{% elif report.severity == 'errors' %} err{% else %} neutral{% endif %}"></span></div>
       <div class="info">
+        {# Issue #144: Analysis Report (deep_dive) rows carry an
+           "Analysis Report" title above the filename so they are
+           distinguishable from source report rows. #}
+        {% if report.type == 'deep_dive' %}
+        <div class="kind-title">Analysis Report</div>
+        {% endif %}
         <div class="name">{{ report.filename }}</div>
         <div class="meta">
-          <span>Analyzed {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
-          <span>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
-          <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}">Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
+          {# Issue #144: deep_dive rows were Created (derived), not
+             Analyzed; source rows (analysis/comparison/batch) keep
+             "Analyzed". #}
+          <span>{% if report.type == 'deep_dive' %}Created{% else %}Analyzed{% endif %} {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
+          <span data-retention-expiry-date>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
+          <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}" data-retention-expiry-pill>Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
         </div>
       </div>
       <div class="actions">
         <a href="/reports/{{ report.id }}" class="btn btn-ghost">View</a>
-        <form method="post" action="/reports/{{ report.id }}/pdf" style="display:inline;margin:0">
+        <span class="menu-wrap">
+          <button type="button" class="btn btn-primary export-toggle" data-menu="menu-{{ report.id }}" aria-haspopup="true" aria-expanded="false">Export</button>
+          <span class="menu" id="menu-{{ report.id }}" style="display:none">
+            <form method="post" action="/reports/{{ report.id }}/pdf" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="menu-item">PDF</button>
+            </form>
+            {% if report.type != 'comparison' and report.report_kind != 'batch' %}
+            <form method="post" action="/reports/{{ report.id }}/exports/csv" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="menu-item">CSV</button>
+            </form>
+            <form method="post" action="/reports/{{ report.id }}/exports/json" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="menu-item">JSON</button>
+            </form>
+            {% endif %}
+          </span>
+        </span>
+        {# Issue #106 Stage 2 + founder amendment: row order is
+           View / Export / Analysis / Share / Extend. Analysis opens
+           the shared popup below; an existing Analysis Report links
+           straight to it (no second charge). #}
+        {% if report.type == 'analysis' %}
+          {% if report.analysis_result_id %}
+          <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Analysis</a>
+          {% else %}
+          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-reason="{{ report.analysis_reason or '' }}">Analysis</button>
+          {% endif %}
+        {% endif %}
+        {# Issue #106 Stage 2 / PR #139 F2: no Share for Analysis
+           Report rows — sharing is defined for source reports only
+           and _share_owner_gate admits only analysis/comparison, so
+           a Share button on a deep_dive row always 404s (dead
+           button). Mirrors the Extend suppression below; the
+           server-side 404 rejection is retained. #}
+        {% if report.type != 'deep_dive' %}
+        <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
+        {% endif %}
+        {# Issue #106 Stage 2: no Extend for Analysis Report rows —
+           the retention route admits only analysis/comparison
+           sources, so an Extend form on a deep_dive row would POST
+           to a 404 (dead button). Normal reports keep Extend. #}
+        {% if report.type != 'deep_dive' %}
+        <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" data-retention-form style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="btn btn-primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>PDF <span class="cost">(2 credits)</span></button>
+          <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
+          <button type="submit" class="btn btn-ghost">Extend</button>
         </form>
+        <span class="retention-status" data-retention-status role="status" style="display:none"></span>
+        {% endif %}
       </div>
     </li>
     {% endfor %}
@@ -188,6 +256,523 @@
   {% endif %}
 
 </main>
+
+<div id="ss-confirm" class="modal" style="display:none">
+  <div class="modal-card">
+    <p id="ss-confirm-text"></p>
+    <button type="button" class="btn btn-primary" id="ss-confirm-yes">Continue</button>
+    <button type="button" class="btn btn-ghost" id="ss-confirm-no">Cancel</button>
+  </div>
+</div>
+
+<div id="extend-modal" class="modal" style="display:none">
+  <div class="modal-card">
+    <p id="extend-msg"></p>
+    <button type="button" class="btn btn-primary" id="extend-close">Close</button>
+  </div>
+</div>
+
+<div id="analysis-modal" class="modal" style="display:none">
+  <div class="modal-card">
+    <p id="analysis-msg"></p>
+    <div id="analysis-link-row" style="display:none;margin-bottom:12px">
+      <a class="btn btn-primary" id="analysis-view" href="#">View Analysis Report</a>
+    </div>
+    <button type="button" class="btn btn-primary" id="analysis-confirm">Generate Analysis Report</button>
+    <button type="button" class="btn btn-ghost" id="analysis-close">Cancel</button>
+  </div>
+</div>
+
+<div id="share-modal" class="modal" style="display:none">
+  <div class="modal-card">
+    <p id="share-msg"></p>
+    {# Issue #135: format choice — TXT free; PDF/JSON/CSV locked
+       until the report's export unlock (the server refuses locked
+       formats with 402 until the unlock is bought via Export). #}
+    <fieldset id="share-format-choice" style="border:none;margin:0 0 12px;padding:0">
+      <legend style="margin-bottom:6px">Format</legend>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="txt" checked> TXT (free)</label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="pdf"> PDF<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="json"> JSON<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+      <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="csv"> CSV<span class="share-lock-note"> 🔒 locked — export unlock required</span></label>
+    </fieldset>
+    <div id="share-link-row" style="display:none;margin-bottom:12px">
+      <input type="text" id="share-link" readonly>
+      <button type="button" class="btn btn-ghost" id="share-copy">Copy link</button>
+      <a class="btn btn-ghost" id="share-mailto" href="mailto:">Open in email</a>
+    </div>
+    <button type="button" class="btn btn-primary" id="share-create">Create share link</button>
+    <button type="button" class="btn btn-ghost" id="share-rotate" style="display:none">Rotate link</button>
+    <button type="button" class="btn btn-ghost" id="share-revoke" style="display:none">Revoke link</button>
+    <button type="button" class="btn btn-ghost" id="share-close">Close</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  document.querySelectorAll('.export-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var menu = document.getElementById(btn.getAttribute('data-menu'));
+      var open = menu.style.display === 'block';
+      document.querySelectorAll('.menu').forEach(function (m) { m.style.display = 'none'; });
+      menu.style.display = open ? 'none' : 'block';
+      btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+    });
+  });
+  var modal = document.getElementById('ss-confirm');
+  var text = document.getElementById('ss-confirm-text');
+  var pending = null;
+  document.querySelectorAll('form[data-confirm]').forEach(function (f) {
+    f.addEventListener('submit', function (e) {
+      if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
+      e.preventDefault();
+      // PR #132 follow-up (P1): this listener is registered BEFORE
+      // auth_form_script.html's PDF fetch listener (this inline
+      // script precedes that include), so stopImmediatePropagation
+      // keeps the PDF fetch — and its 2-credit charge — from
+      // firing while the confirmation popup is open. Cancel
+      // therefore sends nothing at all.
+      e.stopImmediatePropagation();
+      pending = f;
+      text.textContent = f.getAttribute('data-confirm');
+      modal.style.display = 'flex';
+    });
+  });
+  document.getElementById('ss-confirm-yes').addEventListener('click', function () {
+    modal.style.display = 'none';
+    if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
+  });
+  document.getElementById('ss-confirm-no').addEventListener('click', function () {
+    modal.style.display = 'none';
+    pending = null;
+  });
+  // Issue #141: Extend (retention) is an IN-PAGE action. Its endpoint
+  // returns a JSON document, so the confirmed form must NOT be
+  // submitted natively — the browser navigated to the raw JSON page
+  // and stranded the user there. This listener mirrors the PDF fetch
+  // pattern in auth_form_script.html: it is registered AFTER the
+  // data-confirm handler above, which stopImmediatePropagation()s
+  // the first (unconfirmed) submit, so this listener only ever runs
+  // on the confirmed resubmit; it preventDefault()s that resubmit
+  // and posts the SAME form fields (CSRF token + the form's hidden
+  // idempotency_key, unchanged) via fetch. A retry therefore replays
+  // the same key server-side and cannot double-charge, and the key
+  // is deliberately NOT rotated after success.
+  var extendModal = document.getElementById('extend-modal');
+  var extendMsg = document.getElementById('extend-msg');
+  document.getElementById('extend-close').addEventListener('click', function () {
+    extendModal.style.display = 'none';
+  });
+  function showExtendError(message) {
+    extendMsg.textContent = message || 'Retention extension failed. Please try again.';
+    extendModal.style.display = 'flex';
+  }
+  function refreshCreditBadgeFromBalance() {
+    // PR #143 remediation (Codex P2): a replayed success means the
+    // server committed the charge on an EARLIER attempt whose
+    // response never reached this page (e.g. it was lost to a
+    // network error), so the badge was never decremented for a
+    // charge that did happen. The local badge value cannot be
+    // trusted in that case — refresh it from the authoritative
+    // GET /auth/balance payload (the same payload
+    // auth_form_script.html renders #credit-badge from). If the
+    // balance fetch fails or carries no usable balance, leave the
+    // badge unchanged and show no error: the extension itself
+    // succeeded, so this refresh is best-effort only.
+    var badge = document.getElementById('credit-badge');
+    if (!badge) { return Promise.resolve(); }
+    try {
+      return fetch('/auth/balance', { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data) { return; }
+          var balance = data.balance;
+          var parsed = null;
+          if (typeof balance === 'number' && isFinite(balance)) {
+            parsed = balance;
+          } else if (typeof balance === 'string' && /^-?\d+$/.test(balance.trim())) {
+            parsed = parseInt(balance.trim(), 10);
+          }
+          if (parsed === null) { return; }
+          badge.textContent = '\u{1FA99} ' + parsed + ' credits';
+        })
+        .catch(function () {});
+    } catch (err) {
+      return Promise.resolve();
+    }
+  }
+  function updateCreditBadge(cost, replayed) {
+    // The header badge (#credit-badge, rendered by
+    // auth_form_script.html from /auth/balance) is the page's credit
+    // balance display. A fresh extension charged `cost` just now,
+    // so decrement locally. A replayed response charged nothing
+    // new on THIS attempt, but the original attempt may have
+    // committed without its response reaching the page — refresh
+    // from the server instead of guessing (see above).
+    if (replayed) { return refreshCreditBadgeFromBalance(); }
+    var badge = document.getElementById('credit-badge');
+    if (!badge) { return; }
+    var match = String(badge.textContent || '').match(/-?\d+/);
+    if (!match) { return; }
+    var next = parseInt(match[0], 10) - (cost || 1);
+    badge.textContent = '\u{1FA99} ' + next + ' credits';
+  }
+  function updateExtendedRow(form, data) {
+    var card = form.closest ? form.closest('.card') : null;
+    if (!card || !data.expires_at) { return; }
+    var expiry = new Date(data.expires_at);
+    if (isNaN(expiry.getTime())) { return; }
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    var dateEl = card.querySelector('[data-retention-expiry-date]');
+    if (dateEl) {
+      dateEl.textContent = 'Expires ' + expiry.getUTCFullYear() + '-'
+        + pad(expiry.getUTCMonth() + 1) + '-' + pad(expiry.getUTCDate());
+    }
+    var daysLeft = Math.max(0, Math.floor((expiry.getTime() - Date.now()) / 86400000));
+    var pillEl = card.querySelector('[data-retention-expiry-pill]');
+    if (pillEl) {
+      pillEl.textContent = 'Expires in ' + daysLeft + (daysLeft === 1 ? ' day' : ' days');
+      if (pillEl.classList) {
+        if (daysLeft <= 1) { pillEl.classList.add('soon'); }
+        else { pillEl.classList.remove('soon'); }
+      }
+    }
+    var statusEl = card.querySelector('[data-retention-status]');
+    if (statusEl) {
+      statusEl.textContent = 'Retention extended.';
+      statusEl.style.display = '';
+    }
+  }
+  document.querySelectorAll('form[data-retention-form]').forEach(function (f) {
+    f.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var button = f.querySelector('button[type="submit"]');
+      if (button) { button.disabled = true; }
+      fetch(f.action, { method: 'POST', body: new FormData(f), credentials: 'same-origin' })
+        .then(function (r) {
+          return r.json().then(function (d) {
+            d = d || {};
+            d._httpOk = r.ok;
+            d._httpStatus = r.status;
+            return d;
+          }, function () {
+            return { _httpOk: r.ok, _httpStatus: r.status };
+          });
+        })
+        .then(function (d) {
+          if (d._httpOk && d.status === 'extended') {
+            updateExtendedRow(f, d);
+            return updateCreditBadge(d.cost, d.replayed);
+          } else {
+            showExtendError(d.error || d.message);
+          }
+        }, function () {
+          showExtendError('Retention extension failed. Please try again.');
+        })
+        .then(function () {
+          if (button) { button.disabled = false; }
+        });
+    });
+  });
+  var shareModal = document.getElementById('share-modal');
+  var shareMsg = document.getElementById('share-msg');
+  var linkRow = document.getElementById('share-link-row');
+  var linkBox = document.getElementById('share-link');
+  var mailto = document.getElementById('share-mailto');
+  var createBtn = document.getElementById('share-create');
+  var rotateBtn = document.getElementById('share-rotate');
+  var revokeBtn = document.getElementById('share-revoke');
+  function setShareButtons(active) {
+    // PR #132 follow-up (P2): update the still-open popup's visible
+    // buttons immediately on create/revoke success, not only on
+    // the next popup open.
+    createBtn.style.display = active ? 'none' : '';
+    rotateBtn.style.display = active ? '' : 'none';
+    revokeBtn.style.display = active ? '' : 'none';
+  }
+  var current = null;
+  // PR #138 remediation (finding 1): share state is PER FORMAT, not
+  // report-wide. Each row button carries data-formats (the formats
+  // with an active link for that report); the shared popup's
+  // Create/Rotate/Revoke visibility follows the SELECTED format for
+  // the CURRENT report, so a second format's link can be created
+  // without revoking the first.
+  function activeFormatsFor(btn) {
+    var raw = btn ? btn.getAttribute('data-formats') : '';
+    return raw ? raw.split(',').filter(function (f) { return f; }) : [];
+  }
+  function setActiveFormatsFor(btn, formats) {
+    if (!btn) { return; }
+    btn.setAttribute('data-formats', formats.join(','));
+    btn.setAttribute('data-active', formats.length ? '1' : '');
+  }
+  function shareFormatIsActiveFor(btn, fmt) {
+    return activeFormatsFor(btn).indexOf(fmt) !== -1;
+  }
+  function addActiveShareFormatFor(btn, fmt) {
+    var formats = activeFormatsFor(btn);
+    if (formats.indexOf(fmt) === -1) { formats.push(fmt); }
+    setActiveFormatsFor(btn, formats);
+  }
+  function removeActiveShareFormatFor(btn, fmt) {
+    setActiveFormatsFor(btn, activeFormatsFor(btn).filter(function (f) { return f !== fmt; }));
+  }
+  // PR #138 remediation round 2: track which format the URL
+  // currently shown in the link row belongs to (for the report in
+  // `current`). The server renders no per-format URLs into this
+  // page, so on a format change the row may be shown only for that
+  // format; any other format's URL must be hidden AND cleared so
+  // it can neither be copied/distributed under the wrong format
+  // nor resurrected by switching back. Reset on every popup open.
+  var displayedShareFormat = null;
+  function clearDisplayedLink() {
+    displayedShareFormat = null;
+    linkBox.value = '';
+    mailto.href = 'mailto:';
+    linkRow.style.display = 'none';
+  }
+  function refreshShareButtonsForSelectedFormat() {
+    if (!current) { return; }
+    var fmt = selectedShareFormat();
+    var active = shareFormatIsActiveFor(current, fmt);
+    setShareButtons(active);
+    if (displayedShareFormat !== fmt) {
+      clearDisplayedLink();
+    } else if (linkBox.value) {
+      linkRow.style.display = 'block';
+    }
+    shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+  }
+  function resolveShareUrl(url) {
+    // PR #132 finding 3: the server returns a hostless /s/<token>
+    // path when APP_BASE_URL is unset; resolve it against this
+    // origin before it reaches the copy field or the mailto body.
+    return new URL(url, window.location.origin).href;
+  }
+  function showLink(url, fmt) {
+    var absoluteUrl = resolveShareUrl(url);
+    displayedShareFormat = fmt || selectedShareFormat();
+    linkBox.value = absoluteUrl;
+    mailto.href = 'mailto:?subject=' + encodeURIComponent('StackSift report') + '&body=' + encodeURIComponent(absoluteUrl);
+    linkRow.style.display = 'block';
+  }
+  function freshShareKey() {
+    // PR #132 finding 1: after a successful share action the used
+    // idempotency key is replaced with a fresh one, so a later
+    // action (revoke -> rotate -> revoke) never replays an earlier
+    // action's key as a no-op.
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    var hex = '';
+    for (var i = 0; i < 32; i++) {
+      hex += Math.floor(Math.random() * 16).toString(16);
+    }
+    return hex;
+  }
+  function selectedShareFormat() {
+    var el = document.querySelector('input[name="share-format"]:checked');
+    return el ? el.value : 'txt';
+  }
+  document.querySelectorAll('input[name="share-format"]').forEach(function (el) {
+    el.addEventListener('change', refreshShareButtonsForSelectedFormat);
+  });
+  function postShare(path, key) {
+    var fd = new FormData();
+    fd.append('csrf_token', '{{ csrf_token }}');
+    fd.append('idempotency_key', key);
+    fd.append('format', selectedShareFormat());
+    return fetch(path, { method: 'POST', body: fd, credentials: 'same-origin' })
+      .then(function (r) {
+        // PR #132 finding 2: keep the HTTP status with the payload
+        // so callers can check success before reporting it (a 429
+        // revoke leaves the link active and must surface as an
+        // error, not as "revoked").
+        return r.json().then(function (d) {
+          d = d || {};
+          d._httpOk = r.ok;
+          d._httpStatus = r.status;
+          return d;
+        }, function () {
+          return { _httpOk: r.ok, _httpStatus: r.status };
+        });
+      });
+  }
+  document.querySelectorAll('.share-open').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      current = btn;
+      clearDisplayedLink();
+      var txtRadio = document.querySelector('input[name="share-format"][value="txt"]');
+      if (txtRadio) { txtRadio.checked = true; }
+      var active = shareFormatIsActiveFor(btn, 'txt');
+      createBtn.style.display = active ? 'none' : '';
+      rotateBtn.style.display = active ? '' : 'none';
+      revokeBtn.style.display = active ? '' : 'none';
+      shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+      var unlocked = btn.getAttribute('data-unlocked') === '1';
+      document.querySelectorAll('.share-lock-note').forEach(function (n) {
+        n.style.display = unlocked ? 'none' : '';
+      });
+      shareModal.style.display = 'flex';
+    });
+  });
+  document.getElementById('share-close').addEventListener('click', function () {
+    shareModal.style.display = 'none';
+  });
+  // PR #132 finding 6: every share handler captures the ORIGINATING
+  // row button at request start. Per-row state (keys, data-active)
+  // is updated on that button; the shared popup DOM (message, link
+  // row) is written only when the popup still shows that report —
+  // a response for report A must never land in report B's popup.
+  createBtn.addEventListener('click', function () {
+    var originBtn = current;
+    if (!originBtn) { return; }
+    var createdFormat = selectedShareFormat();
+    postShare('/reports/' + originBtn.getAttribute('data-report') + '/share',
+              originBtn.getAttribute('data-create-key')).then(function (d) {
+      if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); }
+      if (d._httpOk && d.share_url) { addActiveShareFormatFor(originBtn, createdFormat); }
+      if (current !== originBtn) { return; }
+      if (d._httpOk && d.share_url) {
+        // PR #138 remediation round 3: the user may have changed
+        // the selected format while this request was in flight.
+        // The per-format state above still applies to the captured
+        // format, but the popup display must reflect the format
+        // selected NOW: never show the captured format's URL under
+        // a different selection — refresh the buttons and message
+        // from the current selection instead.
+        if (createdFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else { shareMsg.textContent = 'Share link created:'; showLink(d.share_url, createdFormat); setShareButtons(true); }
+      }
+      else { shareMsg.textContent = d.message || d.error || 'Sharing is on for this report.'; }
+    });
+  });
+  rotateBtn.addEventListener('click', function () {
+    var originBtn = current;
+    if (!originBtn) { return; }
+    var rotatedFormat = selectedShareFormat();
+    postShare('/reports/' + originBtn.getAttribute('data-report') + '/share/rotate',
+              originBtn.getAttribute('data-rotate-key')).then(function (d) {
+      if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); }
+      if (current !== originBtn) { return; }
+      if (d._httpOk && d.share_url) {
+        // PR #138 remediation round 3: as in create above, guard
+        // the response-time display against the format selected
+        // NOW, not the captured format.
+        if (rotatedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else { shareMsg.textContent = 'New share link:'; showLink(d.share_url, rotatedFormat); }
+      }
+      else { shareMsg.textContent = d.message || d.error || ''; }
+    });
+  });
+  revokeBtn.addEventListener('click', function () {
+    var originBtn = current;
+    if (!originBtn) { return; }
+    var revokedFormat = selectedShareFormat();
+    postShare('/reports/' + originBtn.getAttribute('data-report') + '/share/revoke',
+              originBtn.getAttribute('data-revoke-key')).then(function (d) {
+      // PR #132 finding 2: claim "revoked" only when the server
+      // actually revoked (HTTP success + revoked status). A 429
+      // leaves the link active: surface the error and keep state.
+      var revoked = d._httpOk && d.status === 'revoked';
+      if (revoked) {
+        originBtn.setAttribute('data-revoke-key', freshShareKey());
+        removeActiveShareFormatFor(originBtn, revokedFormat);
+      }
+      if (current !== originBtn) { return; }
+      if (revoked) {
+        // PR #138 remediation round 3: as in create above, the
+        // removal applies to the captured format, but the popup
+        // display (message, buttons, link row) must reflect the
+        // format selected NOW when it has changed while the
+        // request was in flight.
+        if (revokedFormat !== selectedShareFormat()) { refreshShareButtonsForSelectedFormat(); }
+        else {
+          shareMsg.textContent = 'Share link revoked.';
+          if (displayedShareFormat === revokedFormat) { clearDisplayedLink(); } else { linkRow.style.display = 'none'; }
+          setShareButtons(false);
+        }
+      } else {
+        shareMsg.textContent = d.message || d.error || 'Could not revoke the share link. Please try again.';
+      }
+    });
+  });
+  document.getElementById('share-copy').addEventListener('click', function () {
+    linkBox.select();
+    if (navigator.clipboard) { navigator.clipboard.writeText(linkBox.value); }
+  });
+  // Issue #106 Stage 2: Analysis popup — the click only opens it;
+  // Cancel changes no state; Confirm is the charge point and the
+  // outcome renders in the popup (never a navigation to raw JSON).
+  var analysisModal = document.getElementById('analysis-modal');
+  var analysisMsg = document.getElementById('analysis-msg');
+  var analysisConfirm = document.getElementById('analysis-confirm');
+  var analysisCurrent = null;
+  document.querySelectorAll('.analysis-open').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      analysisCurrent = btn;
+      document.getElementById('analysis-link-row').style.display = 'none';
+      if (btn.getAttribute('data-eligible') === '1') {
+        analysisMsg.textContent = 'Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.';
+        analysisConfirm.style.display = '';
+        analysisConfirm.disabled = false;
+      } else {
+        analysisMsg.textContent = btn.getAttribute('data-reason') || '';
+        analysisConfirm.style.display = 'none';
+      }
+      analysisModal.style.display = 'flex';
+    });
+  });
+  document.getElementById('analysis-close').addEventListener('click', function () {
+    analysisModal.style.display = 'none';
+  });
+  analysisConfirm.addEventListener('click', function () {
+    // PR #139 F3: capture the ORIGINATING button/report at request
+    // start, mirroring the share popup's originating-button capture
+    // (PR #132 finding 6 above). The shared analysis modal must
+    // only be written when the popup still belongs to that report;
+    // a stale response for report A must never overwrite report
+    // B's popup (result link, failure, or 402 message) or hide
+    // B's Generate button.
+    var originBtn = analysisCurrent;
+    if (!originBtn) { return; }
+    var originReportId = originBtn.getAttribute('data-report');
+    analysisConfirm.disabled = true;
+    var fd = new FormData();
+    fd.append('csrf_token', '{{ csrf_token }}');
+    fetch('/reports/' + originReportId + '/deep-dive', { method: 'POST', body: fd, credentials: 'same-origin' })
+      .then(function (r) {
+        return r.json().then(function (d) { d = d || {}; d._httpStatus = r.status; return d; },
+          function () { return { _httpStatus: r.status }; });
+      })
+      .then(function (d) {
+        if (analysisCurrent !== originBtn) { return; }
+        if (d.report_url) {
+          analysisMsg.textContent = 'Analysis Report ready.';
+          var link = document.getElementById('analysis-view');
+          link.href = d.report_url;
+          document.getElementById('analysis-link-row').style.display = 'block';
+          analysisConfirm.style.display = 'none';
+        } else if (d._httpStatus === 402 && d.purchase_url) {
+          analysisMsg.textContent = '';
+          analysisMsg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
+          var buy = document.createElement('a');
+          buy.href = d.purchase_url;
+          buy.textContent = 'Buy credits';
+          analysisMsg.appendChild(buy);
+          analysisConfirm.disabled = false;
+        } else {
+          analysisMsg.textContent = d.error || 'Analysis Report generation failed.';
+          analysisConfirm.disabled = false;
+        }
+      }, function () {
+        if (analysisCurrent !== originBtn) { return; }
+        analysisMsg.textContent = 'Analysis Report generation failed.';
+        analysisConfirm.disabled = false;
+      });
+  });
+})();
+</script>
 
 {% include 'auth_form_script.html' %}
 {% include 'nav_script.html' %}

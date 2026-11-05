@@ -48,7 +48,7 @@
       <p class="sub">Enter your email and we'll send you a reset link.</p>
       {% if error %}<div class="error">{{ error }}</div>{% endif %}
       {% if message %}<div class="success">{{ message }}</div>{% endif %}
-      <form method="post" action="/auth/forgot" data-auth-form>
+      <form method="post" action="/auth/forgot" data-auth-form data-success-url="/login?reset_sent=1">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <p role="status" aria-live="polite"></p>
         <label for="email">Email</label>

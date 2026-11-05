@@ -425,7 +425,7 @@ def test_insufficient_at_quotation_402_exact_total_and_cta(batch_env):
     # Second batch: total 2 (allowance still available) > eligible 1.
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:400]
-    assert "This 3-file batch costs 2 credits. Insufficient eligible Power-Up credits." in r.text
+    assert "This 3-file batch costs 2 credits. Insufficient eligible credits." in r.text
     assert "/credits" in r.text
     assert len(_ops(env, uid)) == 1  # no new reservation
 

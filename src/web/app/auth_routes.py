@@ -52,6 +52,12 @@ templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templat
 # Generic responses (no enumeration)
 GENERIC_SIGNUP = "If this email is valid, a verification link has been sent."
 GENERIC_FORGOT = "If an account exists for this email, a reset link has been sent."
+# Issue #147: after a forgot-password submit the user lands on the login
+# screen, which shows GENERIC_FORGOT as its notice. The notice is carried
+# ONLY by this fixed flag + fixed target — the submitted email and any
+# free-text notice are never reflected into the redirect or the page, so
+# the redirect cannot leak account existence or inject content.
+FORGOT_REDIRECT_URL = "/login?reset_sent=1"
 
 
 def _set_session_cookie(response: JSONResponse | RedirectResponse, token: str) -> None:
@@ -105,7 +111,12 @@ async def signup_page(request: Request, db: DBSession = Depends(get_db)):
 
 
 @router.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request, db: DBSession = Depends(get_db)):
+async def login_page(request: Request, reset_sent: str = "", db: DBSession = Depends(get_db)):
+    # Issue #147: the ONLY value that shows a notice is the exact fixed
+    # flag "1"; the notice text itself is the server-side constant, so a
+    # crafted query string can neither forge nor alter the notice.
+    if reset_sent == "1":
+        return _page(request, db, "login.html", message=GENERIC_FORGOT)
     return _page(request, db, "login.html")
 
 
@@ -199,6 +210,60 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
     balance_summary = credits_helpers.get_balance_summary(db, user.id)
     purchases = credits_helpers.list_completed_purchases(db, user.id)
     pack_names = {pid: p["name"] for pid, p in stripe_billing_helpers.PACKS.items()}
+    # Issue #135: Report Access — every ACTIVE share link for this
+    # account (report, format, created time, copyable live link).
+    # Links whose report has expired or been deleted serve nothing,
+    # so they are not listed as active. The raw token is shown ONLY
+    # here, to the owner; public lookup uses the stored hash.
+    import json as _json
+    import os as _os
+    from datetime import datetime as _dt, timezone as _tz
+
+    from app import models as _models
+
+    _origin = _os.environ.get("APP_BASE_URL", "").rstrip("/")
+    share_links = []
+    # PR #138 remediation (finding 2): do NOT filter on raw_token —
+    # active pre-#135 legacy rows have raw_token NULL (the token was
+    # never stored) yet their links still serve, so they must be
+    # listed (as txt) with a working revoke. Their URL is simply not
+    # recoverable; the template renders an explicit note for them.
+    _sharings = (
+        db.query(_models.ReportSharing)
+        .filter(
+            _models.ReportSharing.owner_user_id == user.id,
+            _models.ReportSharing.revoked_at.is_(None),
+            _models.ReportSharing.token_hash.isnot(None),
+        )
+        .order_by(_models.ReportSharing.created_at.desc())
+        .all()
+    )
+    for _row in _sharings:
+        _result = db.get(_models.Result, _row.result_id)
+        if _result is None or _result.deleted_at is not None:
+            continue
+        _expires = _result.expires_at
+        if _expires is not None and _expires.tzinfo is None:
+            _expires = _expires.replace(tzinfo=_tz.utc)
+        if _expires is not None and _expires <= _dt.now(_tz.utc):
+            continue
+        try:
+            _filename = _json.loads(_result.storage_manifest).get(
+                "filename", "Report")
+        except (ValueError, TypeError, AttributeError):
+            _filename = "Report"
+        share_links.append({
+            "id": str(_row.id),
+            "result_id": str(_row.result_id),
+            "report": _filename,
+            "format": (_row.share_format or "txt"),
+            "created_at": _row.created_at,
+            # Legacy rows (raw_token NULL) have no recoverable URL:
+            # url stays None and the template renders the explicit
+            # not-recoverable note instead of a broken link.
+            "url": f"{_origin}/s/{_row.raw_token}" if _row.raw_token else None,
+            "link_recoverable": bool(_row.raw_token),
+        })
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -212,6 +277,7 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "balance_summary": balance_summary,
             "purchases": purchases,
             "pack_names": pack_names,
+            "share_links": share_links,
         },
     )
 
@@ -391,8 +457,20 @@ async def forgot(
         db.add(reset)
         db.commit()
         background.add_task(email_helpers.send_password_reset_email, user.email, token)
-    # Always generic success — no enumeration
-    return JSONResponse({"message": GENERIC_FORGOT}, status_code=200)
+    # Issue #147: every submit returns the user to the login screen,
+    # which shows the same generic notice — in ALL cases, so the
+    # response cannot leak whether the account exists (identical status,
+    # Location, body and cookies for known and unknown emails alike).
+    # The internal behaviour above (token + email only when the account
+    # exists and has a password) is unchanged.
+    # The shared auth-form JS posts with X-Requested-With: XMLHttpRequest
+    # and expects JSON (the logout route uses the same split): it keeps
+    # the generic JSON contract and the browser is handed to
+    # FORGOT_REDIRECT_URL by the forgot form's data-success-url. A plain
+    # (non-JS) form post gets the redirect itself.
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JSONResponse({"message": GENERIC_FORGOT}, status_code=200)
+    return RedirectResponse(FORGOT_REDIRECT_URL, status_code=303)
 
 
 @router.post("/auth/reset")

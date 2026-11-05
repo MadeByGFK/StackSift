@@ -54,6 +54,17 @@ def _as_aware(dt: datetime | None) -> datetime | None:
 PRICING_VERSION = 1
 COST_ADDITIONAL_ANALYSIS = 1  # CONFIRMED
 COST_PDF = 2  # Proposed (Phase 2B)
+# Issue #105: founder-ruled 2026-11-01 (batched pricing) — exports are
+# uniform 2 credits for EVERY format (CSV/JSON/PDF). This constant is the
+# single source for structured-export consent, admission, UI copy and
+# error text; never duplicate the numeric price elsewhere.
+COST_STRUCTURED_EXPORT = 2
+# Issue #129: founder-ruled 2026-11-03 (single-unlock) — the 2-credit
+# export charge is keyed per (owner, report), NOT per format. The first
+# successful export generation in ANY format charges exactly this once
+# and unlocks every format for that report; all later generations and
+# downloads of any format are free. Same ruled price (2), new keying.
+COST_EXPORT_UNLOCK = 2
 # Issue #103 (trim B1): the obsolete fixed COST_BATCH = 5 proposal is
 # REMOVED. Founder-ruled batch pricing (2026-10-24) is per-file: the
 # first file under the normal rules (free hourly allowance if available,
@@ -79,6 +90,22 @@ COST_OVERSIZE_ANALYSIS = 3
 # charged only on success, even when the pair is identical or shows no
 # material differences (disclosed on the consent page, spec trim C10).
 COST_COMPARE = 3
+# Issue #107: founder-ruled 2026-11-01 (batched pricing) — retention
+# extension is 1 credit per +90-day unit, added to the report's CURRENT
+# expires_at, stackable, lifetime ceiling ready_at + 365 days, full-unit
+# purchases only. These constants are the single source for consent,
+# admission, cap arithmetic, UI copy and error text. Sharing is FREE
+# (same ruling): there is deliberately NO share cost constant.
+COST_RETENTION_EXTENSION = 1
+RETENTION_EXTENSION_DAYS = 90
+RETENTION_MAX_DAYS = 365
+# Issue #106 Stage 2: founder-ruled 2026-11-03 — an Analysis Report
+# costs 3 credits, charged on SUCCESS only (reserve during generation,
+# net -3 on success, full reversal on failure). "Deep-dive" is the
+# internal identifier only; user-facing copy says "Analysis Report".
+# This constant is the single source for consent, admission, UI copy
+# and error text; never duplicate the numeric price elsewhere.
+COST_DEEP_DIVE = 3
 
 # Signup reward (approved 2026-10-15)
 SIGNUP_REWARD_CREDITS = 3
@@ -90,12 +117,25 @@ DEFAULT_GLOBAL_CONCURRENT_LIMIT = 20
 # Paid rate limits per hour (proposed)
 RATE_LIMIT_PAID_ANALYSIS = 30
 RATE_LIMIT_PDF = 10
+# Issue #105: structured export mirrors the PDF rate policy.
+RATE_LIMIT_STRUCTURED_EXPORT = 10
 RATE_LIMIT_BATCH = 5
+# Issue #107: explicit 10/hour policy for retention extension (draft §8),
+# so it never relies on _consume_rate()'s unknown-policy fallback.
+RATE_LIMIT_RETENTION_EXTENSION = 10
+# Issue #107: explicit 10/hour policy for free share actions
+# (create/rotate/revoke), so they never rely on _consume_rate()'s
+# unknown-policy fallback.
+RATE_LIMIT_SHARE_ACTIONS = 10
 # Issue #104, slice 1 (trim T3): explicit 30/hour policy for oversize, so
 # it never relies on _consume_rate()'s fallback.
 RATE_LIMIT_OVERSIZE_ANALYSIS = 30
 # Issue #102: explicit 30/hour policy for compare, same reason.
 RATE_LIMIT_COMPARE = 30
+# Issue #106 Stage 2: explicit 10/hour policy for Analysis Report
+# generation (spec proposal, adjustable), so it never relies on
+# _consume_rate()'s unknown-policy fallback.
+RATE_LIMIT_DEEP_DIVE = 10
 
 # Consent validity
 CONSENT_TTL = timedelta(minutes=15)
@@ -410,6 +450,26 @@ def _ensure_capacity_scope(db: Session, scope_key: str, limit: int) -> models.Ca
     return scope
 
 
+def lock_global_paid_scope(db: Session):
+    """Ensure and lock the ``global:paid`` capacity scope FOR UPDATE.
+
+    PR #125 finding 1: callers that must serialize a discovery +
+    reservation sequence (structured-export retry-chain discovery)
+    hold this lock from before discovery through the admission commit
+    in the same transaction. This mirrors the serialization
+    admit_paid_operation already performs (it locks the first capacity
+    scope before its authoritative lookup). Lock order is preserved:
+    capacity scopes are locked before credit accounts/grants, and
+    ``global:paid`` is the lexicographically first standard scope.
+    The caller owns the transaction: commit on success, rollback on
+    every early-return path after taking the lock. On SQLite FOR
+    UPDATE is a no-op, so this is a correctness lock on PostgreSQL
+    and a no-op (but harmless) marker on SQLite.
+    """
+    return _ensure_capacity_scope(
+        db, "global:paid", DEFAULT_GLOBAL_CONCURRENT_LIMIT)
+
+
 def _acquire_capacity(db: Session, user_id: uuid.UUID,
                       extra_scopes: list[tuple[str, int]] | None = None) -> list[str]:
     """Acquire one unit of user + global paid-operation capacity.
@@ -614,6 +674,201 @@ def admit_paid_operation(
         raise
 
 
+def _canonical_uuid_str(segment) -> str | None:
+    """Canonical ``str(UUID)`` for a stored key segment, or None.
+
+    Tolerates the noncanonical forms a raw URL segment can carry —
+    uppercase hex and the unhyphenated 32-char form both parse to the
+    same UUID (PR #132 finding 5).
+    """
+    try:
+        return str(uuid.UUID(str(segment)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def export_key_belongs_to(key, source_result_id) -> bool:
+    """True when an export operation's idempotency key names this report.
+
+    Matches the canonical keys the routes create today
+    (``pdf-{rid}`` / ``structured-{rid}-{format}-v1``, plus server
+    ``-retry-`` suffixes) AND existing noncanonical stored keys whose
+    report segment is an uppercase or unhyphenated UUID (PR #132
+    finding 5): the segment is parsed to a UUID and compared
+    canonically, so a first PDF export made through a noncanonical
+    URL still counts as the report's unlock / reservation fence.
+    """
+    if not isinstance(key, str):
+        return False
+    rid = _canonical_uuid_str(source_result_id)
+    if rid is None:
+        rid = str(source_result_id)
+    pdf_base = f"pdf-{rid}"
+    structured_base = f"structured-{rid}-"
+    if (key == pdf_base or key.startswith(pdf_base + "-retry-")
+            or key.startswith(structured_base)):
+        return True
+    if key.startswith("pdf-"):
+        segment = key[len("pdf-"):].split("-retry-", 1)[0]
+        return _canonical_uuid_str(segment) == rid
+    if key.startswith("structured-"):
+        rest = key[len("structured-"):]
+        for width in (36, 32):
+            segment = rest[:width]
+            if len(segment) == width and rest[width:width + 1] == "-":
+                if _canonical_uuid_str(segment) == rid:
+                    return True
+        return False
+    return False
+
+
+def export_operations(db: Session, user_id, source_result_id):
+    """All export operations (any format) belonging to one report (#129).
+
+    Export identity is key-based, exactly as the routes create it: PDF
+    operations carry ``pdf-{report_id}`` (plus server ``-retry-``
+    suffixes) and structured operations carry
+    ``structured-{report_id}-{format}-v1`` (plus retry suffixes). A
+    completed operation in ANY format is the report's export unlock;
+    the per-format operation rows remain the artifact/replay record.
+    Discovery is canonical-tolerant (see export_key_belongs_to):
+    stored keys whose report segment is a noncanonical UUID form
+    still match.
+    """
+    ops = db.execute(
+        select(models.Operation).where(
+            models.Operation.user_id == user_id,
+            models.Operation.type.in_(("pdf", "structured_export")),
+        )
+    ).scalars().all()
+    return [
+        op for op in ops
+        if export_key_belongs_to(op.idempotency_key, source_result_id)
+    ]
+
+
+def export_unlock_state(db: Session, user_id, source_result_id):
+    """Return (unlocked, in_progress) for a report's export unlock (#129).
+
+    unlocked: a first generation in some format completed — its single
+    2-credit charge (COST_EXPORT_UNLOCK) bought every format.
+    in_progress: an export generation for this report is reserved in
+    some format; concurrent cross-format requests must wait (409)
+    rather than race a second charge.
+    """
+    ops = export_operations(db, user_id, source_result_id)
+    unlocked = any(op.status == "completed" for op in ops)
+    in_progress = any(op.status == "reserved" for op in ops)
+    return unlocked, in_progress
+
+
+def is_export_unlocked(db: Session, user_id, source_result_id) -> bool:
+    unlocked, _ = export_unlock_state(db, user_id, source_result_id)
+    return unlocked
+
+
+def analysis_key_belongs_to(key, source_result_id) -> bool:
+    """True when a deep_dive operation's key names this source report.
+
+    Canonical keys are ``analysis-{rid}-v1`` plus server ``-retry-``
+    suffixes; the report segment is compared canonically (uppercase /
+    unhyphenated UUID forms tolerated, as with export keys).
+    """
+    if not isinstance(key, str):
+        return False
+    rid = _canonical_uuid_str(source_result_id)
+    if rid is None:
+        rid = str(source_result_id)
+    base = f"analysis-{rid}-v1"
+    if key == base or key.startswith(base + "-retry-"):
+        return True
+    if key.startswith("analysis-"):
+        segment = key[len("analysis-"):].split("-v1", 1)[0]
+        return _canonical_uuid_str(segment) == rid
+    return False
+
+
+def analysis_operations(db: Session, user_id, source_result_id):
+    """All deep_dive operations belonging to one source report (#106)."""
+    ops = db.execute(
+        select(models.Operation).where(
+            models.Operation.user_id == user_id,
+            models.Operation.type == "deep_dive",
+        )
+    ).scalars().all()
+    return [
+        op for op in ops
+        if analysis_key_belongs_to(op.idempotency_key, source_result_id)
+    ]
+
+
+def completed_analysis_result_id(db: Session, user_id, source_result_id):
+    """The derived Analysis Report Result id for a source, or None.
+
+    F4 (PR #139 remediation): only return the id when the derived
+    Result is still available — it exists, is not deleted, and is
+    not expired. The derived report keeps its own 7-day life even
+    when the source is retention-extended, so an expired/deleted
+    derived report must not be linked (report_view would 410);
+    returning None restores the source's normal Analysis action.
+    Expiry/deletion semantics match reports_list/report_view:
+    ``expires_at > now`` and ``deleted_at is None``.
+    """
+    completed = [
+        op for op in analysis_operations(db, user_id, source_result_id)
+        if op.status == "completed" and op.result_id
+    ]
+    if not completed:
+        return None
+    latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
+    derived = db.get(models.Result, latest.result_id)
+    if derived is None:
+        return None
+    if derived.deleted_at is not None:
+        return None
+    if derived.expires_at is None:
+        return None
+    if _as_aware(derived.expires_at) <= _utcnow():
+        return None
+    return latest.result_id
+
+
+def lock_share_rate_bucket(db: Session, owner: str):
+    """Ensure and lock FOR UPDATE the ``share:actions`` rate bucket.
+
+    Issue #107 PR #128 round 2 (Finding 2): share-action handlers call
+    this BEFORE their authoritative ReportAction replay lookup and
+    hold the row lock through settlement (commit/rollback), so
+    concurrent same-key requests on multiple workers serialize on
+    this bucket row: the second transaction blocks until the first
+    commits, then its replay lookup sees the recorded action and
+    returns the stored outcome without consuming rate or raising a
+    duplicate-key IntegrityError / spurious 429. This mirrors the
+    admit_paid_operation precedent (lock the first scope row before
+    the authoritative identity lookup). Upsert-then-lock follows
+    _ensure_capacity_scope. On SQLite FOR UPDATE is a no-op, so this
+    is a correctness lock on PostgreSQL and a harmless marker on
+    SQLite (single-connection tests pin the serialized contract).
+    """
+    policy = "share:actions"
+    window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+    db.execute(insert(models.RateBucket).values(
+        policy=policy, owner=owner, window_start=window_start,
+        attempts=0, max_limit=RATE_LIMIT_SHARE_ACTIONS,
+    ).on_conflict_do_nothing(index_elements=["policy", "owner", "window_start"]))
+    db.flush()
+    return db.execute(
+        select(models.RateBucket).where(
+            models.RateBucket.policy == policy,
+            models.RateBucket.owner == owner,
+            models.RateBucket.window_start == window_start,
+        ).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one()
+
+
 def _consume_rate(db: Session, policy: str, owner: str) -> None:
     """Atomically consume one unit from a rate bucket. Raises AdmissionError if over limit."""
     limit = {
@@ -621,7 +876,11 @@ def _consume_rate(db: Session, policy: str, owner: str) -> None:
         "paid:oversize_analysis": RATE_LIMIT_OVERSIZE_ANALYSIS,
         "paid:compare_logs": RATE_LIMIT_COMPARE,
         "paid:pdf": RATE_LIMIT_PDF,
+        "paid:structured_export": RATE_LIMIT_STRUCTURED_EXPORT,
         "paid:batch": RATE_LIMIT_BATCH,
+        "paid:retention_extension": RATE_LIMIT_RETENTION_EXTENSION,
+        "paid:deep_dive": RATE_LIMIT_DEEP_DIVE,
+        "share:actions": RATE_LIMIT_SHARE_ACTIONS,
     }.get(policy, 30)
     window_start = _utcnow().replace(minute=0, second=0, microsecond=0)
 
@@ -790,6 +1049,86 @@ def store_pdf_result(db, user_id, operation_id, pdf_bytes: bytes, filename: str)
     db.add(result)
     db.flush()
     return result
+
+def store_structured_export_result(db, user_id, operation_id, export_bytes: bytes,
+                                   *, export_format: str, filename: str,
+                                   media_type: str, source_result_id,
+                                   source_integrity_digest: str):
+    """Store generated structured-export bytes as a Result (issue #105).
+
+    Follows store_pdf_result(): locks the operation, requires this
+    reserved structured_export operation, and writes ONE
+    Result.type="structured_export" whose manifest carries the artifact
+    provenance + base64 content. The caller settles with
+    complete_operation() in the same transaction.
+    """
+    import base64 as _b64
+    op, _, _ = _lock_operation(db, operation_id)
+    if op.status != "reserved":
+        raise AdmissionError("operation is no longer reserved")
+    if op.type != "structured_export":
+        raise AdmissionError("operation is not a structured export")
+    manifest = json.dumps({
+        "artifact_kind": "structured_export",
+        "schema_version": 1,
+        "source_result_id": str(source_result_id),
+        "source_integrity_digest": source_integrity_digest,
+        "format": export_format,
+        "filename": filename,
+        "media_type": media_type,
+        "content_base64": _b64.b64encode(export_bytes).decode("ascii"),
+        "content_byte_count": len(export_bytes),
+        "content_digest": hash_input(export_bytes),
+    })
+    now = _utcnow()
+    result = models.Result(
+        user_id=user_id,
+        operation_id=operation_id,
+        type="structured_export",
+        storage_manifest=manifest,
+        integrity_digest=hash_input(manifest.encode()),
+        byte_count=len(manifest.encode()),
+        ready_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    db.add(result)
+    db.flush()
+    return result
+
+
+def store_report_action_receipt(db, user_id, operation_id, manifest_fields: dict):
+    """Store the action-receipt Result for a non-artifact paid action (#107).
+
+    complete_operation() requires a ready Result bound to THIS operation;
+    a retention extension produces no artifact, so it settles against
+    this receipt (draft §4/§8) instead of weakening result_payload()'s
+    origin invariants. The manifest records the action kind, the target
+    Result ID and the previous/new expiry — never any bearer secret.
+    The receipt is type "report_action": report lists filter on
+    analysis/comparison types, so it never appears as a report. Its own
+    7-day expiry is independent of the extended report (trim T6); the
+    permanent ReportAction identity row, not this receipt, carries
+    replay safety after the receipt payload is cleaned up.
+    """
+    op, _, _ = _lock_operation(db, operation_id)
+    if op.status != "reserved":
+        raise AdmissionError("operation is no longer reserved")
+    manifest = json.dumps(dict(manifest_fields))
+    now = _utcnow()
+    result = models.Result(
+        user_id=user_id,
+        operation_id=operation_id,
+        type="report_action",
+        storage_manifest=manifest,
+        integrity_digest=hash_input(manifest.encode()),
+        byte_count=len(manifest.encode()),
+        ready_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    db.add(result)
+    db.flush()
+    return result
+
 
 def _settle_complete(db, op, grants, result):
     result_payload(result, user_id=op.user_id, operation_id=op.id)

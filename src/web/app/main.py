@@ -102,6 +102,18 @@ async def stop_credit_maintenance():
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 templates.env.globals["new_request_id"] = lambda: __import__("uuid").uuid4().hex
+# Issue #105: report.html renders its structured-export price from the
+# single credits constant (global so every report.html render site —
+# fresh analysis, replay, saved report — shows the same ruled price).
+from app import credits as _credits_template_globals
+templates.env.globals["structured_export_cost"] = _credits_template_globals.COST_STRUCTURED_EXPORT
+# Issue #107: report.html renders its retention price/unit from the same
+# single ruled constants ("Extend 90 days — 1 credit").
+templates.env.globals["retention_extension_cost"] = _credits_template_globals.COST_RETENTION_EXTENSION
+templates.env.globals["retention_extension_days"] = _credits_template_globals.RETENTION_EXTENSION_DAYS
+# Issue #106 Stage 2: the Analysis Report price renders from the same
+# single ruled constant everywhere.
+templates.env.globals["analysis_report_cost"] = _credits_template_globals.COST_DEEP_DIVE
 
 # Phase 1: Auth routes (signup, login, OAuth, sessions, settings)
 app.include_router(auth_router)
@@ -124,6 +136,30 @@ shared_limiter = PostgresRateLimiter(
 checkout_limiter = PostgresRateLimiter(
     burst_max=5, burst_window=3600, hourly_max=5, hourly_window=3600
 )
+# ISSUE-107: public share-view abuse limiter (draft §7) — 30/min and
+# 300/hr per trusted IP, in the isolated "s:" key namespace (see
+# app.report_access.share_limit_key), called WITHOUT request_id so no
+# replay bypass exists, and fail-closed (503) on database errors.
+# Production sharing requires this shared DB enforcement; the in-memory
+# pair below serves only the no-database demo path, mirroring the
+# analysis limiters above.
+share_limiter = PostgresRateLimiter(
+    burst_max=30, burst_window=60, hourly_max=300, hourly_window=3600
+)
+_share_mem_burst = RateLimiter(max_requests=30, window_seconds=60)
+_share_mem_hourly = RateLimiter(max_requests=300, window_seconds=3600)
+
+# ISSUE-107: /s/* token-path log redaction (draft §6 launch requirement).
+# Raw share tokens ride in request paths and would otherwise persist in
+# access logs; the filter rewrites them at the logging layer. Edge/CDN
+# log configuration is a separate deployment verification (see
+# src/web/RETENTION_SHARING.md).
+import logging as _logging
+from app.report_access import SharePathRedactionFilter as _ShareRedactionFilter
+for _logger_name in ("uvicorn.access", "uvicorn.error", __name__):
+    _logger = _logging.getLogger(_logger_name)
+    if not any(isinstance(f, _ShareRedactionFilter) for f in _logger.filters):
+        _logger.addFilter(_ShareRedactionFilter())
 
 
 def _use_shared_limiter() -> bool:
@@ -337,8 +373,8 @@ async def pricing_redirect():
     return RedirectResponse(url="/credits", status_code=301)
 
 
-# ISSUE-68: Stripe Checkout entry point. Test mode only — the billing module
-# refuses live keys outright (live activation is a separate founder gate).
+# ISSUE-68: Stripe Checkout entry point. The billing module accepts test
+# and live keys; the configured key determines the mode (issue #126).
 # Anonymous users cannot buy: they get a 401 pointing at signup/login, and
 # the credits page only renders buy forms for signed-in users.
 @app.post("/credits/checkout")
@@ -425,10 +461,6 @@ async def credits_checkout(
             raise
         purchase.stripe_session_id = session_id
         db.commit()
-    except stripe_billing.LiveKeyRefused:
-        logging.getLogger(__name__).critical(
-            "STRIPE_SECRET_KEY is a live key; checkout refused")
-        raise HTTPException(500, "Credit purchases are misconfigured.")
     except stripe_billing.CheckoutNotConfigured:
         return JSONResponse(
             {"error": "Credit purchases are not available yet. Please try again later."},
@@ -444,7 +476,7 @@ async def credits_checkout(
     return JSONResponse({"checkout_url": checkout_url})
 
 
-# ISSUE-69: Stripe webhook — idempotent credit granting (test mode only).
+# ISSUE-69: Stripe webhook — idempotent credit granting.
 # Server-to-server: no user session and no CSRF token. The Stripe-Signature
 # HMAC is the authentication; unsigned or mis-signed deliveries are answered
 # 400 before any database row is touched. Stripe retries non-2xx, so every
@@ -461,9 +493,6 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
     log = logging.getLogger(__name__)
     try:
         webhook_secret = stripe_billing._webhook_secret()
-    except stripe_billing.LiveKeyRefused:
-        log.critical("STRIPE_SECRET_KEY is a live key; webhook refused")
-        raise HTTPException(500, "Credit purchases are misconfigured.")
     except stripe_billing.WebhookNotConfigured:
         raise HTTPException(503, "Credit purchases are unavailable right now.")
 
@@ -730,10 +759,10 @@ async def analyze(
             if _nbytes > MAX_BYTES:
                 return error("That file is over the 10 MB free-tier limit. "
                              "Sign in to analyze files up to 100 MB / 500,000 lines "
-                             "with Power-Up credits, or upload a smaller file.")
+                             "with credits, or upload a smaller file.")
             return error("That file has more than 50,000 lines. "
                          "Sign in to analyze files up to 100 MB / 500,000 lines "
-                         "with Power-Up credits, or upload a smaller file.")
+                         "with credits, or upload a smaller file.")
         from app import credits as _credits_helpers
         try:
             return _paid_consent_page(request, file.filename, content, _user, _csrf, ip,
@@ -871,7 +900,7 @@ _PENDING_LOCK = _threading.RLock()
 # Issue #104: exact insufficient-credits message (spec §4), with the
 # /credits CTA rendered by _analysis_response(buy_credits=True).
 OVERSIZE_INSUFFICIENT_MESSAGE = (
-    "Oversize analysis costs 3 credits. You do not have enough eligible Power-Up credits."
+    "Oversize analysis costs 3 credits. You do not have enough eligible credits."
 )
 
 
@@ -1229,7 +1258,7 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
             "size_line": None,
             "limits_line": None,
             "cost_label": "1 credit",
-            "cost_sentence": "Continue this analysis now with a Power-Up credit",
+            "cost_sentence": "Continue this analysis now with a credit",
             "confirm_label": "Use 1 credit",
             "confirm_action": "/analyze/paid",
             "cancel_label": "Wait for free",
@@ -1261,6 +1290,30 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
     data = dict(data, current_user=user, csrf_token=csrf)
     if report_id is not None:
         data["report_id"] = report_id
+    if report_id is not None and user is not None:
+        # Issue #106 Stage 2 (PR #149 Codex P2): the fresh-response
+        # render must carry the same Analysis action state the
+        # saved-report page sets, or Actions -> Analysis opens a
+        # popup with an empty message and only a Cancel button.
+        # Eligibility comes from the retained-evidence contract over
+        # this render's own payload; a completed generation (e.g. on
+        # an idempotent replay) links straight to the derived report.
+        from app import deep_dive as _dd_fresh
+        data["analysis_eligible"], data["analysis_reason"] = \
+            _dd_fresh.eligibility_state(data)
+        data["analysis_result_id"] = None
+        try:
+            _fresh_rid = uuid_module.UUID(report_id)
+        except (ValueError, AttributeError, TypeError):
+            _fresh_rid = None
+        if _fresh_rid is not None:
+            from app.db import SessionLocal as _SL_fresh
+            from app import credits as _credits_fresh
+            with _SL_fresh() as _db:
+                _done_fresh = _credits_fresh.completed_analysis_result_id(
+                    _db, user.id, _fresh_rid)
+            data["analysis_result_id"] = (
+                str(_done_fresh) if _done_fresh else None)
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
@@ -1422,7 +1475,7 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                     return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
         except C.InsufficientCredits:
             db.rollback()
-            return _analysis_response(request, 402, message="Insufficient Power-Up credits.", buy_credits=True)
+            return _analysis_response(request, 402, message="Insufficient credits.", buy_credits=True)
         except C.AdmissionError as exc:
             db.rollback()
             return _analysis_response(request, 409 if '409' in str(exc) else 429, message=str(exc))
@@ -1499,7 +1552,7 @@ async def analyze_paid(request: Request, consent_id: str = Form(...), file_hash:
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _analysis_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _analysis_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _analysis_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -1548,7 +1601,7 @@ async def analyze_paid_cancel(request: Request, consent_id: str = Form(...),
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _analysis_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _analysis_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _analysis_response(request, 403, message="Invalid request. Please try again.")
         try:
@@ -1572,7 +1625,7 @@ async def analyze_paid_cancel(request: Request, consent_id: str = Form(...),
 # ---------------------------------------------------------------------------
 
 COMPARE_INSUFFICIENT_MESSAGE = (
-    "Comparing two logs costs 3 credits. You do not have enough eligible Power-Up credits."
+    "Comparing two logs costs 3 credits. You do not have enough eligible credits."
 )
 
 
@@ -1812,7 +1865,7 @@ async def compare_paid(request: Request, consent_id: str = Form(...), file_hash:
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _comparison_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _comparison_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _comparison_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -1843,7 +1896,7 @@ BATCH_OUTER_DEADLINE_SECONDS = 150
 
 def _batch_insufficient_message(file_count: int, total: int) -> str:
     return (f"This {file_count}-file batch costs {total} credits. "
-            "Insufficient eligible Power-Up credits.")
+            "Insufficient eligible credits.")
 
 
 def _batch_response(request, status, data=None, message=None, *, report_id=None,
@@ -2084,7 +2137,7 @@ def _durable_batch(request, key, *, consent_id, digest):
     from app import batch_admission, batch_service
     user, csrf = _get_current_user_optional(request)
     if user is None:
-        return _batch_response(request, 401, message="Please log in to use Power-Up credits.")
+        return _batch_response(request, 401, message="Please log in to use credits.")
     user_id = user.id
     ip = _client_ip(request)
     worker = uuid_module.uuid4().hex
@@ -2363,7 +2416,7 @@ async def batch_paid(request: Request, consent_id: str = Form(...), file_hash: s
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _batch_response(request, 401, message="Please log in to use Power-Up credits.")
+            return _batch_response(request, 401, message="Please log in to use credits.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _batch_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -2417,24 +2470,44 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     page = max(1, page)
     offset = (page - 1) * per_page
     # Issue #102: comparison reports (type "comparison") list alongside
-    # analyses; PDF-only results stay excluded.
+    # analyses; PDF-only results stay excluded. Issue #106 Stage 2:
+    # Analysis Reports (type "deep_dive") list as their own rows too.
     base_q = db.query(models.Result).filter(
         models.Result.user_id == _user.id,
-        models.Result.type.in_(["analysis", "comparison"]),
+        models.Result.type.in_(["analysis", "comparison", "deep_dive"]),
         models.Result.expires_at > now,
         models.Result.deleted_at.is_(None),
     )
     total = base_q.count()
     results = base_q.order_by(models.Result.created_at.desc()).offset(offset).limit(per_page).all()
     total_pages = max(1, (total + per_page - 1) // per_page)
+    from app import credits as _credits_for_list
     reports = []
     for r in results:
+        _manifest_data = None
         try:
             manifest = json.loads(r.storage_manifest)
+            _manifest_data = manifest
             filename = manifest.get("filename", "Unknown file")
+            report_kind = manifest.get("report_kind")
         except (json.JSONDecodeError, TypeError):
             filename = "Unknown file"
+            report_kind = None
+        # Issue #106 Stage 2: row Analysis state — eligibility comes
+        # from the retained-evidence contract; a completed generation
+        # links straight to the derived report instead of re-charging.
+        _analysis_eligible, _analysis_reason = (False, None)
+        _analysis_result_id = None
+        if r.type == "analysis" and _manifest_data is not None:
+            from app import deep_dive as _dd_for_list
+            _analysis_eligible, _analysis_reason = \
+                _dd_for_list.eligibility_state(_manifest_data)
+            _done = _credits_for_list.completed_analysis_result_id(
+                db, _user.id, r.id)
+            _analysis_result_id = str(_done) if _done else None
         from app.credits import _as_aware
+        _sharing_rows = db.query(models.ReportSharing).filter(
+            models.ReportSharing.result_id == r.id).all()
         reports.append({
             "id": str(r.id),
             "filename": filename,
@@ -2442,6 +2515,37 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             "created_at": r.created_at,
             "expires_at": r.expires_at,
             "days_left": max(0, (_as_aware(r.expires_at) - now).days),
+            # Issue #129 + founder UI amendment: row action row is
+            # View / Export (dropdown) / Share / Extend. Each row gets
+            # fresh per-render action keys and its unlock/share state
+            # for the confirmation copy.
+            "type": r.type,
+            # PR #132 finding 4: the row template needs the same
+            # discriminator the report page uses (report.html hides
+            # CSV/JSON when report_kind is set) so batch rows — type
+            # "analysis" with report_kind "batch", whose structured
+            # exports the route rejects with 422 — do not offer
+            # CSV/JSON controls that can only fail.
+            "report_kind": report_kind,
+            "retention_key": uuid_module.uuid4().hex,
+            "share_create_key": uuid_module.uuid4().hex,
+            "share_rotate_key": uuid_module.uuid4().hex,
+            "share_revoke_key": uuid_module.uuid4().hex,
+            "export_unlocked": _credits_for_list.is_export_unlocked(
+                db, _user.id, r.id),
+            "share_active": any(
+                row.token_hash and row.revoked_at is None
+                for row in _sharing_rows),
+            # Issue #135: formats that already have an active link,
+            # so the Share popup can mark them per format.
+            "share_formats": [
+                (row.share_format or "txt") for row in _sharing_rows
+                if row.token_hash and row.revoked_at is None],
+            # Founder UI amendment (2026-11-03): row actions are
+            # View / Export / Analysis / Share / Extend.
+            "analysis_eligible": _analysis_eligible,
+            "analysis_reason": _analysis_reason,
+            "analysis_result_id": _analysis_result_id,
         })
     return templates.TemplateResponse(request, "reports.html", {
         "reports": reports,
@@ -2476,7 +2580,7 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     result = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == _user.id,
-        models.Result.type.in_(["analysis", "comparison"]),
+        models.Result.type.in_(["analysis", "comparison", "deep_dive"]),
         models.Result.deleted_at.is_(None),
     ).first()
     if not result:
@@ -2495,6 +2599,79 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     data["csrf_token"] = _csrf
     data["report_id"] = str(result.id)
     data["is_historical"] = True
+    # Issue #106 Stage 2: an Analysis Report renders its own template
+    # from the public projection only (no internal refs/digests).
+    if result.type == "deep_dive":
+        from app import deep_dive as _dd_view
+        try:
+            _artifact = _dd_view.validate_artifact(data)
+            data["analysis_projection"] = _dd_view.public_projection(_artifact)
+        except _dd_view.AnalysisError:
+            return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+        data["export_unlocked"] = credits_helpers.is_export_unlocked(
+            db, _user.id, result.id)
+        return templates.TemplateResponse(
+            request, "deep_dive_report.html", data)
+    # Issue #105: existing structured-export artifacts for this source get
+    # free re-download links on the report page (artifact's own expiry,
+    # validated on the download route itself).
+    if (result.type == "analysis" and not data.get("report_kind")) or result.type == "deep_dive":
+        from datetime import datetime as _dt, timezone as _tz
+        _arts = db.query(models.Result).filter(
+            models.Result.user_id == _user.id,
+            models.Result.type == "structured_export",
+            models.Result.deleted_at.is_(None),
+            models.Result.expires_at > _dt.now(_tz.utc),
+        ).order_by(models.Result.created_at.desc()).all()
+        _links = []
+        for _art in _arts:
+            try:
+                _m = json.loads(_art.storage_manifest)
+            except (ValueError, TypeError):
+                continue
+            if _m.get("source_result_id") == str(result.id) and _m.get("format") in ("csv", "json"):
+                _links.append({"id": str(_art.id), "format": _m["format"]})
+        data["structured_exports"] = _links
+    data.setdefault("structured_exports", [])
+    # Issue #107: owner controls on report.html — retention state and
+    # sharing state for THIS report, plus fresh per-render action keys
+    # (a deliberately new key is a new purchase/rotation; a replayed key
+    # is fenced server-side by ReportAction identity).
+    if result.type == "analysis":
+        from datetime import timedelta as _td
+        _expires = credits_helpers._as_aware(result.expires_at)
+        _ceiling = credits_helpers._as_aware(result.ready_at) + _td(
+            days=credits_helpers.RETENTION_MAX_DAYS)
+        data["report_expires_at"] = _expires
+        data["retention_at_cap"] = (
+            _expires + _td(days=credits_helpers.RETENTION_EXTENSION_DAYS) > _ceiling)
+        data["retention_next_expiry"] = _expires + _td(
+            days=credits_helpers.RETENTION_EXTENSION_DAYS)
+        data["retention_key"] = uuid_module.uuid4().hex
+        data["share_create_key"] = uuid_module.uuid4().hex
+        data["share_rotate_key"] = uuid_module.uuid4().hex
+        data["share_revoke_key"] = uuid_module.uuid4().hex
+        _sharings = db.query(models.ReportSharing).filter(
+            models.ReportSharing.result_id == result.id).all()
+        data["share_active"] = any(
+            row.token_hash and row.revoked_at is None for row in _sharings)
+        data["share_formats"] = [
+            (row.share_format or "txt") for row in _sharings
+            if row.token_hash and row.revoked_at is None]
+        # Issue #129: the report page's Export confirm copy reflects
+        # the per-report unlock state (2 credits once, then free).
+        data["export_unlocked"] = credits_helpers.is_export_unlocked(
+            db, _user.id, result.id)
+        # Issue #106 Stage 2: Analysis action state (founder placement
+        # amendment: report page is Export / Analysis / Share). Legacy
+        # reports explain unavailability before any charge; a completed
+        # generation links to the derived report.
+        from app import deep_dive as _dd_page
+        data["analysis_eligible"], data["analysis_reason"] = \
+            _dd_page.eligibility_state(data)
+        _done_id = credits_helpers.completed_analysis_result_id(
+            db, _user.id, result.id)
+        data["analysis_result_id"] = str(_done_id) if _done_id else None
     # Older manifests predate the elapsed field; the template requires it.
     data.setdefault("elapsed", 0.0)
     if result.type == "comparison":
@@ -2519,7 +2696,12 @@ def _safe_download_filename(filename: str) -> str:
 
 @app.post("/reports/{result_id}/pdf")
 async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)):
-    """Export a report as PDF. Costs 2 credits (COST_PDF)."""
+    """Export a report as PDF.
+
+    Issue #129: costs 2 credits (COST_PDF) only when this generation is
+    the report's first export in ANY format (the single per-report
+    unlock charge); once unlocked, PDF downloads are free.
+    """
     import uuid as _uuid
     import hmac
     import base64 as _b64
@@ -2546,10 +2728,12 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
 
     # Issue #102: PDF export also serves comparison reports (2 credits,
     # standard price); the renderer branches on the result type below.
+    # Issue #106 Stage 2: Analysis Reports export under the SAME #129
+    # per-report unlock (no separate Analysis PDF price).
     result = db.query(models.Result).filter(
         models.Result.id == rid,
         models.Result.user_id == user.id,
-        models.Result.type.in_(["analysis", "comparison"]),
+        models.Result.type.in_(["analysis", "comparison", "deep_dive"]),
         models.Result.deleted_at.is_(None),
     ).first()
     if not result:
@@ -2564,13 +2748,54 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     from app import funnel as funnel_helpers
     funnel_helpers.emit_standalone(funnel_helpers.EXPORT_INTENT, user_id=user.id)
 
-    base_idempotency_key = f"pdf-{result_id}"
+    # PR #132 finding 5: build the operation key from the PARSED
+    # canonical UUID (rid), never the raw URL segment — an uppercase
+    # or unhyphenated first PDF export must create the same canonical
+    # key unlock discovery searches for, or a later CSV/JSON export
+    # would charge a second 2 credits and bypass the cross-format
+    # reservation fence. The retry key below derives from this base,
+    # so it is canonical too.
+    base_idempotency_key = f"pdf-{rid}"
     request_hash = result.integrity_digest
+    # Issue #129: serialize cross-format unlock discovery under the
+    # global:paid lock (the first scope admit_paid_operation locks) and
+    # hold it through the admission commit below, so a concurrent CSV/
+    # JSON first generation for the same report cannot race this route
+    # into a second 2-credit charge. Every early return after this
+    # point rolls back to release the lock.
+    credits_helpers.lock_global_paid_scope(db)
     existing_op = db.query(models.Operation).filter(
         models.Operation.user_id == user.id,
         models.Operation.type == "pdf",
         models.Operation.idempotency_key == base_idempotency_key,
     ).first()
+    if existing_op is None:
+        # PR #132 finding 5: an operation stored before key
+        # canonicalization (raw uppercase/unhyphenated URL segment in
+        # its key) must still be found here — otherwise its completed
+        # PDF could not replay and its reserved state would not fence
+        # this request. Canonical-tolerant match over this user's PDF
+        # operations, preferring completed, then reserved, then the
+        # latest attempt.
+        _legacy = [
+            _op for _op in db.query(models.Operation).filter(
+                models.Operation.user_id == user.id,
+                models.Operation.type == "pdf",
+            ).all()
+            if credits_helpers.export_key_belongs_to(
+                _op.idempotency_key, rid)
+        ]
+        if _legacy:
+            _rank = {"completed": 0, "reserved": 1}
+            existing_op = max(
+                _legacy,
+                key=lambda _op: (
+                    -_rank.get(_op.status, 2),
+                    _op.created_at or datetime.min.replace(
+                        tzinfo=timezone.utc),
+                    str(_op.id),
+                ),
+            )
     # For failed/expired operations, use a new idempotency key so the retry
     # gets a fresh operation identity (the old credits were released).
     # The unique constraint on (user_id, type, idempotency_key) ensures safety.
@@ -2589,6 +2814,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                     )
                     pdf_bytes = _b64.b64decode(manifest["pdf_base64"])
                     filename = manifest.get("filename", "report")
+                    db.rollback()
                     return Response(
                         content=pdf_bytes,
                         media_type="application/pdf",
@@ -2597,17 +2823,63 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                 except (credits_helpers.AdmissionError, KeyError, ValueError):
                     # Stored PDF is invalid or expired; don't attempt to reuse the
                     # completed operation's idempotency key. Return a controlled error.
+                    db.rollback()
                     return JSONResponse(
                         {"error": "Previously generated PDF is no longer available. Please generate a new export."},
                         status_code=410,
                     )
         elif existing_op.status == "reserved":
             # Another request is already generating this PDF; don't hijack its operation
+            db.rollback()
             return JSONResponse(
                 {"error": "PDF export already in progress. Please wait and try again."},
                 status_code=409,
             )
         # For failed/expired operations, fall through to admit a fresh one
+
+    # Issue #129: per-report export unlock. Any completed export
+    # operation for this report (a CSV/JSON first generation included)
+    # unlocks the PDF for free; any reserved export operation in any
+    # format fences this request so two formats cannot both charge.
+    _unlocked, _in_progress = credits_helpers.export_unlock_state(
+        db, user.id, rid)
+    if _in_progress:
+        db.rollback()
+        return JSONResponse(
+            {"error": "PDF export already in progress. Please wait and try again."},
+            status_code=409,
+        )
+    if _unlocked:
+        db.rollback()
+        # Unlocked: generate and serve with NO charge and no new
+        # operation. A generation failure charges 0 and leaves the
+        # unlock (already paid for) untouched.
+        from app.pdf_export import generate_report_pdf as _gen_pdf
+        from app.pdf_export import generate_comparison_pdf as _gen_cmp_pdf
+        from app.pdf_export import generate_batch_pdf as _gen_batch_pdf
+        from app.pdf_export import generate_deep_dive_pdf as _gen_dd_pdf
+        try:
+            _manifest_data = credits_helpers.result_payload(
+                result, user_id=user.id,
+                operation_id=result.operation_id,
+                free_request_id=result.free_request_id,
+            )
+            _filename = _manifest_data.get("filename", "report")
+            if result.type == "deep_dive":
+                _pdf_bytes = _gen_dd_pdf(result.storage_manifest, _filename)
+            elif _manifest_data.get("report_kind") == "batch":
+                _pdf_bytes = _gen_batch_pdf(result.storage_manifest, _filename)
+            elif result.type == "comparison":
+                _pdf_bytes = _gen_cmp_pdf(result.storage_manifest, _filename)
+            else:
+                _pdf_bytes = _gen_pdf(result.storage_manifest, _filename)
+        except Exception:
+            return JSONResponse({"error": "PDF generation failed"}, status_code=500)
+        return Response(
+            content=_pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(_filename)}.pdf"'},
+        )
 
     consent = credits_helpers.create_consent(
         db, user_id=user.id, operation_type="pdf",
@@ -2632,7 +2904,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=409)
 
-    from app.pdf_export import generate_report_pdf, generate_comparison_pdf, generate_batch_pdf
+    from app.pdf_export import generate_report_pdf, generate_comparison_pdf, generate_batch_pdf, generate_deep_dive_pdf
     try:
         # Validate source result integrity before generating PDF
         manifest_data = credits_helpers.result_payload(
@@ -2641,7 +2913,9 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
             free_request_id=result.free_request_id,
         )
         filename = manifest_data.get("filename", "report")
-        if manifest_data.get("report_kind") == "batch":
+        if result.type == "deep_dive":
+            pdf_bytes = generate_deep_dive_pdf(result.storage_manifest, filename)
+        elif manifest_data.get("report_kind") == "batch":
             # Issue #103 (trim B5): ONE 2-credit export for the whole
             # combined artifact — the charge above is the standard
             # single COST_PDF admission for this operation.
@@ -2679,4 +2953,1638 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(filename)}.pdf"'},
     )
+
+
+
+# ---------------------------------------------------------------------------
+# Issue #105: Structured export (CSV/JSON) — uniform 2 credits per format
+# (founder batched ruling 2026-11-01: COST_STRUCTURED_EXPORT for every
+# format). Reserve -> generate from the validated snapshot -> store +
+# complete in ONE settlement; full release on any failure.
+# Issue #129 (founder ruling 2026-11-03): that charge is now the
+# per-report export UNLOCK — the first successful generation in any
+# format (PDF included) charges 2 credits once per report; every later
+# format generation/download for that report is free (see the unlock
+# branch in the route below).
+# ---------------------------------------------------------------------------
+
+
+def _structured_export_response(export_bytes, manifest):
+    from fastapi.responses import Response
+    return Response(
+        content=export_bytes,
+        media_type=manifest["media_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="{manifest["filename"]}"',
+            "Cache-Control": "private, no-store",
+            "X-Export-Download-URL": f"/exports/{manifest['_artifact_id']}",
+        },
+    )
+
+
+@app.post("/reports/{result_id}/exports/{export_format}")
+async def report_export_structured(request: Request, result_id: str, export_format: str, db=Depends(get_db)):
+    """Export a stored single-file report as CSV or JSON.
+
+    Issue #129: costs COST_STRUCTURED_EXPORT credits only when this
+    generation is the report's first export in ANY format (the single
+    per-report unlock charge); replays and all later formats are free.
+    """
+    import uuid as _uuid
+    import hmac
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import structured_export as se
+    from datetime import datetime, timezone
+
+    # Format gate first: reject anything but csv/json before any
+    # reservation (and before auth/CSRF work that could mask it).
+    if export_format not in se.EXPORT_FORMATS:
+        return JSONResponse({"error": "Unsupported export format"}, status_code=400)
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+
+    form = await request.form()
+    csrf_token = form.get("csrf_token", "")
+    if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+        return JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
+
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+
+    # PR #125 finding 4: comparison reports are stored with
+    # type="comparison" (credits.store_result result_type="comparison");
+    # they must be found here so they flow through integrity validation
+    # and the report-kind gate (422 before charge), not 404.
+    source = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+        models.Result.type.in_(("analysis", "comparison", "deep_dive")),
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not source:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+    # Validate ALL source prerequisites BEFORE reservation (spec §5),
+    # including integrity via result_payload (owner/origin/expiry/digest).
+    try:
+        payload = credits_helpers.result_payload(
+            source, user_id=user.id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+
+    # Report-kind gate (§7): compare/batch/unknown fail closed before charge.
+    try:
+        se.check_report_kind(payload)
+    except se.UnsupportedReportKind:
+        return JSONResponse(
+            {"error": "Structured export is not yet supported for this report type"},
+            status_code=422,
+        )
+
+    # Serialization validation also happens BEFORE reservation: a CSV
+    # contradiction (422) or a non-finite JSON payload must never debit.
+    # PR #125 finding 3: validation is separated from generation —
+    # validate_exportable performs the full serialization validation
+    # WITHOUT calling generate_export, so the 402 and completed-replay
+    # paths below never run the generator. Bytes are generated only
+    # after replay discovery + successful admission, from this same
+    # validated snapshot.
+    try:
+        se.validate_exportable(payload, export_format)
+    except se.UnsupportedReportKind:
+        return JSONResponse(
+            {"error": "Structured export is not yet supported for this report type"},
+            status_code=422,
+        )
+    except se.StructuredExportError:
+        return JSONResponse({"error": "Report cannot be exported"}, status_code=422)
+
+    cost = credits_helpers.COST_STRUCTURED_EXPORT
+    base_key = f"structured-{rid}-{export_format}-v1"
+    request_hash = credits_helpers.hash_input(json.dumps(
+        {
+            "source_result_id": str(rid),
+            "source_integrity_digest": source.integrity_digest,
+            "format": export_format,
+            "schema_version": se.SCHEMA_VERSION,
+        },
+        sort_keys=True, separators=(",", ":"),
+    ).encode())
+
+    # PR #125 finding 1: serialize discovery + retry-key creation for
+    # the whole base-key chain. Lock the global:paid capacity scope
+    # (same first scope admit_paid_operation locks) BEFORE discovery
+    # and hold it, in this transaction, through the admission commit
+    # below. A concurrent POST blocks on that row until the first
+    # reservation commits, then its discovery sees the reserved /
+    # completed operation instead of inventing a second retry key.
+    # Every early return after this point rolls back to release it.
+    credits_helpers.lock_global_paid_scope(db)
+
+    # Replay discovery (§5): find the LATEST matching attempt — the base
+    # key or any server-created retry suffix — never just the base key
+    # (that is the PDF retry-discovery gap, designed out here).
+    attempts = db.execute(
+        _select(models.Operation).where(
+            models.Operation.user_id == user.id,
+            models.Operation.type == "structured_export",
+        )
+    ).scalars().all()
+    matching = [
+        op for op in attempts
+        if op.idempotency_key == base_key
+        or op.idempotency_key.startswith(base_key + "-retry-")
+    ]
+    # In-progress anywhere in the chain blocks a second generator/debit.
+    if any(op.status == "reserved" for op in matching):
+        db.rollback()
+        return JSONResponse(
+            {"error": "Structured export already in progress. Please wait and try again."},
+            status_code=409,
+        )
+    completed = [op for op in matching if op.status == "completed" and op.result_id]
+    if completed:
+        # Latest completed attempt wins (retries are created later).
+        latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
+        artifact = db.get(models.Result, latest.result_id)
+        if artifact is not None:
+            try:
+                manifest = credits_helpers.result_payload(
+                    artifact, user_id=user.id, operation_id=latest.id,
+                )
+                export_bytes, manifest = se.decode_artifact(
+                    manifest, expected_format=export_format, expected_source_id=rid,
+                    expected_source_integrity_digest=source.integrity_digest,
+                )
+            except Exception:
+                db.rollback()
+                return JSONResponse(
+                    {"error": "Previously generated export is no longer available."},
+                    status_code=410,
+                )
+            manifest = dict(manifest, _artifact_id=str(artifact.id))
+            db.rollback()
+            return _structured_export_response(export_bytes, manifest)
+        db.rollback()
+        return JSONResponse(
+            {"error": "Previously generated export is no longer available."},
+            status_code=410,
+        )
+
+    # Issue #129: per-report export unlock. A completed export
+    # operation in ANY format (a PDF first generation included) unlocks
+    # this format: generate and serve with NO charge, no consent and
+    # no new operation (a generation failure here charges 0 and leaves
+    # the unlock untouched). A reserved export operation in another
+    # format fences this request (409) so two formats racing a locked
+    # report cannot both charge — the global:paid lock held since
+    # discovery makes this check authoritative on PostgreSQL.
+    _unlocked, _any_in_progress = credits_helpers.export_unlock_state(
+        db, user.id, rid)
+    if _any_in_progress:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Structured export already in progress. Please wait and try again."},
+            status_code=409,
+        )
+    if _unlocked:
+        db.rollback()
+        try:
+            export_bytes = se.generate_export(payload, export_format)
+        except Exception:
+            return JSONResponse(
+                {"error": "Structured export generation failed"},
+                status_code=500)
+        from fastapi.responses import Response as _Response
+        return _Response(
+            content=export_bytes,
+            media_type=se.MEDIA_TYPES[export_format],
+            headers={
+                "Content-Disposition": f'attachment; filename="{se.safe_download_name(payload.get("filename"), rid, export_format)}"',
+                "Cache-Control": "private, no-store",
+            },
+        )
+
+    has_failed = any(op.status in ("failed", "expired") for op in matching)
+    idempotency_key = (
+        f"{base_key}-retry-{_uuid.uuid4().hex[:8]}" if has_failed else base_key
+    )
+
+    # Eligible-vs-total gate (§9.6): a spend-restricted user can hold a
+    # positive total balance yet have zero eligible credits — that is a
+    # 402 with the dynamic price, not an admission conflict, and it runs
+    # no generator and leaves no reservation/artifact.
+    if credits_helpers.get_eligible_credits(db, user.id) < cost:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Structured export costs {cost} credit{'s' if cost != 1 else ''}.",
+             "purchase_url": "/credits"},
+            status_code=402,
+        )
+
+    consent = credits_helpers.create_consent(
+        db, user_id=user.id, operation_type="structured_export",
+        input_hash=request_hash, max_cost=cost,
+    )
+    db.flush()
+
+    worker_id = f"structured-export-{_uuid.uuid4().hex[:8]}"
+    try:
+        op = credits_helpers.admit_paid_operation(
+            db, user_id=user.id, operation_type="structured_export",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            cost=cost, consent_id=consent.id,
+            worker_id=worker_id,
+        )
+        # Never execute an operation this request does not own: a replay
+        # returned by admission (lost race) is handled without generating.
+        if op.worker_id != worker_id or op.status != "reserved":
+            db.rollback()
+            if op.status == "completed":
+                return JSONResponse(
+                    {"error": "Structured export already completed. Please try again to download it."},
+                    status_code=409,
+                )
+            return JSONResponse(
+                {"error": "Structured export already in progress. Please wait and try again."},
+                status_code=409,
+            )
+        db.commit()
+    except credits_helpers.InsufficientCredits:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Structured export costs {cost} credit{'s' if cost != 1 else ''}.",
+             "purchase_url": "/credits"},
+            status_code=402,
+        )
+    except credits_helpers.AdmissionError as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+    # Reserve committed. Generate from the validated snapshot, then store
+    # + complete in ONE settlement transaction; full release on failure.
+    # PR #125 finding 2: Operation.failure_code is String(50); storing
+    # str(exception)[:200] overflowed it on PostgreSQL, the release
+    # flush failed and the reversal rolled back, leaving the op stuck
+    # reserved. Store only a short stable code (<=50 chars) and log the
+    # full exception detail separately.
+    def _release(failure_code, exc=None):
+        import logging as _logging
+        if exc is not None:
+            _logging.getLogger(__name__).exception(
+                "Structured export failed (%s)", failure_code,
+                exc_info=(type(exc), exc, exc.__traceback__))
+        bounded = str(failure_code)[:50]
+        try:
+            credits_helpers.release_operation(db, op.id, worker_id, bounded)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    try:
+        export_bytes = se.generate_export(payload, export_format)
+    except Exception as e:
+        _release("generation_failed", e)
+        return JSONResponse({"error": "Structured export generation failed"}, status_code=500)
+
+    filename = se.safe_download_name(payload.get("filename"), rid, export_format)
+    media_type = se.MEDIA_TYPES[export_format]
+    try:
+        artifact = credits_helpers.store_structured_export_result(
+            db, user.id, op.id, export_bytes,
+            export_format=export_format, filename=filename, media_type=media_type,
+            source_result_id=rid, source_integrity_digest=source.integrity_digest,
+        )
+        credits_helpers.complete_operation(
+            db, op.id, worker_id, result_id=artifact.id,
+            lease_generation=op.lease_generation,
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        _release("storage_failed", e)
+        return JSONResponse({"error": "Failed to store structured export"}, status_code=500)
+
+    manifest = {
+        "media_type": media_type,
+        "filename": filename,
+        "_artifact_id": str(artifact.id),
+    }
+    return _structured_export_response(export_bytes, manifest)
+
+
+@app.get("/exports/{export_id}")
+async def structured_export_download(request: Request, export_id: str, db=Depends(get_db)):
+    """Free re-download of a generated structured export (spec §6).
+
+    Owner-authenticated only; validates the artifact's own origin,
+    manifest and content integrity/expiry. Works even after the SOURCE
+    report expires — the artifact has its own 7-day life — and never
+    generates, charges, or refreshes expiry.
+    """
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse, RedirectResponse
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import structured_export as se
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return RedirectResponse("/login", status_code=303)
+    user = session.user
+
+    try:
+        eid = _uuid.UUID(export_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid export ID"}, status_code=400)
+
+    artifact = db.query(models.Result).filter(
+        models.Result.id == eid,
+        models.Result.user_id == user.id,
+        models.Result.type == "structured_export",
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not artifact:
+        return JSONResponse({"error": "Export not found"}, status_code=404)
+    try:
+        manifest = credits_helpers.result_payload(
+            artifact, user_id=user.id, operation_id=artifact.operation_id,
+        )
+        export_bytes, manifest = se.decode_artifact(manifest)
+        # PR #125 finding 5: bind provenance to the originating
+        # operation. The source may be expired/gone on GET, so recompute
+        # the POST route's request hash from the manifest's provenance
+        # fields (exactly the POST canonical construction) and compare
+        # it to the originating Operation's request_hash. Missing or
+        # mismatched operation fails closed (410).
+        if not artifact.operation_id:
+            raise ValueError("artifact has no originating operation")
+        origin_op = db.get(models.Operation, artifact.operation_id)
+        if origin_op is None or origin_op.type != "structured_export":
+            raise ValueError("originating operation missing")
+        expected_hash = credits_helpers.hash_input(json.dumps(
+            {
+                "source_result_id": manifest["source_result_id"],
+                "source_integrity_digest": manifest["source_integrity_digest"],
+                "format": manifest["format"],
+                "schema_version": manifest["schema_version"],
+            },
+            sort_keys=True, separators=(",", ":"),
+        ).encode())
+        if expected_hash != origin_op.request_hash:
+            raise ValueError("artifact provenance does not match operation")
+    except Exception:
+        return JSONResponse({"error": "Export has expired or is no longer available"}, status_code=410)
+    manifest = dict(manifest, _artifact_id=str(artifact.id))
+    return _structured_export_response(export_bytes, manifest)
+
+
+# ---------------------------------------------------------------------------
+# Issue #106 Stage 2: Analysis Report generation.
+#
+# POST /reports/{id}/deep-dive — 3 credits (COST_DEEP_DIVE), charged on
+# SUCCESS only: reserve -> generate from the retained-evidence snapshot
+# -> store + complete in one settlement; full release on any failure.
+# Canonical identity is owner + source UUID/digest + grouping/evidence/
+# generator/schema versions; the same identity replays the saved
+# artifact free and never re-charges. Legacy (pre-evidence) sources,
+# comparisons, batches and Analysis Reports themselves reject with 422
+# BEFORE any reservation. The derived report is a distinct Result of
+# type "deep_dive" with its own 7-day retention and its own #129
+# export unlock; the source report is never modified.
+# ---------------------------------------------------------------------------
+
+@app.post("/reports/{result_id}/deep-dive")
+async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db)):
+    """Generate the paid Analysis Report for a completed owned report."""
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import deep_dive as dd
+    from datetime import datetime, timezone
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return err
+
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+
+    source = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not source:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    # An Analysis Report cannot be generated from another Analysis
+    # Report, a comparison or a batch (spec: reject before reservation).
+    if source.type != "analysis":
+        return JSONResponse(
+            {"error": "Analysis Reports are not available for this report type"},
+            status_code=422)
+    if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    try:
+        payload = credits_helpers.result_payload(
+            source, user_id=user.id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+
+    # Kind + evidence gates BEFORE any reservation or charge.
+    try:
+        dd.check_eligibility(payload)
+    except dd.UnsupportedReportKind:
+        return JSONResponse(
+            {"error": "Analysis Reports are not available for this report type"},
+            status_code=422)
+    except dd.InsufficientEvidence as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+    cost = credits_helpers.COST_DEEP_DIVE
+    request_hash = dd.analysis_request_hash(source, payload)
+    base_key = f"analysis-{rid}-v1"
+
+    # Serialize discovery + admission under the global:paid lock (the
+    # first scope admit_paid_operation locks), held through the
+    # admission commit — the structured-export pattern (PR #125 F1).
+    credits_helpers.lock_global_paid_scope(db)
+    attempts = credits_helpers.analysis_operations(db, user.id, rid)
+    if any(op.status == "reserved" for op in attempts):
+        db.rollback()
+        return JSONResponse(
+            {"error": "Analysis Report generation already in progress. "
+                      "Please wait and try again."},
+            status_code=409)
+    completed = [op for op in attempts
+                 if op.status == "completed" and op.result_id
+                 and op.request_hash == request_hash]
+    if completed:
+        latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
+        artifact = db.get(models.Result, latest.result_id)
+        if artifact is not None:
+            try:
+                manifest = credits_helpers.result_payload(
+                    artifact, user_id=user.id, operation_id=latest.id)
+                dd.validate_artifact(
+                    manifest, expected_source_id=rid,
+                    expected_source_integrity_digest=source.integrity_digest)
+            except Exception:
+                db.rollback()
+                return JSONResponse(
+                    {"error": "Previously generated Analysis Report is "
+                              "no longer available."},
+                    status_code=410)
+            db.rollback()
+            return JSONResponse({
+                "status": "completed",
+                "analysis_result_id": str(artifact.id),
+                "report_url": f"/reports/{artifact.id}",
+                "cost": cost,
+                "replayed": True,
+            })
+        db.rollback()
+        return JSONResponse(
+            {"error": "Previously generated Analysis Report is no longer available."},
+            status_code=410)
+
+    # A completed attempt under a DIFFERENT canonical identity (e.g. a
+    # generator-version bump) never auto-charges on view, but this
+    # explicit Confirm POST is the new purchase the spec requires: it
+    # gets a fresh retry identity instead of replaying.
+    has_prior = any(
+        op.status in ("failed", "expired") for op in attempts) or any(
+        op.status == "completed" for op in attempts)
+    idempotency_key = (
+        f"{base_key}-retry-{_uuid.uuid4().hex[:8]}" if has_prior else base_key)
+
+    if credits_helpers.get_eligible_credits(db, user.id) < cost:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Analysis Report costs "
+                      f"{cost} credits.",
+             "purchase_url": "/credits"},
+            status_code=402)
+
+    consent = credits_helpers.create_consent(
+        db, user_id=user.id, operation_type="deep_dive",
+        input_hash=request_hash, max_cost=cost,
+    )
+    db.flush()
+    worker_id = f"deep-dive-{_uuid.uuid4().hex[:8]}"
+    try:
+        op = credits_helpers.admit_paid_operation(
+            db, user_id=user.id, operation_type="deep_dive",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            cost=cost, consent_id=consent.id, worker_id=worker_id,
+        )
+        if op.worker_id != worker_id or op.status != "reserved":
+            db.rollback()
+            return JSONResponse(
+                {"error": "Analysis Report generation already in progress. "
+                          "Please wait and try again."},
+                status_code=409)
+        db.commit()
+    except credits_helpers.InsufficientCredits:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Insufficient credits. Analysis Report costs "
+                      f"{cost} credits.",
+             "purchase_url": "/credits"},
+            status_code=402)
+    except credits_helpers.AdmissionError as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+    def _release(failure_code, exc=None):
+        import logging as _logging
+        if exc is not None:
+            _logging.getLogger(__name__).exception(
+                "Analysis Report failed (%s)", failure_code,
+                exc_info=(type(exc), exc, exc.__traceback__))
+        try:
+            credits_helpers.release_operation(
+                db, op.id, worker_id, str(failure_code)[:50])
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    # Generation runs on the validated snapshot only (no re-parse).
+    try:
+        artifact_data = dd.build_deep_dive(
+            payload, source_result_id=rid,
+            source_integrity_digest=source.integrity_digest)
+    except Exception as e:
+        _release("generation_failed", e)
+        return JSONResponse(
+            {"error": "Analysis Report generation failed"}, status_code=500)
+
+    try:
+        artifact = credits_helpers.store_result(
+            db, user.id, op.id, artifact_data, result_type="deep_dive",
+            severity=source.severity if source.severity is not None
+            else "__default__")
+        credits_helpers.complete_operation(
+            db, op.id, worker_id, result_id=artifact.id,
+            lease_generation=op.lease_generation)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        _release("storage_failed", e)
+        return JSONResponse(
+            {"error": "Failed to store Analysis Report"}, status_code=500)
+
+    return JSONResponse({
+        "status": "completed",
+        "analysis_result_id": str(artifact.id),
+        "report_url": f"/reports/{artifact.id}",
+        "cost": cost,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Issue #107: Retention extension + shareable report links.
+#
+# Retention: POST /reports/{id}/retention — 1 credit per +90 days from
+# the CURRENT expires_at, stackable to ready_at + 365 days, full-unit
+# only (409 past the ceiling, no debit), settled atomically as
+# reserve -> extend -> receipt -> complete in ONE transaction under the
+# global:paid lock (the same row cleanup_results locks, so extension
+# and cleanup cannot race).
+#
+# Sharing is FREE (trim T1): create/rotate/revoke never charge, never
+# create a consent or a paid operation. Tokens are 256-bit, stored
+# hash-only, revealed once; rotation is the lost-token recovery.
+# ---------------------------------------------------------------------------
+
+_SHARE_CSP = (
+    "default-src 'none'; style-src 'self'; img-src 'self'; "
+    "font-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+    "form-action 'none'"
+)
+
+
+def _share_csp(nonce: str | None = None) -> str:
+    """CSP for shared pages. With a per-response nonce (Finding 4),
+    ONLY the shared report page's single nonced <style> block is
+    additionally allowed; 'unsafe-inline' is never added and every
+    other directive is unchanged. Without a nonce the original
+    policy is returned verbatim (identical-404 / PDF routes)."""
+    if not nonce:
+        return _SHARE_CSP
+    return _SHARE_CSP.replace(
+        "style-src 'self'", f"style-src 'self' 'nonce-{nonce}'")
+
+
+def _share_headers(extra: dict | None = None,
+                   nonce: str | None = None) -> dict:
+    headers = {
+        "Cache-Control": "private, no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Robots-Tag": "noindex, nofollow, noarchive",
+        "Content-Security-Policy": _share_csp(nonce),
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _share_chart_style(projection: dict) -> tuple[str, dict]:
+    """Build CSP-nonced dynamic chart dimensions (Finding 4).
+
+    Returns (css_text, class_map): css_text holds one generated rule
+    per dynamic height/width, to be emitted inside the shared page's
+    single ``<style nonce=...>`` block; class_map maps a stable key
+    for each chart element to its generated class name, which the
+    template adds alongside the static classes. No inline style=
+    attributes are used, so style-src 'self' (plus the nonce) is
+    honoured without weakening the CSP. Percentages replicate the
+    template's former inline computations exactly.
+    """
+    rules: list[str] = []
+    classes: dict = {"timeline": {}, "severity": {}, "service": {}}
+
+    def _pct(num, den):
+        try:
+            return (num / den * 100) if den else 0
+        except Exception:
+            return 0
+
+    def _fmt(v):
+        return f"{v:.6g}"
+
+    timeline = projection.get("timeline") or []
+    if isinstance(timeline, list) and len(timeline) > 1:
+        try:
+            tmax = max((b.get("total") or 0) for b in timeline)
+        except Exception:
+            tmax = 0
+        for i, b in enumerate(timeline):
+            if not isinstance(b, dict):
+                continue
+            issues = (b.get("warn") or 0) + (b.get("error") or 0) \
+                + (b.get("critical") or 0)
+            entry = {}
+            cls = f"ss-dyn-tl-{i}"
+            rules.append(f".{cls}{{height:{_fmt(_pct(issues, tmax))}%}}")
+            entry["stack"] = cls
+            for seg, key in (("critical", "critical"),
+                             ("error", "error"), ("warn", "warn")):
+                val = b.get(key) or 0
+                if val > 0:
+                    scls = f"ss-dyn-tl-{i}-{seg}"
+                    rules.append(
+                        f".{scls}{{height:{_fmt(_pct(val, issues))}%}}")
+                    entry[seg] = scls
+            classes["timeline"][i] = entry
+
+    results = projection.get("results") or {}
+    if isinstance(results, dict):
+        level_counts = results.get("level_counts") or {}
+        if level_counts:
+            counts = [level_counts.get(k, 0) for k in
+                      ("CRITICAL", "ERROR", "WARN", "INFO")]
+            max_count = max(counts) if counts else 0
+            for level in ("CRITICAL", "ERROR", "WARN", "INFO"):
+                count = level_counts.get(level, 0)
+                cls = f"ss-dyn-sev-{level.lower()}"
+                rules.append(
+                    f".{cls}{{width:{_fmt(_pct(count, max_count))}%}}")
+                classes["severity"][level] = cls
+        service_counts = results.get("service_counts") or {}
+        total_lines = results.get("total_lines") or 0
+        if isinstance(service_counts, dict):
+            for idx, svc in enumerate(
+                    sorted(service_counts, key=lambda k: service_counts[k],
+                           reverse=True)):
+                cls = f"ss-dyn-svc-{idx}"
+                rules.append(
+                    f".{cls}{{width:"
+                    f"{_fmt(_pct(service_counts[svc], total_lines))}%}}")
+                classes["service"][svc] = cls
+    return "\n".join(rules), classes
+
+
+def _share_unavailable():
+    """The ONE public failure response (draft §6 identical-404 discipline).
+
+    Unknown, malformed, tampered, revoked, rotated, expired, deleted
+    and corrupt tokens all render exactly this status, body and
+    headers; rate-limit/service errors are the only exceptions and are
+    independent of token validity.
+    """
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(
+        content="<h1>This report is unavailable.</h1>",
+        status_code=404,
+        headers=_share_headers(),
+    )
+
+
+def _share_rate_limited(request: Request):
+    """Apply the public abuse limiter; return an error response or None.
+
+    Fail-closed: any limiter/database failure is a 503, never a skip.
+    """
+    from fastapi.responses import HTMLResponse
+    from app.rate_limit import RateLimitUnavailable
+    from app import report_access as _ra
+    ip = _client_ip(request)
+    key = _ra.share_limit_key(ip)
+    if _use_shared_limiter():
+        try:
+            rl_db = _db_session()
+            try:
+                share_limiter.admit(rl_db, key)
+            finally:
+                rl_db.close()
+        except (BurstLimited, HourlyLimited):
+            return HTMLResponse(
+                content="<h1>Too many requests.</h1>", status_code=429,
+                headers=_share_headers({"Retry-After": "60"}))
+        except Exception:
+            return HTMLResponse(
+                content="<h1>Service temporarily unavailable.</h1>",
+                status_code=503,
+                headers=_share_headers({"Retry-After": "60"}))
+        return None
+    # No-database demo path: paired in-memory limiters, atomic check.
+    if not _share_mem_burst.check(key) or not _share_mem_hourly.check(key):
+        return HTMLResponse(
+            content="<h1>Too many requests.</h1>", status_code=429,
+            headers=_share_headers({"Retry-After": "60"}))
+    _share_mem_burst.record(key)
+    _share_mem_hourly.record(key)
+    return None
+
+
+async def _check_owner_csrf(request: Request, session, db):
+    import hmac
+    from fastapi.responses import JSONResponse
+    form = await request.form()
+    csrf_token = form.get("csrf_token", "")
+    if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
+        return None, JSONResponse({"error": "Invalid CSRF token"}, status_code=403)
+    return form, None
+
+
+def _find_owned_report(db, user, result_id: str, types):
+    import uuid as _uuid
+    from app import models
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return None, 400
+    result = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+        models.Result.type.in_(list(types)),
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not result:
+        return None, 404
+    return result, None
+
+
+@app.post("/reports/{result_id}/retention")
+async def report_extend_retention(request: Request, result_id: str, db=Depends(get_db)):
+    """Extend a report's retention by +90 days for 1 credit (trim T2)."""
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import report_access as _ra
+    from datetime import timedelta
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return err
+    idempotency_key = str(form.get("idempotency_key") or _uuid.uuid4().hex)
+
+    # Serialize against cleanup + other extensions on the global:paid
+    # row for the WHOLE transaction (cleanup locks the same row).
+    credits_helpers.lock_global_paid_scope(db)
+    source, status = _find_owned_report(db, user, result_id,
+                                         ("analysis", "comparison"))
+    if status == 400:
+        db.rollback()
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+    if source is None:
+        db.rollback()
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    # Authoritative re-read under the lock.
+    source = db.execute(
+        _select(models.Result).where(models.Result.id == source.id)
+        .with_for_update().execution_options(populate_existing=True)
+    ).scalar_one()
+
+    request_hash = _ra.action_request_hash(source, "retention_extension")
+
+    # Replay fence (permanent ReportAction identity): same key returns
+    # the stored outcome with no charge — even after the receipt
+    # Result's payload has been cleaned up, and regardless of balance.
+    prior = db.execute(
+        _select(models.ReportAction).where(
+            models.ReportAction.owner_user_id == user.id,
+            models.ReportAction.result_id == source.id,
+            models.ReportAction.action_kind == "retention_extension",
+            models.ReportAction.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    if prior is not None:
+        db.rollback()
+        if prior.request_hash != request_hash:
+            return JSONResponse(
+                {"error": "Idempotency key reused with different input"},
+                status_code=409)
+        return JSONResponse({
+            "status": "extended",
+            "result_id": str(source.id),
+            "expires_at": credits_helpers._as_aware(
+                prior.resulting_expiry).isoformat()
+            if prior.resulting_expiry else None,
+            "cost": credits_helpers.COST_RETENTION_EXTENSION,
+            "replayed": True,
+        })
+
+    if credits_helpers._as_aware(source.expires_at) <= credits_helpers._utcnow():
+        db.rollback()
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    try:
+        credits_helpers.result_payload(
+            source, user_id=user.id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+
+    cost = credits_helpers.COST_RETENTION_EXTENSION
+    if credits_helpers.get_eligible_credits(db, user.id) < cost:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Retention extension costs {cost} credit. "
+                      "Insufficient eligible credits.",
+             "purchase_url": "/credits"},
+            status_code=402)
+
+    previous_expiry = credits_helpers._as_aware(source.expires_at)
+    new_expiry = previous_expiry + timedelta(
+        days=credits_helpers.RETENTION_EXTENSION_DAYS)
+    ceiling = credits_helpers._as_aware(source.ready_at) + timedelta(
+        days=credits_helpers.RETENTION_MAX_DAYS)
+    if new_expiry > ceiling:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Retention extension would exceed the maximum "
+                      "retention for this report."},
+            status_code=409)
+
+    consent = credits_helpers.create_consent(
+        db, user_id=user.id, operation_type="retention_extension",
+        input_hash=request_hash, max_cost=cost,
+    )
+    db.flush()
+    worker_id = f"retention-{_uuid.uuid4().hex[:8]}"
+    try:
+        op = credits_helpers.admit_paid_operation(
+            db, user_id=user.id, operation_type="retention_extension",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            cost=cost, consent_id=consent.id, worker_id=worker_id,
+        )
+        if op.worker_id != worker_id or op.status != "reserved":
+            db.rollback()
+            return JSONResponse(
+                {"error": "Retention extension already in progress. "
+                          "Please wait and try again."},
+                status_code=409)
+        # Atomic settlement in THIS transaction: extend -> receipt ->
+        # action identity -> complete. Any failure rolls the whole
+        # transaction back, restoring expiry and credits together.
+        source.expires_at = new_expiry
+        db.flush()
+        receipt = credits_helpers.store_report_action_receipt(
+            db, user.id, op.id, {
+                "action_kind": "retention_extension",
+                "target_result_id": str(source.id),
+                "previous_expiry": previous_expiry.isoformat(),
+                "new_expiry": new_expiry.isoformat(),
+            })
+        db.add(models.ReportAction(
+            owner_user_id=user.id, result_id=source.id,
+            action_kind="retention_extension",
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            resulting_expiry=new_expiry, operation_id=op.id,
+        ))
+        db.flush()
+        credits_helpers.complete_operation(
+            db, op.id, worker_id, result_id=receipt.id,
+            lease_generation=op.lease_generation,
+        )
+        db.commit()
+    except credits_helpers.InsufficientCredits:
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Retention extension costs {cost} credit. "
+                      "Insufficient eligible credits.",
+             "purchase_url": "/credits"},
+            status_code=402)
+    except credits_helpers.AdmissionError as e:
+        db.rollback()
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except Exception:
+        db.rollback()
+        logging.getLogger(__name__).exception(
+            "Retention extension settlement failed")
+        return JSONResponse(
+            {"error": "Retention extension failed"}, status_code=500)
+    return JSONResponse({
+        "status": "extended",
+        "result_id": str(source.id),
+        "expires_at": new_expiry.isoformat(),
+        "cost": cost,
+    })
+
+
+def _share_action_replay(db, user, source, action_kind, idempotency_key,
+                         request_hash, share_format=None):
+    """Return (prior_action, error_response) for a free share action.
+
+    PR #138 remediation (finding 4): a stored hash also matches when
+    it is the pre-#135 legacy representation and the current action's
+    format carries the legacy txt semantics — see
+    report_access.action_hash_matches for the exact scheme."""
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import models
+    from app import report_access as _ra
+    prior = db.execute(
+        _select(models.ReportAction).where(
+            models.ReportAction.owner_user_id == user.id,
+            models.ReportAction.result_id == source.id,
+            models.ReportAction.action_kind == action_kind,
+            models.ReportAction.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    if prior is not None and not _ra.action_hash_matches(
+            prior.request_hash, source, action_kind, request_hash,
+            share_format=share_format):
+        return None, JSONResponse(
+            {"error": "Idempotency key reused with different input"},
+            status_code=409)
+    return prior, None
+
+
+def _record_share_action(db, user, source, action_kind, idempotency_key,
+                         request_hash, generation):
+    from app import models
+    db.add(models.ReportAction(
+        owner_user_id=user.id, result_id=source.id,
+        action_kind=action_kind, idempotency_key=idempotency_key,
+        request_hash=request_hash, generation=generation,
+    ))
+    db.flush()
+
+
+def _share_url(request: Request, raw_token: str) -> str:
+    """Share URL for the once-only reveal. Built from the trusted
+    configured app origin (APP_BASE_URL) when one is set — never from
+    an arbitrary request Host; without a configured origin the
+    path-only URL is returned and the client resolves it against the
+    origin it is already talking to."""
+    origin = os.environ.get("APP_BASE_URL", "").rstrip("/")
+    return f"{origin}/s/{raw_token}"
+
+
+async def _share_owner_gate(request: Request, result_id: str, db):
+    """Session + CSRF + owned single-type report for share actions."""
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return None, None, None, None, JSONResponse(
+            {"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return None, None, None, None, err
+    source, status = _find_owned_report(
+        db, user, result_id, ("analysis", "comparison"))
+    if status == 400:
+        return None, None, None, None, JSONResponse(
+            {"error": "Invalid report ID"}, status_code=400)
+    if source is None:
+        return None, None, None, None, JSONResponse(
+            {"error": "Report not found"}, status_code=404)
+    idempotency_key = str(form.get("idempotency_key") or _uuid.uuid4().hex)
+    return session, user, form, (source, idempotency_key), None
+
+
+def _share_source_gate(db, user, source):
+    """Expiry/integrity/kind gates for share CREATE (before any creation).
+
+    Returns an error JSONResponse or None. Compare/batch/unknown kinds
+    are rejected with a controlled 422 BEFORE link creation (trim T4).
+    """
+    from fastapi.responses import JSONResponse
+    from app import credits as credits_helpers
+    from app import report_access as _ra
+    from datetime import datetime, timezone
+    if source.type != "analysis":
+        return JSONResponse(
+            {"error": "Sharing is not yet supported for this report type"},
+            status_code=422)
+    if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    try:
+        payload = credits_helpers.result_payload(
+            source, user_id=user.id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+    if not _ra.is_single_file_payload(payload):
+        return JSONResponse(
+            {"error": "Sharing is not yet supported for this report type"},
+            status_code=422)
+    return None
+
+
+def _find_sharing(db, source_id, share_format):
+    """The sharing row for (report, format) — #135: one per format."""
+    from sqlalchemy import select as _select
+    from app import models
+    from app import report_access as _ra
+    rows = db.execute(
+        _select(models.ReportSharing).where(
+            models.ReportSharing.result_id == source_id)
+    ).scalars().all()
+    for row in rows:
+        if _ra.share_format_of(row) == share_format:
+            return row
+    return None
+
+
+def _active_sharings(db, source_id):
+    from sqlalchemy import select as _select
+    from app import models
+    return [row for row in db.execute(
+        _select(models.ReportSharing).where(
+            models.ReportSharing.result_id == source_id)
+    ).scalars().all()
+        if row.token_hash and row.revoked_at is None]
+
+
+@app.post("/reports/{result_id}/share")
+async def report_share_create(request: Request, result_id: str, db=Depends(get_db)):
+    """Create a share link for ONE format — FREE (trim T1).
+
+    Issue #135: the popup's format choice (pdf/txt/json/csv; missing
+    defaults to txt) is bound into the link. TXT is always free.
+    pdf/json/csv require the report's #129 export unlock: pre-unlock
+    creation is refused 402 (no charge, no link, no action row beyond
+    the rate/replay bookkeeping below) — the unlock itself is bought
+    through the export routes, never through sharing. Post-unlock
+    creation charges nothing beyond that unlock."""
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import report_access as _ra
+
+    session, user, form, ctx, err = await _share_owner_gate(request, result_id, db)
+    if err is not None:
+        return err
+    source, idempotency_key = ctx
+    share_format = _ra.normalize_share_format(
+        form.get("format") or form.get("share_format"))
+    if share_format is None:
+        return JSONResponse(
+            {"error": "Share format must be one of PDF, TXT, JSON, CSV."},
+            status_code=400)
+    request_hash = _ra.action_request_hash(
+        source, "share_create", share_format=share_format)
+    # Finding 2: lock the share:actions bucket BEFORE the replay
+    # lookup and hold it through settlement, so the lookup below is
+    # authoritative under the lock (concurrent same-key requests
+    # serialize; replays never consume rate and never 429/500).
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
+    prior, err = _share_action_replay(
+        db, user, source, "share_create", idempotency_key, request_hash,
+        share_format=share_format)
+    if err is not None:
+        db.rollback()
+        return err
+    if prior is not None:
+        db.rollback()
+        return JSONResponse({
+            "status": "already_shared",
+            "message": "This report already has a share link. "
+                       "Rotate the link to get a new copyable URL.",
+        })
+    gate = _share_source_gate(db, user, source)
+    if gate is not None:
+        db.rollback()
+        return gate
+    # Issue #135 format gate (the teeth of this rework): pdf/json/csv
+    # links require the report's #129 export unlock. Checked BEFORE
+    # any rate consumption, link row, or action record, so a denied
+    # creation leaves nothing behind and charges nothing.
+    if share_format in _ra.GATED_SHARE_FORMATS and not (
+            credits_helpers.is_export_unlocked(db, user.id, source.id)):
+        db.rollback()
+        return JSONResponse(
+            {"error": f"Sharing as {share_format.upper()} requires this "
+                      "report's export unlock (2 credits, via Export). "
+                      "TXT sharing is always free.",
+             "code": "export_unlock_required",
+             "export_unlocked": False,
+             "format": share_format},
+            status_code=402)
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
+    sharing = _find_sharing(db, source.id, share_format)
+    if sharing is not None:
+        sharing = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.id == sharing.id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+    if sharing is not None and sharing.token_hash and sharing.revoked_at is None:
+        # Finding 1: record this no-op create outcome (with the
+        # existing active sharing's generation) in the SAME
+        # transaction as the rate consumption, so replaying this
+        # key hits _share_action_replay and returns already_shared
+        # without consuming rate or — if the owner revoked in the
+        # meantime — creating a new active link.
+        _record_share_action(db, user, source, "share_create",
+                             idempotency_key, request_hash,
+                             sharing.generation)
+        db.commit()
+        return JSONResponse({
+            "status": "already_shared",
+            "message": "This report already has a share link for that "
+                       "format. Rotate the link to get a new copyable URL.",
+            "format": share_format,
+        })
+    raw_token = auth_helpers.generate_token()
+    if sharing is None:
+        sharing = models.ReportSharing(
+            result_id=source.id, owner_user_id=user.id,
+            token_hash=auth_helpers.hash_token(raw_token), generation=1,
+            share_format=share_format, raw_token=raw_token,
+        )
+        db.add(sharing)
+    else:
+        sharing.token_hash = auth_helpers.hash_token(raw_token)
+        sharing.raw_token = raw_token
+        sharing.share_format = share_format
+        sharing.generation += 1
+        sharing.revoked_at = None
+    db.flush()
+    _record_share_action(db, user, source, "share_create", idempotency_key,
+                         request_hash, sharing.generation)
+    db.commit()
+    return JSONResponse({
+        "status": "created",
+        "share_url": _share_url(request, raw_token),
+        "format": share_format,
+    })
+
+
+@app.post("/reports/{result_id}/share/rotate")
+async def report_share_rotate(request: Request, result_id: str, db=Depends(get_db)):
+    """Replace the active token — FREE. The lost-token recovery path."""
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import report_access as _ra
+
+    session, user, form, ctx, err = await _share_owner_gate(request, result_id, db)
+    if err is not None:
+        return err
+    source, idempotency_key = ctx
+    # Issue #135: rotate targets ONE format's link. An explicit format
+    # names it; without one, the report's sole active link (or its txt
+    # link) is the unambiguous target.
+    _rotate_fmt_raw = form.get("format") or form.get("share_format")
+    _rotate_fmt = _ra.normalize_share_format(_rotate_fmt_raw) \
+        if _rotate_fmt_raw else None
+    if _rotate_fmt_raw and _rotate_fmt is None:
+        return JSONResponse(
+            {"error": "Share format must be one of PDF, TXT, JSON, CSV."},
+            status_code=400)
+    request_hash = _ra.action_request_hash(
+        source, "share_rotate", share_format=_rotate_fmt)
+    # Finding 2: lock before the authoritative replay lookup (see
+    # report_share_create).
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
+    prior, err = _share_action_replay(
+        db, user, source, "share_rotate", idempotency_key, request_hash,
+        share_format=_rotate_fmt)
+    if err is not None:
+        db.rollback()
+        return err
+    if prior is not None:
+        db.rollback()
+        return JSONResponse({
+            "status": "already_rotated",
+            "message": "That rotation already happened. Rotate again "
+                       "for a new copyable URL.",
+        })
+    gate = _share_source_gate(db, user, source)
+    if gate is not None:
+        db.rollback()
+        return gate
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
+    if _rotate_fmt is not None:
+        sharing = _find_sharing(db, source.id, _rotate_fmt)
+    else:
+        # No format named: a single row (active OR revoked — rotate is
+        # the reshare-after-revoke recovery) is unambiguous; with
+        # several rows prefer the sole active one, then the txt one.
+        _all_rows = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.result_id == source.id)
+        ).scalars().all()
+        actives = [row for row in _all_rows
+                   if row.token_hash and row.revoked_at is None]
+        sharing = None
+        if len(_all_rows) == 1:
+            sharing = _all_rows[0]
+        elif len(actives) == 1:
+            sharing = actives[0]
+        elif _all_rows:
+            sharing = next(
+                (row for row in _all_rows
+                 if _ra.share_format_of(row) == "txt"), None)
+            if sharing is None:
+                db.rollback()
+                return JSONResponse(
+                    {"error": "Specify which format's link to rotate."},
+                    status_code=409)
+    if sharing is not None:
+        sharing = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.id == sharing.id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+    if sharing is None:
+        db.commit()
+        return JSONResponse(
+            {"error": "This report has no share link to rotate"},
+            status_code=409)
+    raw_token = auth_helpers.generate_token()
+    sharing.token_hash = auth_helpers.hash_token(raw_token)
+    sharing.raw_token = raw_token
+    sharing.generation += 1
+    sharing.revoked_at = None
+    db.flush()
+    _record_share_action(db, user, source, "share_rotate", idempotency_key,
+                         request_hash, sharing.generation)
+    db.commit()
+    return JSONResponse({
+        "status": "rotated",
+        "share_url": _share_url(request, raw_token),
+        "format": _ra.share_format_of(sharing),
+    })
+
+
+@app.post("/reports/{result_id}/share/revoke")
+async def report_share_revoke(request: Request, result_id: str, db=Depends(get_db)):
+    """Revoke the active token — FREE and idempotent; always available
+    regardless of balance or spend restrictions (draft §5)."""
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import credits as credits_helpers
+    from app import models
+    from app import report_access as _ra
+
+    session, user, form, ctx, err = await _share_owner_gate(request, result_id, db)
+    if err is not None:
+        return err
+    source, idempotency_key = ctx
+    # Issue #135: an explicit format revokes only that format's link;
+    # without one, revoke kills EVERY active link for the report
+    # (the pre-#135 single-link behaviour, and the safe default).
+    _revoke_fmt_raw = form.get("format") or form.get("share_format")
+    _revoke_fmt = _ra.normalize_share_format(_revoke_fmt_raw) \
+        if _revoke_fmt_raw else None
+    if _revoke_fmt_raw and _revoke_fmt is None:
+        return JSONResponse(
+            {"error": "Share format must be one of PDF, TXT, JSON, CSV."},
+            status_code=400)
+    request_hash = _ra.action_request_hash(
+        source, "share_revoke", share_format=_revoke_fmt)
+    # Finding 2: lock before the authoritative replay lookup (see
+    # report_share_create).
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
+    prior, err = _share_action_replay(
+        db, user, source, "share_revoke", idempotency_key, request_hash,
+        share_format=_revoke_fmt)
+    if err is not None:
+        db.rollback()
+        return err
+    if prior is not None:
+        db.rollback()
+        return JSONResponse({"status": "revoked"})
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
+    if _revoke_fmt is not None:
+        _targets = []
+        _row = _find_sharing(db, source.id, _revoke_fmt)
+        if _row is not None:
+            _targets = [_row]
+    else:
+        _targets = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.result_id == source.id)
+        ).scalars().all()
+    generation = 0
+    for sharing in _targets:
+        sharing = db.execute(
+            _select(models.ReportSharing).where(
+                models.ReportSharing.id == sharing.id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if sharing is None:
+            continue
+        if sharing.token_hash is not None or sharing.revoked_at is None:
+            sharing.token_hash = None
+            sharing.raw_token = None
+            sharing.revoked_at = credits_helpers._utcnow()
+            sharing.generation += 1
+        generation = max(generation, sharing.generation)
+    db.flush()
+    _record_share_action(db, user, source, "share_revoke", idempotency_key,
+                         request_hash, generation)
+    db.commit()
+    return JSONResponse({"status": "revoked"})
+
+
+@app.post("/settings/report-access/{sharing_id}/revoke")
+async def settings_report_access_revoke(request: Request, sharing_id: str,
+                                        db=Depends(get_db)):
+    """Revoke ONE share link from Settings -> Report Access (#135).
+
+    Owner-only (session + CSRF), FREE, immediate: the row's token hash
+    and raw token are cleared in this commit, so the very next public
+    request for that token gets the identical unavailable response.
+    Other formats' links for the same report are untouched."""
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from app import models
+    from app import report_access as _ra
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return err
+    try:
+        sid = _uuid.UUID(sharing_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid link ID"}, status_code=400)
+    # PR #138 remediation (finding 3): lock ORDER — acquire the
+    # share rate bucket BEFORE locking the sharing row, exactly as
+    # create/rotate/report-revoke do. Locking the row first inverted
+    # that order and could deadlock on PostgreSQL against a
+    # concurrent share action, aborting this revoke and leaving the
+    # bearer token live.
+    credits_helpers.lock_share_rate_bucket(db, str(user.id))
+    sharing = db.execute(
+        _select(models.ReportSharing).where(
+            models.ReportSharing.id == sid,
+            models.ReportSharing.owner_user_id == user.id)
+        .with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if sharing is None:
+        db.rollback()
+        return JSONResponse({"error": "Share link not found"}, status_code=404)
+    source = db.get(models.Result, sharing.result_id)
+    if source is None:
+        db.rollback()
+        return JSONResponse({"error": "Share link not found"}, status_code=404)
+    idempotency_key = str(form.get("idempotency_key") or _uuid.uuid4().hex)
+    request_hash = _ra.action_request_hash(
+        source, "share_revoke",
+        share_format=_ra.share_format_of(sharing))
+    prior, err = _share_action_replay(
+        db, user, source, "share_revoke", idempotency_key, request_hash,
+        share_format=_ra.share_format_of(sharing))
+    if err is not None:
+        db.rollback()
+        return err
+    if prior is not None:
+        db.rollback()
+        return JSONResponse({"status": "revoked"})
+    try:
+        credits_helpers._consume_rate(db, "share:actions", str(user.id))
+    except credits_helpers.AdmissionError:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Too many share actions. Please try again later."},
+            status_code=429)
+    if sharing.token_hash is not None or sharing.revoked_at is None:
+        sharing.token_hash = None
+        sharing.raw_token = None
+        sharing.revoked_at = credits_helpers._utcnow()
+        sharing.generation += 1
+    db.flush()
+    _record_share_action(db, user, source, "share_revoke", idempotency_key,
+                         request_hash, sharing.generation)
+    db.commit()
+    return JSONResponse({"status": "revoked"})
+
+
+def _share_file_response(db, token, sharing, result, payload, share_format):
+    """Serve a shared report IN the link's format only (#135).
+
+    Returns a Response, or None for the caller to render the identical
+    unavailable 404. Content is generated from the validated source
+    payload with the same generators the owner's export routes use,
+    so the shared file's content is the report's exact content:
+    txt = render_text_report, csv/json = structured_export, pdf =
+    the paid-PDF artifact when one exists, else on-the-fly generation
+    for an export-unlocked report with no PDF operation (the #129 §5
+    path the old /pdf subroute used). The share route never charges.
+    """
+    from fastapi.responses import Response
+    from app import report_access as _ra
+    filename = payload.get("filename", "report")
+    if share_format == "txt":
+        text = render_text_report(payload)
+        db.expire_all()
+        if _ra.lookup_shared(db, token) is None:
+            return None
+        headers = _share_headers({
+            "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.txt"',
+        })
+        return Response(content=text, media_type="text/plain; charset=utf-8",
+                        headers=headers)
+    if share_format in ("csv", "json"):
+        from app import structured_export as _se
+        try:
+            data = _se.generate_export(payload, share_format)
+        except Exception:
+            return None
+        db.expire_all()
+        if _ra.lookup_shared(db, token) is None:
+            return None
+        headers = _share_headers({
+            "Content-Disposition": f'attachment; filename="{_se.safe_download_name(filename, result.id, share_format)}"',
+        })
+        return Response(content=data,
+                        media_type=_se.MEDIA_TYPES[share_format],
+                        headers=headers)
+    if share_format == "pdf":
+        pdf = _ra.find_shareable_pdf(db, result)
+        if pdf is None:
+            # #129 §5 / #107 T6, as in the old subroute: on-the-fly
+            # generation ONLY when no PDF was ever generated but the
+            # report is export-unlocked; an expired generated PDF
+            # keeps the identical-404 outcome.
+            if _ra.has_pdf_export_operation(db, result) \
+                    or not _ra.is_export_unlocked(db, result):
+                return None
+            from app.pdf_export import generate_report_pdf as _gen_share_pdf
+            try:
+                pdf_bytes = _gen_share_pdf(
+                    result.storage_manifest, payload.get("filename", "report"))
+            except Exception:
+                return None
+            db.expire_all()
+            if _ra.lookup_shared(db, token) is None:
+                return None
+            headers = _share_headers({
+                "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.pdf"',
+            })
+            return Response(content=pdf_bytes, media_type="application/pdf",
+                            headers=headers)
+        _pdf_result, pdf_bytes = pdf
+        db.expire_all()
+        if _ra.lookup_shared(db, token) is None:
+            return None
+        headers = _share_headers({
+            "Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(str(filename))}.pdf"',
+        })
+        return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers=headers)
+    return None
+
+
+@app.get("/s/{token}")
+async def shared_report_view(request: Request, token: str, db=Depends(get_db)):
+    """Public shared report FILE (#135, replacing the #107 web view).
+
+    Bearer capability, not a session: sets no cookies, loads no owner
+    identity, mutates nothing. The link serves ONLY its own format;
+    unknown/malformed/revoked/expired tokens get the one identical
+    unavailable response."""
+    from app import report_access as _ra
+    limited = _share_rate_limited(request)
+    if limited is not None:
+        return limited
+    found = _ra.lookup_shared(db, token)
+    if found is None:
+        return _share_unavailable()
+    sharing, result, payload = found
+    # Recheck the CURRENT generation/revocation on fresh state just
+    # before publication (draft §6): a revoke that committed while this
+    # request was rendering must not be served from a stale snapshot.
+    db.expire_all()
+    again = _ra.lookup_shared(db, token)
+    if again is None or again[0].id != sharing.id:
+        return _share_unavailable()
+    response = _share_file_response(
+        db, token, sharing, result, payload, _ra.share_format_of(sharing))
+    if response is None:
+        return _share_unavailable()
+    return response
+
+
+@app.get("/s/{token}/pdf")
+async def shared_report_pdf(request: Request, token: str, db=Depends(get_db)):
+    """Legacy PDF subroute (#107 T3), kept under #135 ONLY for links
+    whose own format is PDF: a pdf-format link serves the PDF here
+    exactly as at /s/{token}; every other link format — and every
+    invalid token — gets the same identical 404, because a link
+    serves ONLY its chosen format."""
+    from app import report_access as _ra
+    limited = _share_rate_limited(request)
+    if limited is not None:
+        return limited
+    found = _ra.lookup_shared(db, token)
+    if found is None:
+        return _share_unavailable()
+    sharing, result, payload = found
+    if _ra.share_format_of(sharing) != "pdf":
+        return _share_unavailable()
+    response = _share_file_response(db, token, sharing, result, payload, "pdf")
+    if response is None:
+        return _share_unavailable()
+    return response
 
