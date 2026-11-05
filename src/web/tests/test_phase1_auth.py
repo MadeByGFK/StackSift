@@ -234,16 +234,21 @@ def test_me_unauthenticated(auth_env):
 # --- Password reset ---
 
 def test_forgot_generic_success(auth_env):
-    resp = auth_env.client.post("/auth/forgot", data={"email": "test@example.com"})
-    assert resp.status_code == 200
-    assert "reset" in resp.json()["message"].lower()
+    # ISSUE-147 (premise-changed): a plain forgot submit no longer stays
+    # on the forgot page with a JSON message — it redirects to /login,
+    # which shows the same generic notice. (The AJAX JSON contract, and
+    # known/unknown parity, are covered in test_issue147_forgot_redirect.)
+    resp = auth_env.client.post("/auth/forgot", data={"email": "test@example.com"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login?reset_sent=1"
 
 
 def test_forgot_nonexistent_email_generic(auth_env):
     resp = auth_env.client.post("/auth/forgot", data={"email": "nobody@example.com"})
     assert resp.status_code == 200
-    # Same message — no enumeration
-    assert "reset" in resp.json()["message"].lower()
+    # Same notice on the login screen — no enumeration
+    assert str(resp.url).endswith("/login?reset_sent=1")
+    assert "reset link has been sent" in resp.text.lower()
 
 
 def test_reset_password_success(auth_env):

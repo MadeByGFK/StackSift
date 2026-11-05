@@ -114,7 +114,11 @@ def test_https_account_forms_end_to_end(auth_env, tmp_path, monkeypatch):
             page.goto(base + "/forgot")
             page.get_by_label("Email", exact=True).fill("browser@example.com")
             page.locator('button[type="submit"]').click()
-            expect(page.get_by_role("status")).to_contain_text("reset link")
+            # ISSUE-147 (premise-changed): a forgot submit no longer shows
+            # the generic message inline on the forgot page — the browser
+            # lands on the login screen, which shows the same notice.
+            page.wait_for_url(base + "/login?reset_sent=1")
+            expect(page.locator(".success")).to_contain_text("reset link")
             reset_token = auth_env.sent[-1][2]
             page.goto(base + "/reset?token=" + reset_token)
             page.locator('input[name="new_password"]').fill("NewSecurePass123!")
