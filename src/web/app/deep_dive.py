@@ -223,7 +223,27 @@ def _symptom_and_cause(template: str, refs):
             "Check whether the destination recorded in the retained "
             "excerpts was accepting connections at the recorded times.",
         )
-    if "timed out" in low or "timeout" in low:
+    # F2 (PR #149 Codex P2): the timeout branch gets the same F1
+    # treatment. A bare "timeout" mention is configuration or
+    # negation as often as it is a failure — e.g. "Request timeout
+    # disabled; operations will wait indefinitely" records no
+    # timeout at all. Require failure semantics (the past-tense
+    # event "timed out", or "timeout" paired with a failure noun)
+    # and veto explicit configuration/negation shapes first;
+    # anything else falls through to the abstention branch.
+    _timeout_veto = (
+        "timeout disabled" in low or "timeouts disabled" in low
+        or "timeout is disabled" in low or "disable timeout" in low
+        or "no timeout" in low or "not timed out" in low
+        or "never timed out" in low or "without timing out" in low
+        or "wait indefinitely" in low)
+    _has_timeout_failure = (
+        "timed out" in low
+        or "timeout error" in low or "timeout exception" in low
+        or "timeout exceeded" in low or "timeout expired" in low
+        or "timeout occurred" in low or "timeout failure" in low
+        or "timeout failed" in low)
+    if _has_timeout_failure and not _timeout_veto:
         return (
             "The retained messages record operations that timed out "
             "before completing.",

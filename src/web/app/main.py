@@ -1290,6 +1290,30 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
     data = dict(data, current_user=user, csrf_token=csrf)
     if report_id is not None:
         data["report_id"] = report_id
+    if report_id is not None and user is not None:
+        # Issue #106 Stage 2 (PR #149 Codex P2): the fresh-response
+        # render must carry the same Analysis action state the
+        # saved-report page sets, or Actions -> Analysis opens a
+        # popup with an empty message and only a Cancel button.
+        # Eligibility comes from the retained-evidence contract over
+        # this render's own payload; a completed generation (e.g. on
+        # an idempotent replay) links straight to the derived report.
+        from app import deep_dive as _dd_fresh
+        data["analysis_eligible"], data["analysis_reason"] = \
+            _dd_fresh.eligibility_state(data)
+        data["analysis_result_id"] = None
+        try:
+            _fresh_rid = uuid_module.UUID(report_id)
+        except (ValueError, AttributeError, TypeError):
+            _fresh_rid = None
+        if _fresh_rid is not None:
+            from app.db import SessionLocal as _SL_fresh
+            from app import credits as _credits_fresh
+            with _SL_fresh() as _db:
+                _done_fresh = _credits_fresh.completed_analysis_result_id(
+                    _db, user.id, _fresh_rid)
+            data["analysis_result_id"] = (
+                str(_done_fresh) if _done_fresh else None)
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
