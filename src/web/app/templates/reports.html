@@ -357,12 +357,49 @@
     extendMsg.textContent = message || 'Retention extension failed. Please try again.';
     extendModal.style.display = 'flex';
   }
+  function refreshCreditBadgeFromBalance() {
+    // PR #143 remediation (Codex P2): a replayed success means the
+    // server committed the charge on an EARLIER attempt whose
+    // response never reached this page (e.g. it was lost to a
+    // network error), so the badge was never decremented for a
+    // charge that did happen. The local badge value cannot be
+    // trusted in that case — refresh it from the authoritative
+    // GET /auth/balance payload (the same payload
+    // auth_form_script.html renders #credit-badge from). If the
+    // balance fetch fails or carries no usable balance, leave the
+    // badge unchanged and show no error: the extension itself
+    // succeeded, so this refresh is best-effort only.
+    var badge = document.getElementById('credit-badge');
+    if (!badge) { return Promise.resolve(); }
+    try {
+      return fetch('/auth/balance', { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data) { return; }
+          var balance = data.balance;
+          var parsed = null;
+          if (typeof balance === 'number' && isFinite(balance)) {
+            parsed = balance;
+          } else if (typeof balance === 'string' && /^-?\d+$/.test(balance.trim())) {
+            parsed = parseInt(balance.trim(), 10);
+          }
+          if (parsed === null) { return; }
+          badge.textContent = '\u{1FA99} ' + parsed + ' credits';
+        })
+        .catch(function () {});
+    } catch (err) {
+      return Promise.resolve();
+    }
+  }
   function updateCreditBadge(cost, replayed) {
     // The header badge (#credit-badge, rendered by
     // auth_form_script.html from /auth/balance) is the page's credit
-    // balance display. A replayed response charged nothing new, so
-    // the balance only moves on a fresh extension.
-    if (replayed) { return; }
+    // balance display. A fresh extension charged `cost` just now,
+    // so decrement locally. A replayed response charged nothing
+    // new on THIS attempt, but the original attempt may have
+    // committed without its response reaching the page — refresh
+    // from the server instead of guessing (see above).
+    if (replayed) { return refreshCreditBadgeFromBalance(); }
     var badge = document.getElementById('credit-badge');
     if (!badge) { return; }
     var match = String(badge.textContent || '').match(/-?\d+/);
@@ -415,7 +452,7 @@
         .then(function (d) {
           if (d._httpOk && d.status === 'extended') {
             updateExtendedRow(f, d);
-            updateCreditBadge(d.cost, d.replayed);
+            return updateCreditBadge(d.cost, d.replayed);
           } else {
             showExtendError(d.error || d.message);
           }

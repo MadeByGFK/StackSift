@@ -20,8 +20,16 @@ Fix (``reports.html`` only; no route, pricing, cap, or key changes):
 - Success: the affected row updates in place (expiry date +
   "Expires in N days" pill), the header credit badge (#credit-badge)
   drops by the charged cost, and a per-row "Retention extended."
-  status shows. A ``replayed`` response updates the row but does
-  NOT decrement the badge again (no second charge happened).
+  status shows. A ``replayed`` response updates the row and — PR
+  #143 remediation (verified Codex P2) — refreshes the badge from
+  the authoritative ``GET /auth/balance`` payload instead of
+  leaving it untouched: a replay means an earlier attempt may
+  have committed the charge while its response was lost (network
+  error → error modal, badge unchanged), so the local badge can
+  be one credit too high until reload. A fresh (non-replayed)
+  success still decrements locally; a failed/unusable balance
+  refresh leaves the badge unchanged and shows no error (the
+  extension itself succeeded).
 - Failure (402 insufficient credits, 409 cap, network error): the
   server error shows in the in-page #extend-modal; no navigation,
   no row change, no balance change.
@@ -35,6 +43,13 @@ verified by copying this file into a pristine checkout of 9bc372f
 and running it there (see the build report). The deep_dive
 suppression test passes on both trees BY DESIGN — it guards the
 #106 Stage 2 decision this fix must not disturb.
+
+PR #143 REMEDIATION TEETH: the new lost-response test (e) fails
+against the pre-remediation template (PR head d784241c / local
+c759ded, where a replayed response returned early and never
+refreshed the badge) and passes with the remediation — verified
+by swapping in ``git show HEAD:.../reports.html`` for that run
+(see the remediation report).
 """
 
 import json
@@ -238,14 +253,30 @@ globalThis.document = {
 };
 let fetchMode = 'ok';
 const fetchCalls = [];
+const retentionCalls = [];
+const balanceCalls = [];
 globalThis.fetch = function (url, opts) {
   const body = opts && opts.body;
-  fetchCalls.push({
+  const call = {
     url: String(url),
     method: opts && opts.method,
+    credentials: opts && opts.credentials,
     csrf: body && body.get ? body.get('csrf_token') : null,
     key: body && body.get ? body.get('idempotency_key') : null,
-  });
+  };
+  fetchCalls.push(call);
+  // Route by URL (PR #143 remediation): the badge refresh reads
+  // the authoritative balance. The badge starts at 3 credits and
+  // exactly one charge has committed in every scenario below, so
+  // the authoritative balance is always 2 here.
+  if (String(url) === '/auth/balance' || String(url).indexOf('/auth/balance') !== -1) {
+    balanceCalls.push(call);
+    return Promise.resolve({
+      ok: true, status: 200,
+      json: function () { return Promise.resolve({ balance: 2 }); },
+    });
+  }
+  retentionCalls.push(call);
   if (fetchMode === 'error') {
     return Promise.resolve({
       ok: false, status: 402,
@@ -258,7 +289,8 @@ globalThis.fetch = function (url, opts) {
     });
   }
   if (fetchMode === 'network') { return Promise.reject(new Error('down')); }
-  const replayed = fetchMode === 'ok-replay-second' && fetchCalls.length > 1;
+  const replayed = fetchMode === 'replayed'
+    || (fetchMode === 'ok-replay-second' && retentionCalls.length > 1);
   return Promise.resolve({
     ok: true, status: 200,
     json: function () {
@@ -284,6 +316,10 @@ async function submitAndConfirm() {
 function snap() {
   return {
     fetchCount: fetchCalls.length,
+    retentionCount: retentionCalls.length,
+    retentionCalls: retentionCalls,
+    balanceCount: balanceCalls.length,
+    balanceCalls: balanceCalls,
     nativeSubmits: nativeSubmits,
     confirmDisplay: byId('ss-confirm').style.display || '',
     confirmText: byId('ss-confirm-text').textContent || '',
@@ -402,12 +438,63 @@ def test_d_retry_sends_same_idempotency_key_and_charges_once():
       out.afterRetry = snap();
     """)
     retry = out["afterRetry"]
-    assert retry["fetchCount"] == 2, retry
+    # Count RETENTION calls specifically (PR #143 remediation):
+    # the replayed second response now also fetches /auth/balance
+    # to refresh the badge, so the total fetch count is higher.
+    assert retry["retentionCount"] == 2, retry
     assert retry["nativeSubmits"] == 0, retry
-    keys = [c["key"] for c in retry["calls"]]
+    keys = [c["key"] for c in retry["retentionCalls"]]
     assert keys == ["ret-key-123", "ret-key-123"], keys
-    # The replayed second response did not move the balance again:
-    # exactly one credit was charged across both submits.
+    # Exactly one credit was charged across both submits: the
+    # replayed response refreshes the badge from /auth/balance
+    # (balance: 2), it does not decrement a second time.
     assert retry["badgeText"] == "\U0001FA99 2 credits", retry
     assert retry["dateText"] == "Expires 2027-02-09", retry
     assert retry["pillText"] == "Expires in 97 days", retry
+
+
+@pytestmark_js
+def test_e_lost_response_retry_replayed_refreshes_badge_from_balance():
+    # PR #143 remediation regression (verified Codex P2): the
+    # server commits the extension on the first attempt but the
+    # response is lost (network error -> error modal, badge
+    # unchanged). The retry re-sends the SAME idempotency key and
+    # the server replays the recorded outcome
+    # ({status:'extended', replayed:true, cost:1, ...}): the row
+    # updates to success AND the badge must become the
+    # authoritative balance (2), not stay at 3 until reload.
+    out = _run_js("""
+      fetchMode = 'network';
+      await submitAndConfirm();
+      out.afterNetwork = snap();
+      fetchMode = 'replayed';
+      await submitAndConfirm();
+      out.afterRetry = snap();
+    """)
+    lost = out["afterNetwork"]
+    assert lost["nativeSubmits"] == 0, lost
+    assert lost["extendDisplay"] == "flex", lost
+    assert lost["extendMsg"] == (
+        "Retention extension failed. Please try again."), lost
+    assert lost["badgeText"] == "\U0001FA99 3 credits", lost
+    assert lost["dateText"] == "Expires 2026-11-11", lost
+    assert lost["pillText"] == "Expires in 7 days", lost
+    assert lost["balanceCount"] == 0, lost
+
+    retry = out["afterRetry"]
+    assert retry["nativeSubmits"] == 0, retry
+    assert retry["retentionCount"] == 2, retry
+    keys = [c["key"] for c in retry["retentionCalls"]]
+    assert keys == ["ret-key-123", "ret-key-123"], keys
+    # Row updates to success on the replayed response.
+    assert retry["dateText"] == "Expires 2027-02-09", retry
+    assert retry["pillText"] == "Expires in 97 days", retry
+    assert retry["statusText"] == "Retention extended.", retry
+    # Badge is refreshed from GET /auth/balance (same-origin),
+    # exactly once, to the authoritative balance.
+    assert retry["balanceCount"] == 1, retry
+    balance_call = retry["balanceCalls"][0]
+    assert balance_call["url"] == "/auth/balance", balance_call
+    assert balance_call["credentials"] == "same-origin", balance_call
+    assert retry["badgeText"] == "\U0001FA99 2 credits", retry
+    assert retry["btnDisabled"] is False, retry
