@@ -140,7 +140,7 @@ async def verify_page(request: Request, token: str = "", db: DBSession = Depends
 async def verify_email(request: Request, token: str = Form(...), db: DBSession = Depends(get_db)):
     if not redeem(db, EmailVerification, token):
         return JSONResponse({"error": "Invalid or expired verification link."}, status_code=400)
-    # Phase 2A: grant the approved 3-credit signup reward (idempotent per email).
+    # Phase 2A: grant the approved 10-credit signup reward (idempotent per email).
     # Failures here must not break verification; log and continue.
     try:
         from app import credits as credits_helpers
@@ -720,7 +720,7 @@ async def _callback(request, provider, code, state, db):
         elif attempt.action == "login" and current is None:
             user, created = oauth_helpers.find_or_create_oauth_user(db, provider, identity, email, name)
             if created:
-                # BR-02: grant the approved 3-credit signup reward for verified
+                # BR-02: grant the approved 10-credit signup reward for verified
                 # OAuth signups (idempotent per email; never on link/re-login).
                 # Failures must not break login; log and continue.
                 try:

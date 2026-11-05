@@ -2,7 +2,7 @@
 
 Drives the oversize journey over HTTP for a real signed-up user:
 
-    signup -> verify (3-credit signup reward) -> login
+    signup -> verify (10-credit signup reward) -> login
       -> oversize upload -> 402 consent page quoting 3 credits
       -> POST /analyze/paid -> reserve (-3) + settle (-3 net on success,
          full reversal on failure) -> retrieve (GET /reports)
@@ -105,6 +105,22 @@ def _http_balance(env):
     return r.json()["balance"]
 
 
+def _drain_signup(env, uid, qty):
+    """Re-base the 10-credit signup grant (issue #151) to a lower balance:
+    reduce the signup grant's remaining and the account balance together
+    (mirroring the _grant helpers in test_compare_routes.py)."""
+    with env.sessions() as db:
+        grant = db.query(M.CreditGrant).filter(
+            M.CreditGrant.user_id == uid,
+            M.CreditGrant.source == "signup").one()
+        assert grant.remaining >= qty
+        grant.remaining -= qty
+        account = db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == uid).one()
+        account.balance -= qty
+        db.commit()
+
+
 def _line_content(nlines, prefix=b"2024-01-01 10:00:00 INFO heartbeat ok"):
     return (prefix + b"\n") * nlines
 
@@ -173,7 +189,7 @@ def test_free_size_stays_free(oversize_env):
         data={"output": "html", "request_id": ""},
     )
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _ops(env, uid) == []
 
 
@@ -192,7 +208,7 @@ def test_byte_only_oversize_quotes_3(oversize_env):
     assert "No charge if the analysis fails. Results are available for 7 days." in r.text
     # Consent itself changes neither balance nor allocations, and creates
     # no operation.
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _ops(env, uid) == []
 
 
@@ -231,7 +247,7 @@ def test_confirm_success_net_minus_3_and_retrievable(oversize_env):
     consent_id, file_hash = _consent_fields(r.text)
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 signup - 3 oversize
     ops = _ops(env, uid)
     assert len(ops) == 1
     assert ops[0].cost == 3 and ops[0].status == "completed"
@@ -271,7 +287,7 @@ def test_confirm_failure_restores_full_reservation(oversize_env, monkeypatch):
     monkeypatch.setattr(main, "_execute_oversize", failing)
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 400, r.text[:300]
-    assert _http_balance(env) == 3  # full reversal, no partial debit
+    assert _http_balance(env) == 10  # full reversal, no partial debit
     ops = _ops(env, uid)
     assert len(ops) == 1 and ops[0].status == "failed"
     assert ops[0].result_id is None
@@ -288,17 +304,17 @@ def test_oversize_report_retention_7d_and_separate_pdf(oversize_env):
     consent_id, file_hash = _consent_fields(r.text)
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 signup - 3 oversize
     with env.sessions() as db:
         C.grant_credits(db, uid, "purchase", "test-pack", 5)
         db.commit()
         result_id = _ops(env, uid)[0].result_id
-    assert _http_balance(env) == 5
+    assert _http_balance(env) == 12  # 7 + 5 granted
     # PDF export remains a separate 2-credit operation.
     r = env.client.post(f"/reports/{result_id}/pdf", data={"csrf_token": csrf})
     assert r.status_code == 200, r.text[:300]
     assert r.headers["content-type"] == "application/pdf"
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10  # 12 - 2 PDF export
 
 
 # --- insufficient credits ------------------------------------------------------
@@ -306,6 +322,10 @@ def test_oversize_report_retention_7d_and_separate_pdf(oversize_env):
 def test_insufficient_at_quotation_exact_message_and_cta(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    # Re-base the 10-credit signup balance to 3 (issue #151) so the first
+    # oversize run genuinely exhausts it.
+    _drain_signup(env, uid, 7)
+    assert _http_balance(env) == 3
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
@@ -324,6 +344,10 @@ def test_insufficient_at_confirmation_after_balance_change(oversize_env):
     # analysis, then confirm the oversize consent -> 402, no reservation.
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    # Re-base the 10-credit signup balance to 3 (issue #151) so the
+    # 1-credit spend below genuinely leaves less than the 3 quote.
+    _drain_signup(env, uid, 7)
+    assert _http_balance(env) == 3
     r = _post_oversize(env, _line_content(50001))
     assert r.status_code == 402, r.text[:300]
     consent_id, file_hash = _consent_fields(r.text)
@@ -455,10 +479,10 @@ def test_completed_replay_does_not_recharge(oversize_env):
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 - 3
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # replay does not recharge
     assert len(_ops(env, uid)) == 1
 
 
@@ -472,10 +496,10 @@ def test_failed_replay_does_not_restart(oversize_env, monkeypatch):
         lambda *a, **k: {"error": "analysis_failed",
                          "message": "Analysis failed.", "filename": "big.log"})
     assert _confirm(env, consent_id, file_hash, csrf).status_code == 400
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 409, r.text[:300]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert len(_ops(env, uid)) == 1
 
 
@@ -524,7 +548,7 @@ def test_cancel_oversize_releases_one_live_lockout(oversize_env):
     r = _post_oversize(env, _line_content(50002))
     assert r.status_code == 402, r.text[:300]
     assert "Use 3 credits" in r.text
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _ops(env, uid) == []
 
 
@@ -767,14 +791,14 @@ def test_oversize_idempotency_replay_under_full_pool(oversize_env):
         op1 = C.admit_paid_operation(db, uid, **admit_kwargs)
         db.commit()
         op1_id = op1.id  # read inside the session: commit expires attrs
-    assert _http_balance(env) == 0  # 3-credit reward fully reserved
+    assert _http_balance(env) == 7  # 10-credit reward minus the 3-credit reservation
     with env.sessions() as db:
         op2 = C.admit_paid_operation(db, uid, **admit_kwargs)
         db.commit()
         op2_id = op2.id  # read inside the session: commit expires attrs
     assert op2_id == op1_id
     assert len(_ops(env, uid)) == 1
-    assert _http_balance(env) == 0  # no second charge, no new reservation
+    assert _http_balance(env) == 7  # no second charge, no new reservation
 
 
 # --- worker: real subprocess -----------------------------------------------------
@@ -906,7 +930,7 @@ def test_executor_stop_evidence_for_oversize_recovery(oversize_env):
             db, executor_stopped=lambda oid, w, g: True)
         assert recovered == 1
         assert db.get(M.Operation, op_id).status == "expired"
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10  # full reservation returned to the 10-credit signup balance
 
 
 def test_no_enumeration_constraint_on_operation_type_t10():

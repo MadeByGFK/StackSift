@@ -2,7 +2,7 @@
 
 Drives the complete paid journey over HTTP for a real signed-up user:
 
-    signup -> verify (3-credit signup reward) -> login
+    signup -> verify (10-credit signup reward) -> login
       -> consent page (POST /analyze with the free quota exhausted)
       -> paid analysis (POST /analyze/paid) -> reserve + settle
       -> retrieve (GET /reports/{id})
@@ -41,7 +41,7 @@ def paid_env(migrated_engine, monkeypatch, tmp_path):
 
     Mirrors test_phase2a_regressions.env, but leaves user creation to the
     real signup -> verify -> login flow and mocks the mailer (conftest
-    pattern) so the 3-credit signup reward is granted exactly as in
+    pattern) so the 10-credit signup reward is granted exactly as in
     production.
     """
     engine, _ = migrated_engine
@@ -114,6 +114,22 @@ def _http_balance(env):
     return r.json()["balance"]
 
 
+def _drain_signup(env, uid, qty):
+    """Re-base the 10-credit signup grant (issue #151) to a lower balance:
+    reduce the signup grant's remaining and the account balance together
+    (mirroring the _grant helpers in test_compare_routes.py)."""
+    with env.sessions() as db:
+        grant = db.query(M.CreditGrant).filter(
+            M.CreditGrant.user_id == uid,
+            M.CreditGrant.source == "signup").one()
+        assert grant.remaining >= qty
+        grant.remaining -= qty
+        account = db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == uid).one()
+        account.balance -= qty
+        db.commit()
+
+
 def _exhaust_quota(env, uid):
     """Simulate an exhausted free hourly quota (10 requests in the last hour)."""
     with env.sessions() as db:
@@ -166,15 +182,15 @@ def test_full_paid_flow_signup_to_pdf(paid_env):
     """admit -> analyze -> settle -> retrieve -> PDF, one HTTP journey."""
     env = paid_env
     _, uid, _ = _signup_verify_login(env)
-    assert _http_balance(env) == 3  # signup reward, asserted over HTTP
+    assert _http_balance(env) == 10  # signup reward, asserted over HTTP
 
     _exhaust_quota(env, uid)
     form = _consent_page(env)
-    assert _http_balance(env) == 3  # the consent page itself charges nothing
+    assert _http_balance(env) == 10  # the consent page itself charges nothing
 
     paid = env.client.post("/analyze/paid", data=form)
     assert paid.status_code == 200, paid.text[:500]
-    assert _http_balance(env) == 2  # 1 credit reserved then settled
+    assert _http_balance(env) == 9  # 1 credit reserved then settled
     rid = _report_id_from(paid.text)
 
     # Retrieve the paid result over HTTP.
@@ -188,23 +204,27 @@ def test_full_paid_flow_signup_to_pdf(paid_env):
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
     assert pdf.content[:4] == b"%PDF"
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 9 - 2 PDF export
 
     # Re-downloading the same export is not a new charge (idempotent).
     pdf2 = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf2.status_code == 200
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7
 
     # Replaying the paid analysis with the same idempotency key is free.
     replay = env.client.post("/analyze/paid", data=form)
     assert replay.status_code == 200
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7
 
 
 def test_paid_insufficient_credits_402_without_charge(paid_env):
     """402 when the balance cannot cover admission: no charge, no operation."""
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
+    # Re-base the 10-credit signup balance to 3 (issue #151) so spending
+    # it below genuinely leaves nothing for a fresh admission.
+    _drain_signup(env, uid, 7)
+    assert _http_balance(env) == 3
     _exhaust_quota(env, uid)
 
     form = _consent_page(env)
@@ -249,4 +269,4 @@ def test_paid_analysis_failure_releases_credits(paid_env, monkeypatch):
     monkeypatch.setattr(main, "analyze_upload", lambda *a: {"error": True, "message": "bad log"})
     failed = env.client.post("/analyze/paid", data=form)
     assert failed.status_code == 400, failed.text[:300]
-    assert _http_balance(env) == 3  # reservation released, nothing settled
+    assert _http_balance(env) == 10  # reservation released, nothing settled

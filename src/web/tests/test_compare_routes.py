@@ -2,7 +2,7 @@
 
 Drives the comparison journey over HTTP for a real signed-up user:
 
-    signup -> verify (3-credit signup reward) -> login
+    signup -> verify (10-credit signup reward) -> login
       -> POST /compare (two files) -> 402 consent page quoting 3 credits
          with the identical/no-material-difference disclosure
       -> POST /compare/paid -> reserve (-3) + settle (-3 net on success,
@@ -185,20 +185,20 @@ def test_compare_requires_login(compare_env):
 def test_full_compare_flow_net_minus_3_and_retrievable(compare_env):
     env = compare_env
     _, uid, _ = _signup_verify_login(env)
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     r = _post_compare(env)
     assert r.status_code == 402, r.text[:300]
     assert "3 credits" in r.text
     assert "even if the logs are identical or show no material differences" in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
-    assert _http_balance(env) == 3  # consent charges nothing
+    assert _http_balance(env) == 10  # consent charges nothing
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:500]
     assert "auth token expired" in confirmed.text  # new
     assert "disk full" in confirmed.text  # resolved
     assert "database connection failed" in confirmed.text  # volume change
     assert "Resolved means the pattern was not observed in B" in confirmed.text
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 signup - 3 compare
     rid = _report_id_from(confirmed.text)
     view = env.client.get(f"/reports/{rid}")
     assert view.status_code == 200, view.text[:300]
@@ -210,12 +210,12 @@ def test_full_compare_flow_net_minus_3_and_retrievable(compare_env):
     assert pdf.content.startswith(b"%PDF")
     assert b"auth token expired" in pdf.content
     assert b"database connection failed" in pdf.content
-    assert _http_balance(env) == 3  # 5 granted - 2 PDF
+    assert _http_balance(env) == 10  # 7 + 5 granted - 2 PDF
     # Replay the same confirmation: no recharge, same report.
     replay = _confirm(env, consent_id, file_hash, csrf)
     assert replay.status_code == 200, replay.text[:300]
     assert _report_id_from(replay.text) == rid
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
 
 
 def test_identical_pair_still_costs_3_and_reports_no_material(compare_env):
@@ -227,7 +227,7 @@ def test_identical_pair_still_costs_3_and_reports_no_material(compare_env):
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:500]
     assert "No material differences" in confirmed.text
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 signup - 3 compare
 
 
 def test_invalid_b_rejected_before_analysis_or_charge(compare_env, monkeypatch):
@@ -241,7 +241,7 @@ def test_invalid_b_rejected_before_analysis_or_charge(compare_env, monkeypatch):
     r = _post_compare(env, content_b=oversize_b)
     assert r.status_code == 413, r.text[:300]
     assert calls == []
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     with env.sessions() as db:
         assert db.query(M.Operation).filter(
             M.Operation.user_id == uid,
@@ -259,7 +259,7 @@ def test_compare_failure_releases_full_reservation(compare_env, monkeypatch):
                                      "message": "Comparison failed."}))
     failed = _confirm(env, consent_id, file_hash, csrf)
     assert failed.status_code == 400, failed.text[:300]
-    assert _http_balance(env) == 3  # full reversal, no report stored
+    assert _http_balance(env) == 10  # full reversal, no report stored
     with env.sessions() as db:
         assert db.query(M.Result).filter(
             M.Result.type == "comparison").count() == 0
@@ -273,7 +273,7 @@ def test_compare_forgery_and_cross_user(compare_env):
     # Input substitution: a different pair hash does not match the consent.
     bad = _confirm(env, consent_id, "0" * 64, csrf)
     assert bad.status_code == 409, bad.text[:300]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     # Cross-user consent: a second user cannot confirm the first's consent.
     _, _, csrf2 = _signup_verify_login(env, email_addr=f"cmp2_{uuid.uuid4().hex[:8]}@example.com")
     cross = _confirm(env, consent_id, file_hash, csrf2)

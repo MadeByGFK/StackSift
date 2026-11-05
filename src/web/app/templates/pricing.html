@@ -171,7 +171,7 @@
 
   <div class="section-head">
     <h2>Credit packs</h2>
-    <p>One-time purchases — no subscription, no auto-renewal. You need an account to buy; signing up gets you 3 free credits.</p>
+    <p>One-time purchases — no subscription, no auto-renewal. You need an account to buy; signing up gets you 10 free credits.</p>
   </div>
 
   <div class="pack-grid" id="packs">
@@ -185,7 +185,7 @@
       <div class="pack-value{% if not pack.highlight %} subtle{% endif %}">{{ pack.tagline }}</div>
       <ul>
         <li>Everything in Free</li>
-        <li>PDF export</li>
+        <li>Export in every format (PDF, CSV, JSON) &mdash; 2 credits per report unlocks all formats</li>
         <li>Results kept for 7 days</li>
         <li>More coming soon</li>
       </ul>
@@ -209,9 +209,9 @@
     {% if current_user %}
       <a href="/settings" class="cta">Manage your account</a>
     {% else %}
-      <a href="/signup" class="cta">Sign up &mdash; get 3 free credits</a>
+      <a href="/signup" class="cta">Sign up &mdash; get 10 free credits</a>
     {% endif %}
-    <p>Everyone who signs up gets 3 free credits once they verify their email.</p>
+    <p>Everyone who signs up gets 10 free credits once they verify their email.</p>
   </div>
 
   <section class="policies">

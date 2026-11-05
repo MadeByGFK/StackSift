@@ -1,7 +1,7 @@
 """Regression tests for Codex business-rule findings on PR #17.
 
 BR-01: zero eligible credits must return HTTP 402 (credit limit), not 503.
-BR-02: verified OAuth signups must receive the 3-credit signup reward.
+BR-02: verified OAuth signups must receive the 10-credit signup reward.
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -33,8 +33,8 @@ def test_zero_eligible_credits_returns_402(env):
     assert r.status_code == 402, f"expected 402, got {r.status_code}: {r.text[:300]}"
 
 
-def test_oauth_signup_grants_three_credits(env, monkeypatch):
-    """BR-02: a verified OAuth signup receives the 3-credit reward."""
+def test_oauth_signup_grants_ten_credits(env, monkeypatch):
+    """BR-02: a verified OAuth signup receives the 10-credit reward."""
     from app import auth_routes
 
     async def fake_exchange(code):
@@ -80,7 +80,7 @@ def test_oauth_signup_grants_three_credits(env, monkeypatch):
     with env.sessions() as db:
         user = db.query(M.User).filter_by(email="br02-oauth@example.com").first()
         assert user is not None and user.email_verified
-        assert C.get_balance_summary(db, user.id)["balance"] == 3
+        assert C.get_balance_summary(db, user.id)["balance"] == 10
 
 
 def test_oauth_repeat_login_grants_no_second_reward(env, monkeypatch):
@@ -135,4 +135,4 @@ def test_oauth_repeat_login_grants_no_second_reward(env, monkeypatch):
 
     with env.sessions() as db:
         user = db.query(M.User).filter_by(email="br02-repeat@example.com").first()
-        assert C.get_balance_summary(db, user.id)["balance"] == 3
+        assert C.get_balance_summary(db, user.id)["balance"] == 10

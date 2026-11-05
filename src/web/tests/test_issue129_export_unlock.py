@@ -26,6 +26,7 @@ from test_phase2b_paid_e2e import paid_env  # noqa: F401
 from test_structured_export_e2e import (
     _artifacts,
     _balance,
+    _drain_signup,
     _grant,
     _ops,
     _setup,
@@ -140,7 +141,10 @@ def test_failed_generation_charges_zero_and_does_not_unlock(auth_env, monkeypatc
 
 def test_insufficient_credits_no_charge_no_unlock(auth_env):
     _, user_id, rid, csrf = _setup(auth_env, extra_credits=0)
-    # Signup balance is 3: unlock report 1 (3 -> 1), leaving < 2.
+    # Signup balance is 10 (issue #151); re-base it to 3, then unlock
+    # report 1 (3 -> 1), leaving < 2.
+    _drain_signup(auth_env, user_id, 7)
+    assert _balance(auth_env, user_id) == 3
     pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200
     assert _balance(auth_env, user_id) == 1
