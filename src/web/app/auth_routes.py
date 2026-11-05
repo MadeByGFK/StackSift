@@ -83,6 +83,24 @@ def _get_current_user(request: Request, db: DBSession) -> User | None:
     return session.user
 
 
+def _link_d2_visitor(request: Request, db: DBSession, user_id) -> None:
+    """Issue #156: merge the d2_visitor_id cookie into this account.
+
+    Best-effort and self-contained (its own commit): a telemetry link
+    failure must never block signup, login, or OAuth.
+    """
+    try:
+        from app import d2_attribution
+
+        visitor_id = request.cookies.get(d2_attribution.VISITOR_COOKIE)
+        if visitor_id:
+            d2_attribution.link_visitor_best_effort(db, visitor_id, user_id)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("d2 visitor link failed")
+
+
 # --- HTML pages ---
 
 def _page(request, db, name, **context):
@@ -343,6 +361,8 @@ async def signup(
                              expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
     background.add_task(email_helpers.send_verification_email, existing.email, token)
     db.commit()
+    # Issue #156: identity merge on signup (best-effort, after commit).
+    _link_d2_visitor(request, db, existing.id)
     return JSONResponse({"message": GENERIC_SIGNUP})
 
 
@@ -412,6 +432,8 @@ async def login(
     session, raw_token = auth_helpers.create_session(
         db, user.id, ip_address=ip, user_agent=request.headers.get("User-Agent")
     )
+    # Issue #156: identity merge on login (best-effort).
+    _link_d2_visitor(request, db, user.id)
     response = JSONResponse({"message": "Logged in.", "csrf_token": session.csrf_token})
     _set_session_cookie(response, raw_token)
     return response
@@ -716,6 +738,8 @@ async def _callback(request, provider, code, state, db):
             if current is None:
                 raise HTTPException(401, "Sign in before linking an account.")
             oauth_helpers.link_oauth_to_user(db, current.user, provider, identity, email)
+            # Issue #156: identity merge on OAuth callback (link flow).
+            _link_d2_visitor(request, db, current.user.id)
             response = RedirectResponse("/settings", status_code=303)
         elif attempt.action == "login" and current is None:
             user, created = oauth_helpers.find_or_create_oauth_user(db, provider, identity, email, name)
@@ -733,6 +757,8 @@ async def _callback(request, provider, code, state, db):
                     logging.getLogger(__name__).exception("signup reward grant failed")
             user.last_login_at = datetime.now(timezone.utc)
             session, raw = auth_helpers.create_session(db, user.id, ip_address=_client_ip(request), user_agent=request.headers.get("User-Agent"))
+            # Issue #156: identity merge on OAuth callback (login flow).
+            _link_d2_visitor(request, db, user.id)
             response = RedirectResponse("/", status_code=303)
             _set_session_cookie(response, raw)
         else:
