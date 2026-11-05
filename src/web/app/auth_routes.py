@@ -52,6 +52,12 @@ templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templat
 # Generic responses (no enumeration)
 GENERIC_SIGNUP = "If this email is valid, a verification link has been sent."
 GENERIC_FORGOT = "If an account exists for this email, a reset link has been sent."
+# Issue #147: after a forgot-password submit the user lands on the login
+# screen, which shows GENERIC_FORGOT as its notice. The notice is carried
+# ONLY by this fixed flag + fixed target — the submitted email and any
+# free-text notice are never reflected into the redirect or the page, so
+# the redirect cannot leak account existence or inject content.
+FORGOT_REDIRECT_URL = "/login?reset_sent=1"
 
 
 def _set_session_cookie(response: JSONResponse | RedirectResponse, token: str) -> None:
@@ -105,7 +111,12 @@ async def signup_page(request: Request, db: DBSession = Depends(get_db)):
 
 
 @router.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request, db: DBSession = Depends(get_db)):
+async def login_page(request: Request, reset_sent: str = "", db: DBSession = Depends(get_db)):
+    # Issue #147: the ONLY value that shows a notice is the exact fixed
+    # flag "1"; the notice text itself is the server-side constant, so a
+    # crafted query string can neither forge nor alter the notice.
+    if reset_sent == "1":
+        return _page(request, db, "login.html", message=GENERIC_FORGOT)
     return _page(request, db, "login.html")
 
 
@@ -446,8 +457,20 @@ async def forgot(
         db.add(reset)
         db.commit()
         background.add_task(email_helpers.send_password_reset_email, user.email, token)
-    # Always generic success — no enumeration
-    return JSONResponse({"message": GENERIC_FORGOT}, status_code=200)
+    # Issue #147: every submit returns the user to the login screen,
+    # which shows the same generic notice — in ALL cases, so the
+    # response cannot leak whether the account exists (identical status,
+    # Location, body and cookies for known and unknown emails alike).
+    # The internal behaviour above (token + email only when the account
+    # exists and has a password) is unchanged.
+    # The shared auth-form JS posts with X-Requested-With: XMLHttpRequest
+    # and expects JSON (the logout route uses the same split): it keeps
+    # the generic JSON contract and the browser is handed to
+    # FORGOT_REDIRECT_URL by the forgot form's data-success-url. A plain
+    # (non-JS) form post gets the redirect itself.
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JSONResponse({"message": GENERIC_FORGOT}, status_code=200)
+    return RedirectResponse(FORGOT_REDIRECT_URL, status_code=303)
 
 
 @router.post("/auth/reset")
