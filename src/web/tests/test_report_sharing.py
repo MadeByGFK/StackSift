@@ -93,7 +93,7 @@ def test_create_share_is_free_and_stores_hash_only(paid_env):
     rid = _make_report(env, uid)
     resp = _create_share(env, rid, csrf)
     assert resp.status_code == 200, resp.text[:400]
-    assert _http_balance(env) == 3  # FREE: no debit (T1)
+    assert _http_balance(env) == 10  # FREE: no debit (T1)
     token = _token_from(resp)
     with env.sessions() as db:
         row = db.query(M.ReportSharing).filter(M.ReportSharing.result_id == rid).one()
@@ -163,13 +163,13 @@ def test_revoke_is_free_idempotent_and_immediate(paid_env):
     r = env.client.post(f"/reports/{rid}/share/revoke",
                         data={"csrf_token": csrf, "idempotency_key": "rev-1"})
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert anon.get(f"/s/{token}").status_code == 404
     # Idempotent: a second revoke (new key) still succeeds, still free.
     r2 = env.client.post(f"/reports/{rid}/share/revoke",
                          data={"csrf_token": csrf, "idempotency_key": "rev-2"})
     assert r2.status_code == 200
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
 
 
 def test_rotate_is_free_replaces_token_and_replay_does_not_rotate_again(paid_env):
@@ -179,7 +179,7 @@ def test_rotate_is_free_replaces_token_and_replay_does_not_rotate_again(paid_env
     r = env.client.post(f"/reports/{rid}/share/rotate",
                         data={"csrf_token": csrf, "idempotency_key": "rot-1"})
     assert r.status_code == 200, r.text[:400]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     new_token = _token_from(r)
     assert new_token != token
     assert anon.get(f"/s/{token}").status_code == 404
@@ -205,7 +205,7 @@ def test_create_replay_does_not_reveal_or_replace_token(paid_env):
     r = _create_share(env, rid, csrf, key="share-1")
     assert r.status_code == 200
     assert "share_url" not in r.json()
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert anon.get(f"/s/{token}").status_code == 200
 
 
@@ -444,7 +444,7 @@ def test_share_actions_rate_limited_11th_distinct_action_429_no_mutation(paid_en
     assert (gen_after, hash_after) == (gen_before, hash_before)
     assert hash_after == auth.hash_token(last_token)
     assert _share_action_count(env, uid, rid) == 10
-    assert _http_balance(env) == 3  # still FREE: no debit
+    assert _http_balance(env) == 10  # still FREE: no debit
     assert _anon_client().get(f"/s/{last_token}").status_code == 200
 
 

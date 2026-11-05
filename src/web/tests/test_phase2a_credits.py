@@ -428,7 +428,7 @@ def test_t35_signup_replay(db, user):
     email = f"{user.hex[:8]}@test.com"
     g1 = C.grant_signup_reward(db, user, email)
     db.commit()
-    assert g1 is not None and g1.issued == 3
+    assert g1 is not None and g1.issued == 10
 
     assert C.grant_signup_reward(db, user, email) is None
     db.commit()

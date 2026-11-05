@@ -13,7 +13,7 @@ def _signup_and_verify(auth_env, email=None):
     """Create a verified user via the real email-verification flow.
 
     Redeems the actual verification token (captured by the fixture's
-    mocked mailer) so the 3-credit signup reward is granted exactly as
+    mocked mailer) so the 10-credit signup reward is granted exactly as
     in production. Returns (email, user_id).
     """
     from app.models import User
@@ -29,6 +29,26 @@ def _signup_and_verify(auth_env, email=None):
         user = db.query(User).filter(User.email == email).one()
         assert user.email_verified
         return email, user.id
+    finally:
+        db.close()
+
+
+def _drain_signup(auth_env, user_id, qty):
+    """Re-base the 10-credit signup grant (issue #151) to a lower balance:
+    reduce the signup grant's remaining and the account balance together
+    (mirroring the _grant helpers in test_compare_routes.py)."""
+    from app import models
+    db = auth_env.sessions()
+    try:
+        grant = db.query(models.CreditGrant).filter(
+            models.CreditGrant.user_id == user_id,
+            models.CreditGrant.source == "signup").one()
+        assert grant.remaining >= qty
+        grant.remaining -= qty
+        account = db.query(models.CreditAccount).filter(
+            models.CreditAccount.user_id == user_id).one()
+        account.balance -= qty
+        db.commit()
     finally:
         db.close()
 
@@ -297,6 +317,9 @@ def test_pdf_export_idempotent(auth_env):
 def test_pdf_export_insufficient_credits(auth_env):
     """PDF export with <2 credits returns 402."""
     email, user_id = _signup_and_verify(auth_env)
+    # Signup balance is 10 (issue #151); re-base it to 3 so the second
+    # export is genuinely unaffordable.
+    _drain_signup(auth_env, user_id, 7)
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
     csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
@@ -461,7 +484,7 @@ def test_pdf_export_retry_after_failure(auth_env):
     finally:
         db.close()
     # Retry should succeed with a NEW operation (not reuse the failed one)
-    # User has 3 credits from signup, export costs 2
+    # User has 10 credits from signup, export costs 2
     csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
     auth_env.client.headers["X-CSRF-Token"] = csrf
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})

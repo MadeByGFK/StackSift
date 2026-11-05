@@ -2,7 +2,7 @@
 
 Drives the batch journey over HTTP for a real signed-up user:
 
-    signup -> verify (3-credit signup reward) -> login
+    signup -> verify (10-credit signup reward) -> login
       -> GET /batch form -> POST /batch (2-5 files, ALL validated first)
          -> 402 consent page quoting (free-first ? 0 : 1) + (N-1) credits
       -> POST /batch/paid -> ONE reservation + free-allowance claim in
@@ -162,6 +162,22 @@ def _grant(env, uid, n, key):
         db.commit()
 
 
+def _drain_signup(env, uid, qty):
+    """Re-base the 10-credit signup grant (issue #151) to a lower balance:
+    reduce the signup grant's remaining and the account balance together
+    (mirroring how _grant helpers in test_compare_routes.py adjust both)."""
+    with env.sessions() as db:
+        grant = db.query(M.CreditGrant).filter(
+            M.CreditGrant.user_id == uid,
+            M.CreditGrant.source == "signup").one()
+        assert grant.remaining >= qty
+        grant.remaining -= qty
+        account = db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == uid).one()
+        account.balance -= qty
+        db.commit()
+
+
 def _ops(env, uid):
     with env.sessions() as db:
         return db.query(M.Operation).filter(
@@ -232,7 +248,7 @@ def test_batch_form_renders_for_user(batch_env):
 def test_full_batch_flow_free_first_quote_2_net_minus_2(batch_env):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:500]
     # Quote copy: both halves of the failure semantics (trim B8).
@@ -244,14 +260,14 @@ def test_full_batch_flow_free_first_quote_2_net_minus_2(batch_env):
     assert "1. one.log" in r.text and "2. two.log" in r.text and "3. three.log" in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
     # Consent itself: no debit, no claim, no hit, no operation.
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _ops(env, uid) == [] and _hits(env) == 0
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:500]
     assert "Batch \u2014 3 files" in confirmed.text
     assert "database connection failed" in confirmed.text
     assert "disk full" in confirmed.text
-    assert _http_balance(env) == 1  # 3 - 2 exactly
+    assert _http_balance(env) == 8  # 10 - 2 exactly
     ops = _ops(env, uid)
     assert len(ops) == 1 and ops[0].cost == 2 and ops[0].status == "completed"
     assert ops[0].free_allowance_claim is True
@@ -293,7 +309,7 @@ def test_batch_allowance_exhausted_quote_3_no_claim(batch_env):
     consent_id, file_hash, csrf = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 - 3 (no free allowance)
     ops = _ops(env, uid)
     assert len(ops) == 1 and ops[0].cost == 3
     assert ops[0].free_allowance_claim is False
@@ -325,7 +341,7 @@ def test_invalid_file_rejects_whole_batch(batch_env, monkeypatch, files, fragmen
     assert fragment in r.text
     assert "No files were analyzed and no credits were reserved." in r.text
     assert calls == []  # zero analyzer calls
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _ops(env, uid) == []
     assert _hits(env) == 0
     assert _pending_files(env) == []
@@ -379,7 +395,7 @@ def test_execution_failure_releases_all_credits_but_not_free_attempt(batch_env, 
     failed = _confirm(env, consent_id, file_hash, csrf)
     assert failed.status_code == 400, failed.text[:400]
     assert "File 2 (two.log)" in failed.text
-    assert _http_balance(env) == 3  # FULL reservation released
+    assert _http_balance(env) == 10  # FULL reservation released
     ops = _ops(env, uid)
     assert len(ops) == 1 and ops[0].status == "failed" and ops[0].result_id is None
     # B8: the admitted free attempt is NOT restored.
@@ -392,7 +408,7 @@ def test_execution_failure_releases_all_credits_but_not_free_attempt(batch_env, 
     # A failed identity does not re-execute on replay.
     replay = _confirm(env, consent_id, file_hash, csrf)
     assert replay.status_code == 409, replay.text[:300]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
 
 
 def test_execution_exception_releases_all(batch_env, monkeypatch):
@@ -407,7 +423,7 @@ def test_execution_exception_releases_all(batch_env, monkeypatch):
     monkeypatch.setattr(main, "_execute_batch", boom)
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 503, r.text[:300]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _ops(env, uid)[0].status == "failed"
     _invariants_ok(env, uid)
 
@@ -417,7 +433,10 @@ def test_execution_exception_releases_all(batch_env, monkeypatch):
 def test_insufficient_at_quotation_402_exact_total_and_cta(batch_env):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
-    # Spend the signup reward on a first batch (free-first N=3 -> 2).
+    # Re-base the 10-credit signup balance to 3 (issue #151), then spend
+    # it on a first batch (free-first N=3 -> 2), leaving a genuine 1.
+    _drain_signup(env, uid, 7)
+    assert _http_balance(env) == 3
     r = _post_batch(env, _three())
     consent_id, file_hash, csrf = _consent_fields(r.text)
     assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
@@ -433,6 +452,10 @@ def test_insufficient_at_quotation_402_exact_total_and_cta(batch_env):
 def test_insufficient_at_confirmation_402_no_claim(batch_env):
     env = batch_env
     _, uid, csrf = _signup_verify_login(env)
+    # Re-base the 10-credit signup balance to 3 (issue #151) so the PDF
+    # drain below genuinely leaves less than the batch quote.
+    _drain_signup(env, uid, 7)
+    assert _http_balance(env) == 3
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:300]
     consent_id, file_hash, _ = _consent_fields(r.text)
@@ -468,13 +491,13 @@ def test_quote_change_up_requotes_never_silent_reprice(batch_env):
     requote = _confirm(env, consent_id, file_hash, csrf)
     assert requote.status_code == 402, requote.text[:400]
     assert "Total: 3 credits" in requote.text
-    assert _http_balance(env) == 3  # nothing charged by the re-quote
+    assert _http_balance(env) == 10  # nothing charged by the re-quote
     assert _ops(env, uid) == []
     consent2, hash2, csrf2 = _consent_fields(requote.text)
     assert consent2 != consent_id
     confirmed = _confirm(env, consent2, hash2, csrf2)
     assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 - 3 requoted cost
     assert _ops(env, uid)[0].free_allowance_claim is False
 
 
@@ -493,12 +516,12 @@ def test_quote_change_down_requotes(batch_env):
     requote = _confirm(env, consent_id, file_hash, csrf)
     assert requote.status_code == 402, requote.text[:400]
     assert "Total: 2 credits" in requote.text
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _ops(env, uid) == []
     consent2, hash2, csrf2 = _consent_fields(requote.text)
     confirmed = _confirm(env, consent2, hash2, csrf2)
     assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 1
+    assert _http_balance(env) == 8  # 10 - 2 requoted cost
     assert _ops(env, uid)[0].free_allowance_claim is True
 
 
@@ -542,7 +565,7 @@ def test_order_duplicates_and_identical_files(batch_env):
     i2 = confirmed.text.index("File 2: same.log")
     i3 = confirmed.text.index("File 3: other.log")
     assert i1 < i2 < i3  # upload order preserved, duplicates distinct by ordinal
-    assert _http_balance(env) == 4  # 3 + 3 granted - 2
+    assert _http_balance(env) == 11  # 10 + 3 granted - 2
 
 
 # --- forgery / replay -----------------------------------------------------------------------
@@ -560,7 +583,7 @@ def test_batch_forgery_csrf_and_cross_user(batch_env):
     cross = _confirm(env, consent_id, file_hash, csrf2)
     assert cross.status_code == 409, cross.text[:300]
     assert _ops(env, uid) == []
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
 
 
 def test_batch_content_substitution_409(batch_env):
@@ -609,7 +632,7 @@ def test_batch_completed_replay_no_recharge(batch_env):
     replay = _confirm(env, consent_id, file_hash, csrf)
     assert replay.status_code == 200, replay.text[:300]
     assert _report_id_from(replay.text) == rid
-    assert _http_balance(env) == 1
+    assert _http_balance(env) == 8  # 10 - 2, replay free
     assert len(_ops(env, uid)) == 1
     assert _hits(env) == 1  # replay does not recount quota
 
@@ -624,17 +647,17 @@ def test_batch_pdf_one_charge_and_free_redownload(batch_env):
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     rid = _report_id_from(confirmed.text)
     _grant(env, uid, 5, "pdf-topup")
-    assert _http_balance(env) == 6
+    assert _http_balance(env) == 13  # 10 - 2 batch + 5 granted
     pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200, pdf.text[:300]
     assert pdf.content.startswith(b"%PDF")
     assert b"database connection failed" in pdf.content
     assert b"File 2: two.log" in pdf.content
     assert b"File 3: three.log" in pdf.content
-    assert _http_balance(env) == 4  # exactly -2 ONCE, not per file
+    assert _http_balance(env) == 11  # exactly -2 ONCE, not per file
     again = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert again.status_code == 200
-    assert _http_balance(env) == 4  # re-download free
+    assert _http_balance(env) == 11  # re-download free
     _invariants_ok(env, uid)
 
 
@@ -667,7 +690,7 @@ def test_single_file_paths_unchanged(batch_env):
         files={"file": ("test.log", LOG_1, "text/plain")},
         data={"output": "html", "request_id": ""})
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     # Additional analysis still quotes exactly 1 credit.
     _seed_free(env, uid, 10)
     r = env.client.post(
@@ -693,7 +716,7 @@ def test_compare_still_works(batch_env):
         data={"consent_id": consent_id, "file_hash": file_hash,
               "idempotency_key": consent_id, "csrf_token": csrf})
     assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 7  # 10 - 3 compare
 
 
 def test_paid_batch_rate_limit_is_five_per_hour(batch_env):

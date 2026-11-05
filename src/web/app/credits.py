@@ -107,8 +107,11 @@ RETENTION_MAX_DAYS = 365
 # and error text; never duplicate the numeric price elsewhere.
 COST_DEEP_DIVE = 3
 
-# Signup reward (approved 2026-10-15)
-SIGNUP_REWARD_CREDITS = 3
+# Signup reward: 10 free credits, one-time on signup (founder batched
+# price ruling 2026-11-01, superseding the 2026-10-15 approval of 3).
+# Issue #151: existing accounts granted 3 keep 3 — no top-up (founder
+# ruling 2026-11-05).
+SIGNUP_REWARD_CREDITS = 10
 
 # Capacity limits (v11.1 Section 6: UNVALIDATED PROPOSALS - benchmarks required)
 DEFAULT_USER_CONCURRENT_LIMIT = 2
@@ -264,7 +267,7 @@ def grant_credits(
 
 
 def grant_signup_reward(db: Session, user_id: uuid.UUID, email: str) -> models.CreditGrant | None:
-    """Grant the approved 3-credit signup reward. Idempotent per email."""
+    """Grant the ruled 10-credit signup reward. Idempotent per email."""
     normalized = email.strip().lower()
     elig = db.get(models.SignupEligibility, normalized)
     if elig is None:

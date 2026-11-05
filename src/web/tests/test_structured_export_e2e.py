@@ -41,6 +41,30 @@ def _grant(auth_env, user_id, qty, key=None):
         db.close()
 
 
+def _drain_signup(auth_env, user_id, qty):
+    """Re-base the 10-credit signup grant (issue #151) to a lower balance.
+
+    Reduces the signup CreditGrant.remaining and the CreditAccount.balance
+    by the same amount — mirroring how the _grant helpers in
+    test_compare_routes.py adjust both together — so a test whose premise
+    needs a genuinely small balance keeps that premise.
+    """
+    from app import models
+    db = auth_env.sessions()
+    try:
+        grant = db.query(models.CreditGrant).filter(
+            models.CreditGrant.user_id == user_id,
+            models.CreditGrant.source == "signup").one()
+        assert grant.remaining >= qty
+        grant.remaining -= qty
+        account = db.query(models.CreditAccount).filter(
+            models.CreditAccount.user_id == user_id).one()
+        account.balance -= qty
+        db.commit()
+    finally:
+        db.close()
+
+
 def _ops(auth_env, user_id, op_type="structured_export"):
     from app import models
     db = auth_env.sessions()
@@ -352,7 +376,10 @@ def test_report_kind_discriminators_422_before_charge(auth_env, kind):
 # --- money paths ---------------------------------------------------------------
 
 def test_insufficient_eligible_402_dynamic_price(auth_env):
-    email, user_id = _signup_and_verify(auth_env)  # 3 signup credits, no grant
+    email, user_id = _signup_and_verify(auth_env)  # 10 signup credits, no grant
+    # Re-base the signup balance to 3 (issue #151) so the spend below
+    # leaves a genuinely insufficient 1 credit.
+    _drain_signup(auth_env, user_id, 7)
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
     csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
