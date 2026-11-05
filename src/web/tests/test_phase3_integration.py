@@ -112,7 +112,7 @@ def test_persistence_path_complete_operation_settles(db, user):
     C.grant_signup_reward(db, user, f"{user.hex[:8]}@test.com")
     db.commit()
     before = C.get_balance_summary(db, user)["balance"]
-    assert before == 3
+    assert before == 10
 
     content_hash = C.hash_input(b"log data")
     consent = C.create_consent(db, user, "additional_analysis", content_hash, 1)

@@ -17,7 +17,7 @@ from datetime import timedelta
 
 import pytest
 from test_account_migrations import migrated_engine  # noqa: F401  (fixture)
-from test_phase2b_paid_e2e import paid_env, _signup_verify_login, _http_balance  # noqa: F401
+from test_phase2b_paid_e2e import paid_env, _signup_verify_login, _http_balance, _drain_signup  # noqa: F401
 
 from app import credits as C, models as M
 from app.sample_data import SAMPLE_LOG
@@ -70,12 +70,12 @@ def _extend(env, rid, csrf, key):
 def test_extend_success_charges_exactly_one_and_adds_90_days(paid_env):
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     rid, original_expiry, _ = _make_report(env, uid)
 
     r = _extend(env, rid, csrf, "ext-1")
     assert r.status_code == 200, r.text[:400]
-    assert _http_balance(env) == 2
+    assert _http_balance(env) == 9  # 10 signup - 1 extension
     delta = _expiry(env, rid) - original_expiry
     assert abs(delta.total_seconds() - 90 * 86400) < 2
 
@@ -101,7 +101,7 @@ def test_extend_replay_same_key_no_second_charge_or_extension(paid_env):
     after_first = _expiry(env, rid)
     r = _extend(env, rid, csrf, "ext-dup")
     assert r.status_code == 200, r.text[:400]
-    assert _http_balance(env) == 2
+    assert _http_balance(env) == 9  # one 1-credit charge total
     assert _expiry(env, rid) == after_first
 
 
@@ -111,7 +111,7 @@ def test_extend_distinct_keys_stack(paid_env):
     rid, original_expiry, _ = _make_report(env, uid)
     assert _extend(env, rid, csrf, "ext-a").status_code == 200
     assert _extend(env, rid, csrf, "ext-b").status_code == 200
-    assert _http_balance(env) == 1
+    assert _http_balance(env) == 8  # 10 signup - 2 extensions
     delta = _expiry(env, rid) - original_expiry
     assert abs(delta.total_seconds() - 180 * 86400) < 2
 
@@ -123,7 +123,7 @@ def test_extend_cap_rejects_full_unit_without_debit(paid_env):
     rid, original_expiry, _ = _make_report(env, uid, ready_age_days=300)
     r = _extend(env, rid, csrf, "ext-cap")
     assert r.status_code == 409, r.text[:400]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _expiry(env, rid) == original_expiry
     with env.sessions() as db:
         assert db.query(M.Operation).filter(
@@ -149,8 +149,12 @@ def test_extend_exactly_to_ceiling_is_allowed(paid_env):
 def test_extend_insufficient_credits_402_with_purchase_url(paid_env):
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
+    # Signup balance is 10 (issue #151); re-base it to 3 so the spend
+    # below genuinely exhausts it.
+    _drain_signup(env, uid, 7)
+    assert _http_balance(env) == 3
     rid, _, _ = _make_report(env, uid)
-    for i in range(3):  # spend the 3 signup credits on extensions
+    for i in range(3):  # spend the 3 re-based signup credits on extensions
         assert _extend(env, rid, csrf, f"ext-spend-{i}").status_code == 200
     assert _http_balance(env) == 0
     before = _expiry(env, rid)
@@ -166,7 +170,7 @@ def test_extend_expired_report_410_no_charge(paid_env):
     rid, _, _ = _make_report(env, uid, expires_in_days=-1)
     r = _extend(env, rid, csrf, "ext-dead")
     assert r.status_code == 410, r.text[:400]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
 
 
 def test_extend_foreign_report_404_and_anonymous_401(paid_env):
@@ -177,8 +181,8 @@ def test_extend_foreign_report_404_and_anonymous_401(paid_env):
     r = _extend(env, rid, csrf2, "ext-foreign")
     assert r.status_code == 404, r.text[:400]
     with env.sessions() as db:
-        assert C.get_balance_summary(db, uid)["balance"] == 3
-        assert C.get_balance_summary(db, uid2)["balance"] == 3
+        assert C.get_balance_summary(db, uid)["balance"] == 10
+        assert C.get_balance_summary(db, uid2)["balance"] == 10
 
 
 def test_extend_requires_csrf(paid_env):
@@ -188,7 +192,7 @@ def test_extend_requires_csrf(paid_env):
     r = env.client.post(f"/reports/{rid}/retention",
                         data={"csrf_token": "wrong", "idempotency_key": "ext-csrf"})
     assert r.status_code == 403
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
 
 
 def test_extend_comparison_report_allowed(paid_env):
@@ -231,7 +235,7 @@ def test_extend_settlement_failure_rolls_back_everything(paid_env, monkeypatch):
     monkeypatch.setattr(C, "store_report_action_receipt", boom)
     r = _extend(env, rid, csrf, "ext-fail")
     assert r.status_code == 500, r.text[:400]
-    assert _http_balance(env) == 3
+    assert _http_balance(env) == 10
     assert _expiry(env, rid) == original_expiry
     with env.sessions() as db:
         assert C.verify_account_invariants(db, uid) == []
@@ -287,5 +291,5 @@ def test_extend_replay_after_receipt_cleanup_never_recharges(paid_env):
         credit_maintenance.cleanup_results(db)
     r = _extend(env, rid, csrf, "ext-replay-clean")
     assert r.status_code == 200, r.text[:400]
-    assert _http_balance(env) == 2
+    assert _http_balance(env) == 9  # one 1-credit charge total
     assert _expiry(env, rid) == after

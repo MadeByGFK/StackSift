@@ -89,7 +89,7 @@ def test_txt_share_free_without_unlock_and_no_charge(paid_env):
     resp = _create(env, rid, csrf, "t135-txt-1", "txt")
     assert resp.status_code == 200, resp.text[:300]
     assert resp.json()["format"] == "txt"
-    assert _http_balance(env) == 3  # no unlock bought, no charge
+    assert _http_balance(env) == 10  # no unlock bought, no charge
     with env.sessions() as db:
         assert C.is_export_unlocked(db, uid, rid) is False
     token = _token_from(resp)
@@ -110,7 +110,7 @@ def test_gated_formats_blocked_pre_unlock_no_link_no_charge(paid_env, fmt):
     assert resp.status_code == 402, resp.text[:300]
     assert resp.json().get("code") == "export_unlock_required"
     assert resp.json().get("export_unlocked") is False
-    assert _http_balance(env) == 3  # no charge for the denial
+    assert _http_balance(env) == 10  # no charge for the denial
     rows = [r for r in _sharing_rows(env, rid)
             if (r.share_format or "txt") == fmt]
     assert rows == []  # no link row left behind

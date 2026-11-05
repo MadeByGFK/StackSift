@@ -26,6 +26,7 @@ from test_phase2a_regressions import env  # noqa: F401
 from test_phase2b_paid_e2e import paid_env  # noqa: F401
 from test_structured_export_e2e import (
     _balance,
+    _drain_signup,
     _grant,
     _ops,
     _session_csrf,
@@ -137,9 +138,12 @@ def test_analysis_invalid_csrf_403_no_charge(auth_env):
 
 
 def test_analysis_insufficient_credits_402_no_operation(auth_env):
-    # Signup balance is 3; grant nothing extra and drain via a first
-    # generation on report 1, leaving 0 for report 2.
+    # Signup balance is 10 (issue #151); re-base it to 3, grant nothing
+    # extra and drain via a first generation on report 1, leaving 0
+    # (genuinely below the 3-credit cost) for report 2.
     _, user_id, rid, csrf = _setup(auth_env, extra_credits=0)
+    _drain_signup(auth_env, user_id, 7)
+    assert _balance(auth_env, user_id) == 3
     assert _generate(auth_env, rid, csrf).status_code == 200
     assert _balance(auth_env, user_id) == 0
     payload = _eligible_payload()

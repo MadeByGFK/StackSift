@@ -8,6 +8,8 @@
 - Mode follows the configured key (issue #126): both test and live keys
   are accepted; unset keys fail closed and unrecognized key shapes are
   refused before any network call.
+- Restricted keys (rk_test_ / rk_live_) are accepted as the same modes
+  (issue #154 — production runs an rk_live_ key).
 
 Stripe's HTTP API is faked at the httpx boundary — no network, no keys.
 """
@@ -162,11 +164,66 @@ def test_live_key_checkout_session_created(checkout_env, monkeypatch):
 
 
 def test_unrecognized_key_format_refused(checkout_env, monkeypatch):
+    # Issue #154 premise-changed test: this used to refuse "rk_test_..."
+    # as the example garbage shape; restricted keys are now ACCEPTED, so
+    # the refusal premise is re-based on shapes that are still not secret
+    # keys (publishable key, webhook secret, shapeless strings).
     from app import stripe_billing
 
-    monkeypatch.setenv("STRIPE_SECRET_KEY", "rk_test_whatever")
-    with pytest.raises(stripe_billing.CheckoutError):
-        stripe_billing._secret_key()
+    for garbage in ("pk_test_whatever", "whsec_whatever",
+                    "not-a-stripe-key", "sk_whatever", "rk_whatever"):
+        monkeypatch.setenv("STRIPE_SECRET_KEY", garbage)
+        with pytest.raises(stripe_billing.CheckoutError):
+            stripe_billing._secret_key()
+
+
+def test_secret_key_accepts_restricted_keys(checkout_env, monkeypatch):
+    # Issue #154: restricted keys (rk_test_ / rk_live_) are recognized
+    # secret-key shapes and select the same modes as standard keys.
+    from app import stripe_billing
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "rk_test_abc123")
+    assert stripe_billing._secret_key() == "rk_test_abc123"
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "rk_live_abc123")
+    assert stripe_billing._secret_key() == "rk_live_abc123"
+
+
+def test_restricted_test_key_checkout_session_created(checkout_env, monkeypatch):
+    # Issue #154: an rk_test_ key reaches the (mocked) Stripe API call as
+    # the basic-auth username, exactly like a standard test key.
+    from app import stripe_billing
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "rk_test_abc123")
+    captured = []
+    monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
+    url, session_id = stripe_billing.create_checkout_session(
+        user_id="u1", pack_id="starter", purchase_id="p1",
+        success_url="https://x/s", cancel_url="https://x/c")
+    assert session_id == "cs_test_1"
+    assert url == "https://checkout.stripe.com/pay/cs_test_1"
+    assert len(captured) == 1
+    assert captured[0]["auth"][0] == "rk_test_abc123"
+    assert captured[0]["data"]["line_items[0][price]"] == PACK_PRICES["starter"]
+
+
+def test_restricted_live_key_checkout_session_created(checkout_env, monkeypatch):
+    # Issue #154 (the production defect): the founder's live purchase died
+    # with "unrecognized Stripe key format" because production runs an
+    # rk_live_ restricted key. It must now construct the session request
+    # (mocked) with the restricted key as the auth credential.
+    from app import stripe_billing
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "rk_live_abc123")
+    captured = []
+    monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
+    url, session_id = stripe_billing.create_checkout_session(
+        user_id="u1", pack_id="starter", purchase_id="p1",
+        success_url="https://x/s", cancel_url="https://x/c")
+    assert session_id == "cs_test_1"
+    assert url == "https://checkout.stripe.com/pay/cs_test_1"
+    assert len(captured) == 1
+    assert captured[0]["auth"][0] == "rk_live_abc123"
+    assert captured[0]["data"]["line_items[0][price]"] == PACK_PRICES["starter"]
 
 
 def test_each_pack_sends_correct_price_and_metadata(checkout_env, monkeypatch):
