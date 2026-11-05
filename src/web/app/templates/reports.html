@@ -157,8 +157,8 @@
         <div class="name">{{ report.filename }}</div>
         <div class="meta">
           <span>Analyzed {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
-          <span>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
-          <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}">Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
+          <span data-retention-expiry-date>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
+          <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}" data-retention-expiry-pill>Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
         </div>
       </div>
       <div class="actions">
@@ -207,11 +207,12 @@
            sources, so an Extend form on a deep_dive row would POST
            to a 404 (dead button). Normal reports keep Extend. #}
         {% if report.type != 'deep_dive' %}
-        <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" style="display:inline;margin:0">
+        <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" data-retention-form style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
           <button type="submit" class="btn btn-ghost">Extend</button>
         </form>
+        <span class="retention-status" data-retention-status role="status" style="display:none"></span>
         {% endif %}
       </div>
     </li>
@@ -251,6 +252,13 @@
     <p id="ss-confirm-text"></p>
     <button type="button" class="btn btn-primary" id="ss-confirm-yes">Continue</button>
     <button type="button" class="btn btn-ghost" id="ss-confirm-no">Cancel</button>
+  </div>
+</div>
+
+<div id="extend-modal" class="modal" style="display:none">
+  <div class="modal-card">
+    <p id="extend-msg"></p>
+    <button type="button" class="btn btn-primary" id="extend-close">Close</button>
   </div>
 </div>
 
@@ -327,6 +335,134 @@
   document.getElementById('ss-confirm-no').addEventListener('click', function () {
     modal.style.display = 'none';
     pending = null;
+  });
+  // Issue #141: Extend (retention) is an IN-PAGE action. Its endpoint
+  // returns a JSON document, so the confirmed form must NOT be
+  // submitted natively — the browser navigated to the raw JSON page
+  // and stranded the user there. This listener mirrors the PDF fetch
+  // pattern in auth_form_script.html: it is registered AFTER the
+  // data-confirm handler above, which stopImmediatePropagation()s
+  // the first (unconfirmed) submit, so this listener only ever runs
+  // on the confirmed resubmit; it preventDefault()s that resubmit
+  // and posts the SAME form fields (CSRF token + the form's hidden
+  // idempotency_key, unchanged) via fetch. A retry therefore replays
+  // the same key server-side and cannot double-charge, and the key
+  // is deliberately NOT rotated after success.
+  var extendModal = document.getElementById('extend-modal');
+  var extendMsg = document.getElementById('extend-msg');
+  document.getElementById('extend-close').addEventListener('click', function () {
+    extendModal.style.display = 'none';
+  });
+  function showExtendError(message) {
+    extendMsg.textContent = message || 'Retention extension failed. Please try again.';
+    extendModal.style.display = 'flex';
+  }
+  function refreshCreditBadgeFromBalance() {
+    // PR #143 remediation (Codex P2): a replayed success means the
+    // server committed the charge on an EARLIER attempt whose
+    // response never reached this page (e.g. it was lost to a
+    // network error), so the badge was never decremented for a
+    // charge that did happen. The local badge value cannot be
+    // trusted in that case — refresh it from the authoritative
+    // GET /auth/balance payload (the same payload
+    // auth_form_script.html renders #credit-badge from). If the
+    // balance fetch fails or carries no usable balance, leave the
+    // badge unchanged and show no error: the extension itself
+    // succeeded, so this refresh is best-effort only.
+    var badge = document.getElementById('credit-badge');
+    if (!badge) { return Promise.resolve(); }
+    try {
+      return fetch('/auth/balance', { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data) { return; }
+          var balance = data.balance;
+          var parsed = null;
+          if (typeof balance === 'number' && isFinite(balance)) {
+            parsed = balance;
+          } else if (typeof balance === 'string' && /^-?\d+$/.test(balance.trim())) {
+            parsed = parseInt(balance.trim(), 10);
+          }
+          if (parsed === null) { return; }
+          badge.textContent = '\u{1FA99} ' + parsed + ' credits';
+        })
+        .catch(function () {});
+    } catch (err) {
+      return Promise.resolve();
+    }
+  }
+  function updateCreditBadge(cost, replayed) {
+    // The header badge (#credit-badge, rendered by
+    // auth_form_script.html from /auth/balance) is the page's credit
+    // balance display. A fresh extension charged `cost` just now,
+    // so decrement locally. A replayed response charged nothing
+    // new on THIS attempt, but the original attempt may have
+    // committed without its response reaching the page — refresh
+    // from the server instead of guessing (see above).
+    if (replayed) { return refreshCreditBadgeFromBalance(); }
+    var badge = document.getElementById('credit-badge');
+    if (!badge) { return; }
+    var match = String(badge.textContent || '').match(/-?\d+/);
+    if (!match) { return; }
+    var next = parseInt(match[0], 10) - (cost || 1);
+    badge.textContent = '\u{1FA99} ' + next + ' credits';
+  }
+  function updateExtendedRow(form, data) {
+    var card = form.closest ? form.closest('.card') : null;
+    if (!card || !data.expires_at) { return; }
+    var expiry = new Date(data.expires_at);
+    if (isNaN(expiry.getTime())) { return; }
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    var dateEl = card.querySelector('[data-retention-expiry-date]');
+    if (dateEl) {
+      dateEl.textContent = 'Expires ' + expiry.getUTCFullYear() + '-'
+        + pad(expiry.getUTCMonth() + 1) + '-' + pad(expiry.getUTCDate());
+    }
+    var daysLeft = Math.max(0, Math.floor((expiry.getTime() - Date.now()) / 86400000));
+    var pillEl = card.querySelector('[data-retention-expiry-pill]');
+    if (pillEl) {
+      pillEl.textContent = 'Expires in ' + daysLeft + (daysLeft === 1 ? ' day' : ' days');
+      if (pillEl.classList) {
+        if (daysLeft <= 1) { pillEl.classList.add('soon'); }
+        else { pillEl.classList.remove('soon'); }
+      }
+    }
+    var statusEl = card.querySelector('[data-retention-status]');
+    if (statusEl) {
+      statusEl.textContent = 'Retention extended.';
+      statusEl.style.display = '';
+    }
+  }
+  document.querySelectorAll('form[data-retention-form]').forEach(function (f) {
+    f.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var button = f.querySelector('button[type="submit"]');
+      if (button) { button.disabled = true; }
+      fetch(f.action, { method: 'POST', body: new FormData(f), credentials: 'same-origin' })
+        .then(function (r) {
+          return r.json().then(function (d) {
+            d = d || {};
+            d._httpOk = r.ok;
+            d._httpStatus = r.status;
+            return d;
+          }, function () {
+            return { _httpOk: r.ok, _httpStatus: r.status };
+          });
+        })
+        .then(function (d) {
+          if (d._httpOk && d.status === 'extended') {
+            updateExtendedRow(f, d);
+            return updateCreditBadge(d.cost, d.replayed);
+          } else {
+            showExtendError(d.error || d.message);
+          }
+        }, function () {
+          showExtendError('Retention extension failed. Please try again.');
+        })
+        .then(function () {
+          if (button) { button.disabled = false; }
+        });
+    });
   });
   var shareModal = document.getElementById('share-modal');
   var shareMsg = document.getElementById('share-msg');
