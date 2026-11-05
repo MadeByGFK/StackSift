@@ -7,7 +7,8 @@ matching reversal — they are economics, and an unmatched one is the
 anomaly the founder must see (GFK-013 §6).
 
 The Stripe mode follows the configured key (``stripe_billing._secret_key``
-accepts ``sk_test_`` and ``sk_live_`` keys; issue #126).
+accepts ``sk_test_``/``sk_live_`` and ``rk_test_``/``rk_live_`` keys;
+issues #126, #154).
 
 Join path (per models.py): Stripe payment <-> credit_purchases
 (stripe_session_id) <-> credit_grants (purchase_id) <-> credit_ledger

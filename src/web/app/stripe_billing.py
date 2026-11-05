@@ -1,7 +1,10 @@
 """Phase 3: Stripe Checkout for credit packs (issue #68).
 
 Mode follows the configured secret key (issue #126): the key MUST start
-with ``sk_test_`` or ``sk_live_`` — the configured key determines whether
+with ``sk_test_`` or ``sk_live_`` (standard secret key) or ``rk_test_``
+or ``rk_live_`` (restricted key, issue #154 — production runs a
+restricted key, and Stripe routes restricted keys to the same mode as
+their standard counterparts) — the configured key determines whether
 calls run in test or live mode, and there is no separate mode flag. Unset
 keys fail closed and unrecognized key shapes are refused before any
 network call.
@@ -140,14 +143,16 @@ def checkout_configured() -> bool:
 def _secret_key() -> str:
     """Return the Stripe secret key; the configured key determines the mode.
 
-    Accepts both test (``sk_test_``) and live (``sk_live_``) secret keys.
+    Accepts standard secret keys (``sk_test_`` / ``sk_live_``) and
+    restricted keys (``rk_test_`` / ``rk_live_``, issue #154) — a
+    restricted key selects the same mode as its standard counterpart.
     Raises CheckoutNotConfigured when unset, CheckoutError for anything
     that is not a recognized secret-key shape.
     """
     key = os.environ.get("STRIPE_SECRET_KEY", "")
     if not key:
         raise CheckoutNotConfigured("STRIPE_SECRET_KEY is not set")
-    if not key.startswith(("sk_test_", "sk_live_")):
+    if not key.startswith(("sk_test_", "sk_live_", "rk_test_", "rk_live_")):
         raise CheckoutError("unrecognized Stripe key format")
     return key
 
