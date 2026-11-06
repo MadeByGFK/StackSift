@@ -33,7 +33,8 @@
 
   <section class="report-head">
     <h2>Analysis Report — {{ filename }}</h2>
-    <div class="meta">{{ analysis_projection.summary }}</div>
+    {% if report_generated_at %}<div class="meta">Generated {{ report_generated_at }}</div>{% endif %}
+    <div class="summary-panel" style="background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);border-radius:8px;padding:12px 14px;margin-top:10px">{{ analysis_projection.summary }}</div>
     {% if current_user and report_id %}
     {# Issue #106 Stage 2 + #129: this report carries its OWN export
        unlock — the first format costs 2 credits once, then every
@@ -107,22 +108,49 @@
     {% endif %}
   </section>
 
+  {# #162 Brief slot #}
+  {# Issue #162: the Investigation Brief renders here — a front section
+     ahead of the per-group appendix, after the summary panel. #160 only
+     reserves the slot; #162 fills it without restructuring this page. #}
+
   {% for group in analysis_projection.groups %}
-  <div class="card" style="margin-top:16px">
-    <h3 class="section-title" style="margin-top:0">[{{ group.level }}] {{ group.template }} <span style="color:var(--muted);font-weight:400">× {{ group.count }}</span></h3>
+  <div class="card group-card" style="margin-top:16px">
+    <div class="group-head" style="display:flex;align-items:center;gap:8px">
+      <span class="severity-chip" data-level="{{ group.level }}" style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;color:#fff;background:{% if group.level in ['CRITICAL', 'ERROR'] %}var(--severity-critical){% elif group.level in ['WARN', 'WARNING'] %}var(--severity-warning){% else %}var(--severity-info){% endif %}">{{ group.level }}</span>
+      <span class="count-badge" style="color:var(--muted);font-weight:600">× {{ group.count }}</span>
+    </div>
+    <h3 class="section-title group-template" style="margin-top:6px">{{ group.template }}</h3>
+    {% if group.observations %}
+    <h4 class="subsection-title">What was observed</h4>
     {% for text in group.observations %}<p>{{ text }}</p>{% endfor %}
+    {% endif %}
+    {% if group.explanations %}
+    <h4 class="subsection-title">Explanation</h4>
     {% for text in group.explanations %}<p>{{ text }}</p>{% endfor %}
-    <p><strong>What this may mean:</strong></p>
+    {% endif %}
+    {% if group.possible_causes %}
+    <h4 class="subsection-title">What this may mean</h4>
     {% for text in group.possible_causes %}<p>{{ text }}</p>{% endfor %}
-    <p><strong>Suggested first checks:</strong></p>
+    {% endif %}
+    {% if group.first_checks %}
+    <h4 class="subsection-title">Suggested first checks</h4>
     {% for text in group.first_checks %}<p>{{ text }}</p>{% endfor %}
+    {% endif %}
     {% if group.excerpts %}
-    <p><strong>Evidence:</strong></p>
+    <h4 class="subsection-title">Evidence</h4>
     {% for excerpt in group.excerpts %}
-    <p><code>{{ excerpt.text }}</code> <span style="color:var(--muted)">(analysis line {{ excerpt.analysis_line_number }})</span></p>
+    <div class="evidence-block" style="background:var(--panel);border-left:3px solid var(--accent);border-radius:6px;padding:8px 10px;margin:6px 0">
+      <div class="evidence-ref" style="color:var(--muted);font-size:12px">analysis line {{ excerpt.analysis_line_number }}</div>
+      <pre class="evidence-text" style="font-family:var(--font-code);white-space:pre-wrap;word-break:break-word;margin:4px 0 0"><code>{{ excerpt.text }}</code></pre>
+    </div>
     {% endfor %}
     {% endif %}
+    {% if group.limitations %}
+    <h4 class="subsection-title">Limitations</h4>
+    <div class="limitations-note" style="border-left:3px solid var(--muted);padding:2px 10px">
     {% for limit in group.limitations %}<p style="color:var(--muted)">{{ limit }}</p>{% endfor %}
+    </div>
+    {% endif %}
   </div>
   {% endfor %}
 
