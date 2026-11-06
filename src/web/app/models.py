@@ -586,6 +586,26 @@ class FunnelEvent(Base):
         sa.Index("ix_funnel_events_anon_event", "anon_id", "event"),
         sa.Index("ix_funnel_events_occurred", "occurred_at"),
     )
+
+
+class D2VisitorLink(Base):
+    """Identity merge for D2 attribution (issue #156).
+
+    Links a first-party ``d2_visitor_id`` cookie value (the funnel
+    ``anon_id``) to the user account it first signed up / logged in /
+    completed OAuth with. Rows are never rewritten: first merge wins,
+    so a later different user presenting the same visitor id cannot
+    steal the link. The D2 report joins funnel events through this
+    table; it stores no PII beyond the user FK itself.
+    """
+
+    __tablename__ = "d2_visitor_links"
+
+    visitor_id = Column(String(64), primary_key=True)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    first_seen_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    merged_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 # ---------------------------------------------------------------------------
 # Phase 3: Stripe purchases — settlement tables (issue #69).
 #

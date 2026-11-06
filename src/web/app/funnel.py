@@ -39,6 +39,12 @@ PURCHASE_START = "purchase_start"
 PURCHASE_SUCCESS = "purchase_success"
 CREDIT_SPEND = "credit_spend"
 REPEAT_PURCHASE = "repeat_purchase"
+# Issue #156 (D2 attribution MVP): recorded in the same table under the
+# same privacy contract, but deliberately NOT added to FUNNEL_LADDER —
+# the #62 weekly ladder is unchanged.
+OFFER_VIEWED = "offer_viewed"
+ANALYSIS_RUN = "analysis_run"
+PREMIUM_INTENT = "premium_intent"
 
 FUNNEL_EVENTS = frozenset(
     {
@@ -49,6 +55,9 @@ FUNNEL_EVENTS = frozenset(
         PURCHASE_SUCCESS,
         CREDIT_SPEND,
         REPEAT_PURCHASE,
+        OFFER_VIEWED,
+        ANALYSIS_RUN,
+        PREMIUM_INTENT,
     }
 )
 

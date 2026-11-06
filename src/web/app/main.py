@@ -265,6 +265,55 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def d2_attribution_cookies(request: Request, call_next):
+    """Issue #156: first-party D2 attribution cookies.
+
+    HTML GET responses only. ``d2_visitor_id`` is set when absent (a
+    malformed value counts as absent and is replaced) AND the request
+    carries any ``utm_*`` query param OR lands on ``/`` or
+    ``/credits``; a present valid value is never overwritten.
+    ``d2_attribution`` (first-touch UTM + referrer host only) is set
+    only when utm params are present and no attribution cookie exists
+    yet. Best-effort: cookie work can never break a response.
+    """
+    response = await call_next(request)
+    try:
+        if request.method != "GET":
+            return response
+        if "text/html" not in response.headers.get("content-type", ""):
+            return response
+        import json as _json
+        import uuid as _uuid
+
+        from app import d2_attribution as _d2
+
+        query_params = request.query_params
+        has_utm = any(key.startswith("utm_") for key in query_params.keys())
+        existing = request.cookies.get(_d2.VISITOR_COOKIE)
+        if _d2.valid_visitor_id(existing) is None and (
+            has_utm or request.url.path in ("/", "/credits")
+        ):
+            response.set_cookie(
+                _d2.VISITOR_COOKIE, str(_uuid.uuid4()),
+                httponly=True, samesite="lax", path="/",
+                max_age=_d2.COOKIE_MAX_AGE,
+            )
+        if has_utm and not request.cookies.get(_d2.ATTRIBUTION_COOKIE):
+            attribution = _d2.build_attribution(
+                query_params, request.headers.get("referer"))
+            if attribution:
+                response.set_cookie(
+                    _d2.ATTRIBUTION_COOKIE,
+                    _json.dumps(attribution, separators=(",", ":")),
+                    httponly=True, samesite="lax", path="/",
+                    max_age=_d2.COOKIE_MAX_AGE,
+                )
+    except Exception:
+        pass
+    return response
+
+
 # Issue #104, trim T4: pre-multipart body guard, Content-Length variant.
 # The framework spools multipart before the route runs, so a route-level
 # guard cannot prevent spooling; this middleware rejects, before any
@@ -373,6 +422,52 @@ async def pricing_redirect():
     return RedirectResponse(url="/credits", status_code=301)
 
 
+@app.post("/events/d2")
+async def d2_client_event(request: Request):
+    """Issue #156: client beacon endpoint for D2 funnel events.
+
+    Accepts ONLY ``offer_viewed`` and ``premium_intent`` from clients;
+    ``analysis_run`` is server-emitted only, so a client POST claiming
+    it is ignored (no row — prevents funnel forgery). Identity is the
+    session user and/or the ``d2_visitor_id`` cookie; with neither,
+    nothing is recorded (conservative undercount). Attribution meta is
+    read server-side from the ``d2_attribution`` cookie — the request
+    body can never inject attribution or meta. Always 204, including
+    for malformed JSON: the endpoint is no oracle, and recording is
+    best-effort so it can never break the page that sent the beacon.
+    """
+    from fastapi.responses import Response
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return Response(status_code=204)
+    if not isinstance(payload, dict):
+        return Response(status_code=204)
+    event = payload.get("event")
+    if event not in ("offer_viewed", "premium_intent"):
+        return Response(status_code=204)
+    from app import d2_attribution as _d2
+    from app import funnel as funnel_helpers
+
+    _user, _ = _get_current_user_optional(request)
+    anon_id = _d2.visitor_id_from_cookies(request.cookies)
+    if _user is None and not anon_id:
+        return Response(status_code=204)
+    meta = _d2.attribution_meta_from_cookies(request.cookies)
+    if event == "premium_intent":
+        kind = payload.get("kind")
+        if isinstance(kind, str) and kind in _d2.PREMIUM_INTENT_KINDS:
+            meta = {"kind": kind, **meta}
+    funnel_helpers.emit_standalone(
+        event,
+        user_id=_user.id if _user is not None else None,
+        anon_id=anon_id,
+        meta=meta or None,
+    )
+    return Response(status_code=204)
+
+
 # ISSUE-68: Stripe Checkout entry point. The billing module accepts test
 # and live keys; the configured key determines the mode (issue #126).
 # Anonymous users cannot buy: they get a 401 pointing at signup/login, and
@@ -404,6 +499,12 @@ async def credits_checkout(
     expected = session.csrf_token if session else None
     if not expected or not isinstance(csrf_token, str) or not hmac.compare_digest(csrf_token, expected):
         raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
+
+    # Issue #156: premium intent at attempt entry — after auth, before
+    # any outcome (rate limit, pack validation, Stripe). Observe-only:
+    # best-effort emission, no change to charging or status codes.
+    from app import d2_attribution as _d2
+    _d2.emit_premium_intent(request, _user.id, "checkout_start")
 
     ip = _client_ip(request)
     if _use_shared_limiter():
@@ -846,6 +947,15 @@ async def analyze(
     # Handle error dicts from analyze_upload (binary, too many lines, timeout, etc.)
     if isinstance(data, dict) and "error" in data:
         return error(data.get("message", "Analysis failed."), status=400)
+
+    # Issue #156: analysis_run on successful completion of the
+    # no-database single-file path too (the durable path emits in
+    # _durable_analysis). Best-effort: with no database configured the
+    # standalone emit simply has nowhere to write and is swallowed.
+    from app import d2_attribution as _d2
+    _d2_user, _ = _get_current_user_optional(request)
+    _d2.emit_analysis_run(request, _d2_user.id if _d2_user else None,
+                          None, "free")
 
     if output == "txt":
         report = render_text_report(data)
@@ -1517,6 +1627,18 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                                     user_id=user_id, anon_id=anon,
                                     once_per_identity=True)
             db.commit()
+            if not failure and result_id is not None:
+                # Issue #156: analysis_run on EVERY successful completion
+                # of the single-file flow (free and paid alike; replays
+                # return earlier and never reach this point). Standalone
+                # session: the settlement transaction above has already
+                # committed, and telemetry must never break delivery.
+                # Identity prefers the d2 visitor cookie; the anonymous
+                # session hash is the fallback anon identity.
+                from app import d2_attribution as _d2
+                _d2.emit_analysis_run(
+                    request, user_id, anon,
+                    paid_operation_type or ("paid" if paid else "free"))
     except Exception:
         logging.getLogger(__name__).exception("Analysis execution or settlement failed")
         # Execution has returned/stopped here. Completion is never reversed.
@@ -2747,6 +2869,11 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     # back.
     from app import funnel as funnel_helpers
     funnel_helpers.emit_standalone(funnel_helpers.EXPORT_INTENT, user_id=user.id)
+    # Issue #156: premium intent at the same attempt point (the export
+    # unlock is a premium action, including when it ends in a 402).
+    # Observe-only, standalone like the export-intent emit above.
+    from app import d2_attribution as _d2
+    _d2.emit_premium_intent(request, user.id, "export_unlock")
 
     # PR #132 finding 5: build the operation key from the PARSED
     # canonical UUID (rid), never the raw URL segment — an uppercase
@@ -3034,6 +3161,14 @@ async def report_export_structured(request: Request, result_id: str, export_form
         return JSONResponse({"error": "Report not found"}, status_code=404)
     if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
+
+    # Issue #156: premium intent at the same attempt point as the PDF
+    # route (Codex P2, PR #157: a CSV/JSON first export performs the
+    # same paid per-report unlock, so the attempt must record
+    # identically or the funnel depends on the chosen format).
+    # Observe-only, best-effort; counts whether or not credits suffice.
+    from app import d2_attribution as _d2
+    _d2.emit_premium_intent(request, user.id, "export_unlock")
 
     # Validate ALL source prerequisites BEFORE reservation (spec §5),
     # including integrity via result_payload (owner/origin/expiry/digest).
@@ -3429,6 +3564,14 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
             status_code=422)
     except dd.InsufficientEvidence as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
+
+    # Issue #156: premium intent at attempt entry — auth, CSRF, source
+    # and eligibility gates have passed; before any reservation or
+    # outcome (including the insufficient-balance 402 below).
+    # Observe-only: best-effort, standalone (the 402 paths roll the
+    # request transaction back).
+    from app import d2_attribution as _d2
+    _d2.emit_premium_intent(request, user.id, "analysis_report")
 
     cost = credits_helpers.COST_DEEP_DIVE
     request_hash = dd.analysis_request_hash(source, payload)
