@@ -2732,6 +2732,11 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
             return JSONResponse({"error": "Report data corrupted"}, status_code=500)
         data["export_unlocked"] = credits_helpers.is_export_unlocked(
             db, _user.id, result.id)
+        # Issue #160: the designed header block shows when this report
+        # was generated (the artifact Result's ready_at) — display only.
+        if result.ready_at:
+            data["report_generated_at"] = credits_helpers._as_aware(
+                result.ready_at).strftime("%Y-%m-%d %H:%M UTC")
         return templates.TemplateResponse(
             request, "deep_dive_report.html", data)
     # Issue #105: existing structured-export artifacts for this source get

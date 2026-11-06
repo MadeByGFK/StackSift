@@ -4,15 +4,26 @@ Generates a PDF from a stored analysis result's storage_manifest JSON.
 The PDF mirrors the on-screen report: summary, statistics, investigate-first
 diagnostic, incident section, notable events, timeline, and all issues.
 Uses fpdf2 (pure Python, no system dependencies).
+
+Issue #160: the standard report PDF and the Analysis Report PDF share ONE
+design layer (class ``_DesignedPDF`` + the helpers below): identical
+header/footer, brand tokens single-sourced in ``BRAND``, vendored brand
+fonts (DM Sans / IBM Plex Mono) with a hard Helvetica fallback, and
+left-aligned body text throughout — no justified "word soup". The
+batch/comparison generators below keep their original code paths.
+Presentation only: no content, engine, pricing or credit behavior here.
 """
 
+import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 
-NAVY = (30, 42, 74)
-GRAY = (100, 100, 100)
-BLACK = (0, 0, 0)
+from fpdf import FPDF
+from fpdf.enums import MethodReturnValue
+
 # Preferred: the manifest already carries the health color token
 # (determine_health returns red/yellow/green/gray). Label mapping is a
 # fallback for legacy manifests that only have a label.
@@ -31,6 +42,108 @@ HEALTH_LABEL_COLORS = {
     "No Escalation Detected": (22, 163, 74),
     "No Significant Issues Detected": (22, 163, 74),
 }
+
+# Issue #160 decision 2, amended by A1 P2-4: brand tokens are IMMUTABLE
+# defaults, resolved PER RENDER by resolve_tokens() into a frozen
+# ResolvedTokens object that is passed through the helpers. This dict is
+# never mutated at runtime (no cross-request contamination), and the
+# token names/values are the same ones the web surface defines as CSS
+# :root variables in app/static/style.css (--accent, --navy,
+# --severity-critical/-warning/-info, --font-body, --font-code) — the
+# web/PDF agreement is asserted by test.
+#
+# Brand-overridable (via the #163 `branding` argument): ONLY the accent
+# color, plus the header business text / client name / report title /
+# logo zone. Fixed forever (integrity rule): severity, limitation and
+# redaction colors are NEVER brand-overridable.
+BRAND = {
+    "navy": (30, 42, 74),            # web --navy: #1e2a4a
+    "gold": (212, 175, 55),          # web --accent: #d4af37
+    "ink": (26, 32, 44),
+    "muted": (100, 100, 100),
+    "panel": (238, 241, 246),
+    "border": (203, 213, 225),
+    "severity": {
+        "CRITICAL": HEALTH_COLORS["red"],      # web --severity-critical
+        "ERROR": HEALTH_COLORS["red"],
+        "WARN": HEALTH_COLORS["yellow"],       # web --severity-warning
+        "WARNING": HEALTH_COLORS["yellow"],
+        "INFO": HEALTH_COLORS["gray"],         # web --severity-info
+    },
+    "limitation": (100, 100, 100),
+    "redaction": HEALTH_COLORS["red"],
+}
+
+NAVY = BRAND["navy"]
+GRAY = BRAND["muted"]
+BLACK = BRAND["ink"]
+
+#: The only BRAND token a branding dict may override.
+BRAND_OVERRIDABLE = frozenset({"accent"})
+#: Tokens a branding dict can never change (contrast/integrity rule).
+BRAND_FIXED = frozenset(
+    {"navy", "gold", "ink", "muted", "panel", "border",
+     "severity", "limitation", "redaction"})
+
+
+def _parse_color(value):
+    """Parse a branding color: '#rrggbb' or an (r, g, b) triple."""
+    if isinstance(value, (tuple, list)) and len(value) == 3:
+        try:
+            rgb = tuple(int(c) for c in value)
+        except (TypeError, ValueError):
+            return None
+        return rgb if all(0 <= c <= 255 for c in rgb) else None
+    if isinstance(value, str) and len(value) == 7 and value.startswith("#"):
+        try:
+            return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+        except ValueError:
+            return None
+    return None
+
+
+@dataclass(frozen=True)
+class ResolvedTokens:
+    """Per-render brand tokens (A1 P2-4). Built fresh by
+    resolve_tokens() for every render and threaded through the design
+    helpers; nothing here is shared or mutated across renders."""
+    navy: tuple
+    gold: tuple
+    accent: tuple
+    ink: tuple
+    muted: tuple
+    panel: tuple
+    border: tuple
+    severity: dict
+    limitation: tuple
+    redaction: tuple
+    business_name: str | None = None
+    client_name: str | None = None
+    report_title: str | None = None
+    logo_path: str | None = None
+
+
+def resolve_tokens(branding=None) -> ResolvedTokens:
+    """Resolve the tokens for ONE render from the immutable BRAND
+    defaults plus an optional #163 branding dict.
+
+    Only `accent` may be overridden (see BRAND_OVERRIDABLE); any
+    severity/limitation/redaction keys in the branding dict are
+    deliberately ignored — those colors are fixed by the integrity
+    rule in BRAND_FIXED.
+    """
+    b = branding or {}
+    accent = _parse_color(b.get("accent")) or BRAND["gold"]
+    return ResolvedTokens(
+        navy=BRAND["navy"], gold=BRAND["gold"], accent=accent,
+        ink=BRAND["ink"], muted=BRAND["muted"], panel=BRAND["panel"],
+        border=BRAND["border"], severity=dict(BRAND["severity"]),
+        limitation=BRAND["limitation"], redaction=BRAND["redaction"],
+        business_name=b.get("business_name") or None,
+        client_name=b.get("client_name") or None,
+        report_title=b.get("report_title") or None,
+        logo_path=b.get("logo_path") or None,
+    )
 
 
 def _health_color(health: dict) -> tuple:
@@ -52,7 +165,9 @@ def _s(text) -> str:
     """Coerce to str and make it safe for fpdf2 core fonts (latin-1 only).
 
     Common cp1252 punctuation is mapped to ASCII equivalents first;
-    anything still outside latin-1 is replaced.
+    anything still outside latin-1 is replaced. Used ONLY on the
+    Helvetica fallback path (issue #160 decision 3): when the vendored
+    brand fonts load, text renders as full Unicode.
     """
     text = str(text)
     for src, dst in _PUNCT_MAP.items():
@@ -60,12 +175,411 @@ def _s(text) -> str:
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
-def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
+# ---------------------------------------------------------------------------
+# Issue #160: shared design layer for the standard + Analysis Report PDFs.
+# ---------------------------------------------------------------------------
+
+_FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+_FONT_FILES = {
+    ("DMSans", ""): "DMSans-Regular.ttf",
+    ("DMSans", "B"): "DMSans-Bold.ttf",
+    ("DMSans", "I"): "DMSans-Italic.ttf",
+    ("IBMPlexMono", ""): "IBMPlexMono-Regular.ttf",
+}
+# A1 P3-6: exact pinned font files. Provenance (source URLs, licenses)
+# lives in assets/fonts/FONTS.md + the per-family OFL notices alongside
+# the binaries; a file whose bytes do not match its recorded hash is
+# treated as corrupt and triggers the disclosed Helvetica fallback.
+FONT_SHA256 = {
+    "DMSans-Regular.ttf":
+        "b0ae3e89a7d3ef2b1838bb4b1ceb0b17cc3435af061eee809d76aa623ff116e9",
+    "DMSans-Bold.ttf":
+        "2a8e7f713ee79fbccdef3cef5c787aff47580299f7da60144961e7db2ec08211",
+    "DMSans-Italic.ttf":
+        "cb30796ef338a70498e301f2c333f00d4fc23bacfa267be09673fdac43356a96",
+    "IBMPlexMono-Regular.ttf":
+        "a7fdc993f9f0387caedba4e42521136fa97e4c0837ae6239bf0413ccf8af00c2",
+}
+BODY_FONT = "DMSans"
+MONO_FONT = "IBMPlexMono"
+FOOTER_TEXT = "Generated by StackSift (stacksift.goodfolkdigital.com)"
+#: A1 P1-1(c): the degraded Helvetica mode is DISCLOSED on page 1.
+FALLBACK_NOTICE = (
+    "Notice: rendered in fallback font (Helvetica) because the brand "
+    "fonts could not be loaded. Some characters may be replaced in "
+    "this degraded rendering.")
+#: A1 P1-1(b): a glyph the rendering font cannot draw is shown as this
+#: explicit visible token — never a silent '?', never dropped.
+UNSUPPORTED_TEMPLATE = "[unsupported character U+{cp:04X}]"
+
+
+def _register_fonts(pdf):
+    """Register the vendored brand fonts and probe their coverage.
+
+    Returns {family: frozenset(codepoints)} on success, None when any
+    font file is missing, corrupt (SHA-256 mismatch) or unloadable —
+    the caller then renders in the disclosed Helvetica fallback mode
+    (A1 P1-1c). Paths resolve relative to this module, never the CWD,
+    and nothing is ever downloaded at runtime (A1 P3-6).
+    """
+    try:
+        for (family, style), fname in _FONT_FILES.items():
+            path = _FONT_DIR / fname
+            if not path.is_file():
+                return None
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest != FONT_SHA256[fname]:
+                return None
+            pdf.add_font(family, style, str(path))
+        coverage = {}
+        for family in (BODY_FONT, MONO_FONT):
+            cps = set()
+            for key, font in pdf.fonts.items():
+                if key.lower().startswith(family.lower()):
+                    cps.update(font.cw.keys())
+            if not cps:
+                return None
+            coverage[family] = frozenset(cps)
+        return coverage
+    except Exception:
+        return None
+
+
+def effective_accent(branding=None) -> tuple:
+    """Accent color for a render (helper-level #163 seam)."""
+    return resolve_tokens(branding).accent
+
+
+class _DesignedPDF(FPDF):
+    """Shared designed-PDF renderer (an FPDF subclass).
+
+    Both in-scope generators build one of these so header, footer,
+    headings, body text, evidence blocks and severity chips are drawn
+    by exactly the same code — the two PDFs read as siblings. The
+    footer is a true per-page footer (FPDF ``footer()`` hook), so it
+    appears on EVERY page however pagination falls.
+    """
+
+    def __init__(self, *, title, filename, branding=None):
+        super().__init__()
+        self.title = title
+        self.filename = filename
+        self.branding = branding or None
+        # A1 P2-4: tokens resolved per render, never global mutation.
+        self.tokens = resolve_tokens(branding)
+        self.generated = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC")
+        self._coverage = _register_fonts(self)
+        self.fonts_ok = self._coverage is not None
+        self.body = BODY_FONT if self.fonts_ok else "Helvetica"
+        self.mono = MONO_FONT if self.fonts_ok else "Courier"
+        self.alias_nb_pages()
+        self.set_auto_page_break(auto=True, margin=22)
+
+    # -- text/font plumbing -------------------------------------------------
+    def _t(self, text, *, mono=False) -> str:
+        """Make text safe for the CURRENT rendering path (A1 P1-1).
+
+        Brand-font path: the text NEVER passes through _s()'s latin-1
+        replacement. A character the target font cannot render becomes
+        the explicit visible token [unsupported character U+XXXX].
+        Fallback path: the lossy _s() coercion, disclosed on page 1 by
+        FALLBACK_NOTICE.
+        """
+        text = str(text)
+        if not self.fonts_ok:
+            return _s(text)
+        coverage = self._coverage[MONO_FONT if mono else BODY_FONT]
+        out = []
+        for ch in text:
+            if ch == "\n":
+                out.append(ch)
+            elif ch == "\t":
+                out.append(" ")
+            elif ord(ch) in coverage:
+                out.append(ch)
+            else:
+                out.append(UNSUPPORTED_TEMPLATE.format(cp=ord(ch)))
+        return "".join(out)
+
+    def font(self, style="", size=10, *, mono=False):
+        """Set the current font via the design layer (never call
+        FPDF.set_font directly in the designed generators). The brand
+        set registers real Regular/Bold/Italic faces, so style="I"
+        renders in the real DM Sans Italic — it is never stripped,
+        synthesized, or remapped (A1 P2-2)."""
+        family = self.mono if mono else self.body
+        FPDF.set_font(self, family, style, size)
+
+    # -- page furniture ------------------------------------------------------
+    def header_block(self):
+        """Designed header: branding-ready logo zone (empty when
+        unbranded — no placeholder), title, source file, timestamp,
+        accent rule. Called once per document, at the top of page 1.
+        Every content string wraps via multi_cell (A1 P2-3): nothing
+        here can be clipped by a single-line cell()."""
+        pdf = self
+        tok = self.tokens
+        if tok.logo_path:
+            try:
+                if Path(str(tok.logo_path)).is_file():
+                    pdf.image(str(tok.logo_path), x=pdf.l_margin,
+                              y=pdf.get_y(), h=10)
+                    pdf.ln(12)
+            except Exception:
+                pass  # a bad logo must never fail an export
+        if tok.business_name:
+            self.font("B", 9)
+            pdf.set_text_color(*tok.accent)
+            pdf.multi_cell(0, 5, self._t(tok.business_name), align="L",
+                           new_x="LMARGIN", new_y="NEXT")
+        title = tok.report_title or self.title
+        self.font("B", 19)
+        pdf.set_text_color(*tok.navy)
+        pdf.multi_cell(0, 9, self._t(title), align="L",
+                       new_x="LMARGIN", new_y="NEXT")
+        if tok.client_name:
+            self.font("", 10)
+            pdf.set_text_color(*tok.muted)
+            pdf.multi_cell(0, 6, self._t(f"Prepared for: {tok.client_name}"),
+                           align="L", new_x="LMARGIN", new_y="NEXT")
+        self.font("", 9, mono=True)
+        pdf.set_text_color(*tok.muted)
+        pdf.multi_cell(0, 6, self._t(f"File: {self.filename}", mono=True),
+                       align="L", new_x="LMARGIN", new_y="NEXT")
+        self.font("", 9)
+        pdf.multi_cell(0, 6, self._t(f"Generated: {self.generated}"),
+                       align="L", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*tok.ink)
+        y = pdf.get_y() + 1.5
+        pdf.set_draw_color(*tok.accent)
+        pdf.set_line_width(0.6)
+        pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
+        pdf.set_y(y + 3)
+        if not self.fonts_ok:
+            # A1 P1-1(c): degraded mode is disclosed on the artifact.
+            self.font("I", 9)
+            pdf.set_text_color(*tok.redaction)
+            pdf.multi_cell(0, 5.5, self._t(FALLBACK_NOTICE), align="L",
+                           new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(*tok.ink)
+            pdf.ln(1)
+
+    def footer(self):
+        """Designed per-page footer (FPDF hook): the identical string
+        on every page of both generators, with page numbering."""
+        self.set_y(-16)
+        self.font("", 8)
+        self.set_text_color(*self.tokens.muted)
+        self.cell(0, 8, self._t(
+            f"{FOOTER_TEXT} - Page {self.page_no()} of {{nb}}"),
+            new_x="LMARGIN", new_y="NEXT", align="C")
+        self.set_text_color(*self.tokens.ink)
+
+    # -- content primitives (all body text explicitly left-aligned) ---------
+    def section_heading(self, text):
+        pdf = self
+        pdf.ln(4)
+        self.font("B", 13)
+        pdf.set_text_color(*self.tokens.navy)
+        pdf.multi_cell(0, 7.5, self._t(text), align="L",
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*self.tokens.ink)
+        pdf.ln(1)
+
+    def subhead(self, text):
+        pdf = self
+        pdf.ln(2)
+        self.font("B", 10.5)
+        pdf.set_text_color(*self.tokens.navy)
+        pdf.multi_cell(0, 6, self._t(text), align="L",
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*self.tokens.ink)
+
+    def para(self, text, size=10, style=""):
+        pdf = self
+        self.font(style, size)
+        pdf.set_text_color(*self.tokens.ink)
+        pdf.multi_cell(0, 5.8, self._t(text), align="L",
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+
+    def text_line(self, text, size=11, style="", height=7, color=None):
+        """A 'line' of content — rendered with multi_cell, not cell(),
+        so long content strings wrap instead of clipping (A1 P2-3)."""
+        pdf = self
+        self.font(style, size)
+        pdf.set_text_color(*(color or self.tokens.ink))
+        pdf.multi_cell(0, height, self._t(text), align="L",
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*self.tokens.ink)
+
+    def summary_panel(self, text):
+        """The report summary as a distinct filled panel (decision 5a)."""
+        pdf = self
+        self.font("", 10.5)
+        pdf.set_text_color(*self.tokens.ink)
+        pdf.set_fill_color(*self.tokens.panel)
+        pdf.multi_cell(0, 6.2, self._t(text), align="L", fill=True,
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+    def _split_lines(self, text, width, line_h):
+        """Split text into rendered lines at the CURRENT font/width
+        (fpdf dry run — draws nothing). Long unbroken strings are
+        character-split by fpdf's wrap logic: nothing is lost."""
+        return self.multi_cell(
+            width, line_h, text, align="L", dry_run=True,
+            output=MethodReturnValue.LINES)
+
+    def _flow_lines(self, lines, line_h, font_spec, color, *,
+                    indent=0, fill=False, rule_color=None,
+                    continued_label=None):
+        """Render pre-split lines with manual pagination (A1 P2-3).
+
+        Unlike a bare multi_cell, this keeps the visual furniture
+        intact across page breaks: the rule is drawn per page segment,
+        the footer hook fires on every added page, and a split block
+        resumes under `continued_label` on the next page. Lossless:
+        every input line is rendered exactly once.
+        """
+        pdf = self
+        style, size, mono = font_spec
+        width = pdf.w - pdf.l_margin - pdf.r_margin - indent
+        i = 0
+        first_chunk = True
+        while i < len(lines):
+            self.font(style, size, mono=mono)
+            pdf.set_text_color(*color)
+            if fill:
+                pdf.set_fill_color(*self.tokens.panel)
+            if not first_chunk and continued_label:
+                self.font("", 7.5, mono=True)
+                pdf.set_text_color(*self.tokens.muted)
+                pdf.set_x(pdf.l_margin + indent)
+                pdf.multi_cell(width, 4.5,
+                               self._t(continued_label, mono=True),
+                               align="L", new_x="LMARGIN", new_y="NEXT")
+                self.font(style, size, mono=mono)
+                pdf.set_text_color(*color)
+                if fill:
+                    pdf.set_fill_color(*self.tokens.panel)
+            avail = pdf.h - pdf.b_margin - pdf.get_y()
+            n = int(avail // line_h)
+            if n <= 0:
+                pdf.add_page()
+                continue
+            chunk = lines[i:i + n]
+            i += len(chunk)
+            y0 = pdf.get_y()
+            for line in chunk:
+                pdf.set_x(pdf.l_margin + indent)
+                pdf.multi_cell(width, line_h, line, align="L", fill=fill,
+                               new_x="LMARGIN", new_y="NEXT")
+            if rule_color is not None:
+                y1 = pdf.get_y()
+                pdf.set_draw_color(*rule_color)
+                pdf.set_line_width(0.6)
+                x = pdf.l_margin + max(indent - 3, 0.3)
+                pdf.line(x, y0, x, y1)
+            first_chunk = False
+            if i < len(lines):
+                pdf.add_page()
+
+    def evidence_block(self, ref_label, text, *, truncated=False):
+        """Evidence as data: a small line-reference label over a mono
+        block on a panel fill — never a justified paragraph. A block
+        longer than a page SPLITS across pages with a "(continued)"
+        label and the recurring header/footer intact (A1 P2-3). The
+        projection's text_truncated flag is disclosed, never hidden."""
+        pdf = self
+        if ref_label:
+            self.font("", 7.5, mono=True)
+            pdf.set_text_color(*self.tokens.muted)
+            pdf.multi_cell(0, 4.5, self._t(ref_label, mono=True),
+                           align="L", new_x="LMARGIN", new_y="NEXT")
+        self.font("", 8.5, mono=True)
+        width = pdf.w - pdf.l_margin - pdf.r_margin
+        lines = self._split_lines(self._t(text, mono=True), width, 5)
+        self._flow_lines(
+            lines, 5, ("", 8.5, True), self.tokens.ink, fill=True,
+            rule_color=self.tokens.accent,
+            continued_label=(f"{ref_label} (continued)" if ref_label
+                             else "(continued)"))
+        if truncated:
+            self.font("", 8, mono=True)
+            pdf.set_text_color(*self.tokens.muted)
+            pdf.multi_cell(0, 4.5, self._t(
+                "[excerpt truncated in the source artifact]", mono=True),
+                align="L", new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(*self.tokens.ink)
+        pdf.ln(1.5)
+
+    def limitation_note(self, text):
+        """Limitations as a visually distinct muted, ruled note —
+        present and legible, never hidden or softened. The rule is
+        drawn per page segment so a split note stays ruled."""
+        pdf = self
+        self.font("", 9)
+        width = pdf.w - pdf.l_margin - pdf.r_margin - 4
+        lines = self._split_lines(self._t(text), width, 5.2)
+        self._flow_lines(lines, 5.2, ("", 9, False),
+                         self.tokens.limitation, indent=4,
+                         rule_color=self.tokens.limitation)
+        pdf.set_text_color(*self.tokens.ink)
+        pdf.ln(1)
+
+    def group_heading(self, level, template, count):
+        """Structured group heading: severity chip + count badge on one
+        row, template name as its own wrapped line — structured data,
+        never a key=value string stretched across the measure. The
+        template wraps via multi_cell, however long it is (A1 P2-3)."""
+        pdf = self
+        if pdf.get_y() + 18 > pdf.h - pdf.b_margin:
+            pdf.add_page()
+        pdf.ln(4)
+        level_text = str(level or "").upper()
+        color = self.tokens.severity.get(level_text, self.tokens.muted)
+        self.font("B", 8.5)
+        chip_w = pdf.get_string_width(self._t(level_text)) + 6
+        pdf.set_fill_color(*color)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(chip_w, 6.5, self._t(level_text), fill=True, align="C",
+                 new_x="RIGHT", new_y="TOP")
+        pdf.set_text_color(*self.tokens.muted)
+        self.font("B", 9.5)
+        pdf.cell(0, 6.5, self._t(f"  × {count}"), new_x="LMARGIN",
+                 new_y="NEXT")
+        pdf.set_text_color(*self.tokens.navy)
+        self.font("B", 12)
+        pdf.multi_cell(0, 7, self._t(template), align="L",
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*self.tokens.ink)
+        pdf.ln(1)
+
+
+def render_brief_slot(pdf_view, projection):
+    """Issue #162 seam: the Investigation Brief is a front section
+    ahead of the per-group appendix. Renders nothing while the
+    projection carries no brief data; #162 fills content here without
+    restructuring the renderer."""
+    # Pure no-op seam (decision 7): #160 renders nothing here even if
+    # a future projection carries brief data — #162 owns the Brief's
+    # structured rendering and fills this seam without restructuring.
+    _brief = (projection or {}).get("brief")  # noqa: F841 — seam only
+    return None
+
+
+def generate_report_pdf(manifest_json: str, filename: str = "report",
+                        branding: dict | None = None) -> bytes:
     """Generate a PDF report from a stored analysis result.
 
     Args:
         manifest_json: The Result.storage_manifest JSON (analysis data).
         filename: Original log filename for the report header.
+        branding: Optional issue-#163 branding seam (business name /
+            logo path / accent override / report title / client name).
+            Parameter only — no settings UI or persistence here.
 
     Returns:
         PDF file bytes.
@@ -79,40 +593,26 @@ def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
     if not isinstance(data, dict):
         data = {}
 
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=20)
+    view = _DesignedPDF(title="StackSift Analysis Report",
+                        filename=filename, branding=branding)
+    pdf = view
     pdf.add_page()
+    view.header_block()
+    if data.get("detected_format"):
+        # Rendered by the pre-#160 header; kept in the designed one
+        # (content-to-rendering inventory, A1 P2-3).
+        view.text_line(f"Format: {data['detected_format']}", size=10,
+                       color=view.tokens.muted)
 
     def heading(text):
-        pdf.ln(4)
-        pdf.set_font("Helvetica", "B", 14)
-        pdf.set_text_color(*NAVY)
-        pdf.cell(0, 10, _s(text), new_x="LMARGIN", new_y="NEXT")
-        pdf.set_text_color(*BLACK)
+        view.section_heading(text)
 
-    def line(text, size=11, style="", height=7):
-        pdf.set_font("Helvetica", style, size)
-        pdf.cell(0, height, _s(text), new_x="LMARGIN", new_y="NEXT")
+    def line(text, size=11, style="", height=7, color=None):
+        view.text_line(text, size=size, style=style, height=height,
+                       color=color)
 
     def para(text, size=10, style=""):
-        pdf.set_font("Helvetica", style, size)
-        pdf.multi_cell(0, 6, _s(text))
-        pdf.ln(1)
-
-    # Header
-    pdf.set_font("Helvetica", "B", 20)
-    pdf.set_text_color(*NAVY)
-    pdf.cell(0, 12, "StackSift Analysis Report", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(*GRAY)
-    pdf.cell(0, 8, _s(f"File: {filename}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 8, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-             new_x="LMARGIN", new_y="NEXT")
-    if data.get("detected_format"):
-        pdf.cell(0, 8, _s(f"Format: {data['detected_format']}"),
-                 new_x="LMARGIN", new_y="NEXT")
-    pdf.set_text_color(*BLACK)
-    pdf.ln(3)
+        view.para(text, size=size, style=style)
 
     results = data.get("results") or {}
     sorted_issues = data.get("sorted_issues") or []
@@ -122,10 +622,8 @@ def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
     if health:
         heading("Summary")
         label = health.get("label", "Unknown")
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(*_health_color(health))
-        pdf.cell(0, 8, _s(f"Health: {label}"), new_x="LMARGIN", new_y="NEXT")
-        pdf.set_text_color(*BLACK)
+        line(f"Health: {label}", size=12, style="B",
+             color=_health_color(health))
         if data.get("first_seen") and data.get("last_seen"):
             line(f"Window: {data['first_seen']} to {data['last_seen']}", size=10)
         if data.get("elapsed"):
@@ -223,12 +721,12 @@ def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
             pdf.set_y(top + chart_h + 1)
             # Legend
             lx = x0
-            pdf.set_font("Helvetica", "", 9)
+            view.font("", 9)
             for _key, color, label in segments:
                 pdf.set_fill_color(*color)
                 pdf.rect(lx, pdf.get_y() + 1, 3, 3, style="F")
                 pdf.set_xy(lx + 4, pdf.get_y())
-                pdf.cell(18, 5, label)
+                pdf.cell(18, 5, view._t(label))
                 lx += 24
             pdf.set_y(pdf.get_y() + 6)
             line(f"Totals: {sum(b.get('critical', 0) or 0 for b in timeline)} critical, "
@@ -268,25 +766,21 @@ def generate_report_pdf(manifest_json: str, filename: str = "report") -> bytes:
         para(f"{results['malformed_lines']} lines could not be parsed and were "
              f"excluded.", style="I")
 
-    # Footer
-    pdf.ln(5)
-    pdf.set_font("Helvetica", "I", 9)
-    pdf.set_text_color(*GRAY)
-    pdf.cell(0, 8, "Generated by StackSift (stacksift.goodfolkdigital.com)",
-             new_x="LMARGIN", new_y="NEXT", align="C")
 
     buf = BytesIO()
     pdf.output(buf)
     return buf.getvalue()
 
 
-def generate_deep_dive_pdf(manifest_json: str, filename: str = "report") -> bytes:
+def generate_deep_dive_pdf(manifest_json: str, filename: str = "report",
+                           branding: dict | None = None) -> bytes:
     """PDF for an Analysis Report (issue #106 Stage 2).
 
     Renders ONLY the artifact's public projection (plain-language
     claims, excerpts, limitations) — no internal evidence refs,
     digests, scores or labels. Export charging is the caller's #129
     per-report unlock; there is no separate Analysis PDF price.
+    Issue #160: shares the designed layer with the standard report.
     """
     from fpdf import FPDF
 
@@ -300,57 +794,46 @@ def generate_deep_dive_pdf(manifest_json: str, filename: str = "report") -> byte
         data = {}
     projection = _dd.public_projection(_dd.validate_artifact(data))
 
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=20)
+    view = _DesignedPDF(title="StackSift Analysis Report",
+                        filename=filename, branding=branding)
+    pdf = view
     pdf.add_page()
+    view.header_block()
 
-    def heading(text):
-        pdf.ln(4)
-        pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.set_text_color(*NAVY)
-        pdf.multi_cell(0, 8, _s(text))
-        pdf.set_text_color(*BLACK)
-
-    def para(text, size=10, style=""):
-        pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", style, size)
-        pdf.multi_cell(0, 6, _s(text))
-        pdf.ln(1)
-
-    pdf.set_font("Helvetica", "B", 20)
-    pdf.set_text_color(*NAVY)
-    pdf.cell(0, 12, "StackSift Analysis Report", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(*GRAY)
-    pdf.cell(0, 8, _s(f"File: {filename}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 8, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-             new_x="LMARGIN", new_y="NEXT")
-    pdf.set_text_color(*BLACK)
-    para(projection.get("summary") or "")
+    # (a) summary as a distinct panel, then (b) the #162 Brief slot,
+    # then (c) one structured section per group (decision 5 order).
+    view.section_heading("Summary")
+    view.summary_panel(projection.get("summary") or "")
+    render_brief_slot(view, projection)
 
     for group in projection.get("groups") or []:
-        heading(f"[{group.get('level')}] {group.get('template')} "
-                f"x {group.get('count')}")
-        for section, key in (
+        view.group_heading(group.get("level"), group.get("template"),
+                           group.get("count"))
+        for label, key in (
                 ("What was observed", "observations"),
                 ("Explanation", "explanations"),
                 ("What this may mean", "possible_causes"),
                 ("Suggested first checks", "first_checks")):
-            for text in group.get(key) or []:
-                para(f"{section}: {text}")
-        for excerpt in group.get("excerpts") or []:
-            para(f"Evidence (analysis line "
-                 f"{excerpt.get('analysis_line_number')}): "
-                 f"{excerpt.get('text')}", size=9, style="I")
-        for limit in group.get("limitations") or []:
-            para(f"Limit: {limit}", size=9)
+            items = group.get(key) or []
+            if not items:
+                continue  # empty subsections are omitted
+            view.subhead(label)
+            for text in items:
+                view.para(text)
+        excerpts = group.get("excerpts") or []
+        if excerpts:
+            view.subhead("Evidence")
+            for excerpt in excerpts:
+                view.evidence_block(
+                    f"analysis line {excerpt.get('analysis_line_number')}",
+                    excerpt.get("text") or "",
+                    truncated=bool(excerpt.get("text_truncated")))
+        limitations = group.get("limitations") or []
+        if limitations:
+            view.subhead("Limitations")
+            for limit in limitations:
+                view.limitation_note(limit)
 
-    pdf.ln(5)
-    pdf.set_font("Helvetica", "I", 9)
-    pdf.set_text_color(*GRAY)
-    pdf.cell(0, 8, "Generated by StackSift (stacksift.goodfolkdigital.com)",
-             new_x="LMARGIN", new_y="NEXT", align="C")
 
     buf = BytesIO()
     pdf.output(buf)
