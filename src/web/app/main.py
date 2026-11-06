@@ -3162,6 +3162,14 @@ async def report_export_structured(request: Request, result_id: str, export_form
     if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
 
+    # Issue #156: premium intent at the same attempt point as the PDF
+    # route (Codex P2, PR #157: a CSV/JSON first export performs the
+    # same paid per-report unlock, so the attempt must record
+    # identically or the funnel depends on the chosen format).
+    # Observe-only, best-effort; counts whether or not credits suffice.
+    from app import d2_attribution as _d2
+    _d2.emit_premium_intent(request, user.id, "export_unlock")
+
     # Validate ALL source prerequisites BEFORE reservation (spec §5),
     # including integrity via result_payload (owner/origin/expiry/digest).
     try:

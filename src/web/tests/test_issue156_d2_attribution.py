@@ -260,6 +260,13 @@ def test_pricing_page_carries_offer_viewed_beacon(route_env):
     assert 'querySelectorAll(".pack")' in resp.text
     assert "observer.observe(card)" in resp.text
     assert "observer.observe(packs)" not in resp.text
+    # Codex P2 remediation round 2 (PR #157): the >=1s continuous
+    # visibility interval is tracked PER CARD (_d2timer on the card
+    # element). A shared timer/counter would keep running while any
+    # card qualifies, firing the beacon although no single card was
+    # >=50% visible continuously for 1s.
+    assert "_d2timer" in resp.text
+    assert "qualifying" not in resp.text
 
 
 # --- group 10 (cookie half): attribution caps ---------------------------------
@@ -642,6 +649,54 @@ def test_premium_intent_export_insufficient_balance_402(route_env):
     assert _counts(route_env, user_id) == before
 
 
+def test_premium_intent_structured_export_and_observe_only(route_env):
+    # Codex P2 (PR #157 round 2): CSV/JSON first exports perform the
+    # same paid per-report unlock as PDF, so they must record the
+    # same premium_intent — otherwise the funnel depends on format.
+    from test_structured_export_e2e import _setup
+
+    _, user_id, rid, csrf = _setup(route_env)
+    before_balance = _balance(route_env, user_id)
+    resp = route_env.client.post(
+        f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
+    assert resp.status_code == 200, resp.text[:300]
+    rows = _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
+    assert len(rows) == 1 and rows[0].meta["kind"] == "export_unlock"
+    # Observe-only: the export's own ruled charge is the ONLY change.
+    assert _balance(route_env, user_id) == before_balance - 2
+    ledger1, purchases1, ops1 = _counts(route_env, user_id)
+    assert purchases1 == 0
+    # Second format of the unlocked report: free, no new money rows —
+    # but premium_intent still records.
+    resp2 = route_env.client.post(
+        f"/reports/{rid}/exports/json", data={"csrf_token": csrf})
+    assert resp2.status_code == 200, resp2.text[:300]
+    assert _balance(route_env, user_id) == before_balance - 2
+    assert _counts(route_env, user_id) == (ledger1, purchases1, ops1)
+    rows = _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
+    assert len(rows) == 2
+
+
+def test_premium_intent_structured_export_insufficient_balance_402(route_env):
+    from test_structured_export_e2e import _drain_signup, _setup
+
+    _, user_id, rid, csrf = _setup(route_env, extra_credits=0)
+    _drain_signup(route_env, user_id, 10)
+    assert _balance(route_env, user_id) == 0
+    before = _counts(route_env, user_id)
+    resp = route_env.client.post(
+        f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
+    assert resp.status_code == 402, resp.text[:300]
+    rows = _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
+    assert len(rows) == 1 and rows[0].meta["kind"] == "export_unlock"
+    # Observe-only on the blocked attempt: nothing charged or reserved.
+    assert _balance(route_env, user_id) == 0
+    assert _counts(route_env, user_id) == before
+
+
 def test_premium_intent_analysis_report_success_and_402(route_env):
     from test_deep_dive_paid import _custom_result, _eligible_payload
     from test_structured_export_e2e import (
@@ -799,6 +854,47 @@ def test_d2_summary_dedup_and_buyers(db, user):
         "checkout_start": 2, "export_unlock": 1}
     assert report["buyers_total"] == 2
     assert report["buyers_from_exposed"] == 1
+
+
+def test_d2_summary_authenticated_identity_wins_over_visitor_link(db, user):
+    # Codex P2 (PR #157 round 2): two accounts share one browser.
+    # The visitor is linked to `user` (first account); the second
+    # account's events carry their own authenticated user_id alongside
+    # the same anon_id. Those events are the SECOND account's — they
+    # must not collapse into the first account's uniques, and must not
+    # qualify the first account's purchase as exposed.
+    other = _make_user(db)
+    v = str(uuid.uuid4())
+    assert d2.link_visitor(db, v, user)
+    db.commit()
+    funnel.record(db, funnel.OFFER_VIEWED, user_id=other, anon_id=v)
+    funnel.record(db, funnel.PREMIUM_INTENT, user_id=other, anon_id=v,
+                  meta={"kind": "export_unlock"})
+    funnel.record(db, funnel.OFFER_VIEWED, anon_id=v)  # anonymous: link applies
+    db.commit()
+    for row in db.query(models.FunnelEvent).all():
+        row.occurred_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    db.commit()
+    _purchase(db, user, "completed")
+
+    report = d2.d2_summary(db, days=30)
+    # Uniques: the anonymous event keys to `user` via the link; the
+    # authenticated event keys to `other` — two distinct people.
+    assert report["offer_viewed"] == {"total": 2, "uniques": 2}
+    assert report["premium_intent"]["uniques"] == 1
+    # Exposure: only the anonymous/linked view can qualify `user`;
+    # delete it in a second pass below would change this — here the
+    # anonymous view DOES qualify, so exposed == 1 via the anon event.
+    assert report["buyers_from_exposed"] == 1
+    # Remove the anonymous view: now only `other`'s authenticated view
+    # remains on this visitor, and it must NOT expose `user`.
+    db.query(models.FunnelEvent).filter(
+        models.FunnelEvent.event == funnel.OFFER_VIEWED,
+        models.FunnelEvent.user_id.is_(None)).delete()
+    db.commit()
+    report = d2.d2_summary(db, days=30)
+    assert report["offer_viewed"] == {"total": 1, "uniques": 1}
+    assert report["buyers_from_exposed"] == 0
 
 
 def test_d2_summary_view_after_purchase_is_not_exposure(db, user):

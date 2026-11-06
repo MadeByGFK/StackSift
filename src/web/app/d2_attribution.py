@@ -215,13 +215,15 @@ def emit_analysis_run(request, user_id, anon_id, kind: str) -> None:
 # --- report --------------------------------------------------------------------
 
 def _identity_key(event, links: dict):
-    """Dedup key for one funnel event: linked user wins, then the
-    event's own user_id, then the bare anon_id."""
+    """Dedup key for one funnel event: the event's own authenticated
+    user_id wins when present; the visitor link applies only to
+    anonymous events (Codex P2, PR #157: two accounts sharing one
+    browser must not collapse into the link's first account)."""
+    if event.user_id is not None:
+        return ("user", str(event.user_id))
     anon_id = event.anon_id
     if anon_id and anon_id in links:
         return ("user", str(links[anon_id]))
-    if event.user_id is not None:
-        return ("user", str(event.user_id))
     if anon_id:
         return ("anon", anon_id)
     return None
@@ -289,7 +291,12 @@ def d2_summary(db, days: int = 30) -> dict:
             db.query(models.FunnelEvent.id)
             .filter(models.FunnelEvent.event == funnel.OFFER_VIEWED,
                     models.FunnelEvent.anon_id.in_(visitor_ids),
-                    models.FunnelEvent.occurred_at <= completed_at)
+                    models.FunnelEvent.occurred_at <= completed_at,
+                    # An offer_viewed recorded under a DIFFERENT
+                    # authenticated account on the same browser is not
+                    # this buyer's exposure (Codex P2, PR #157).
+                    (models.FunnelEvent.user_id.is_(None))
+                    | (models.FunnelEvent.user_id == purchase.user_id))
             .first()
         )
         if viewed is not None:

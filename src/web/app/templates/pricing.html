@@ -281,8 +281,6 @@
   var cards = packs.querySelectorAll(".pack");
   if (!cards.length) return;
   var fired = false;
-  var timer = null;
-  var qualifying = 0;
   function fire() {
     if (fired) return;
     fired = true;
@@ -294,19 +292,28 @@
         headers: {"Content-Type": "application/json"}, body: body}).catch(function () {});
     }
   }
+  /* Per-card continuous-visibility timers (Codex P2, PR #157
+     remediation round 2): a shared timer would keep running while
+     ANY card qualifies, so scrolling from card A to card B could
+     fire the beacon although neither card was individually >=50%
+     visible for a continuous 1s. Each card carries its own timer
+     (_d2timer), started when THAT card reaches >=0.5 and cleared
+     when it drops below; the once-per-page guard is `fired`. */
   var observer = new IntersectionObserver(function (entries) {
     entries.forEach(function (entry) {
-      var was = entry.target._d2qualifying === true;
+      var card = entry.target;
       var is = entry.intersectionRatio >= 0.5;
-      if (is === was) return;
-      entry.target._d2qualifying = is;
-      qualifying += is ? 1 : -1;
-      if (qualifying > 0) {
-        if (timer === null) {
-          timer = setTimeout(function () { observer.disconnect(); fire(); }, 1000);
+      if (is) {
+        if (!fired && card._d2timer == null) {
+          card._d2timer = setTimeout(function () {
+            card._d2timer = null;
+            observer.disconnect();
+            fire();
+          }, 1000);
         }
-      } else if (timer !== null) {
-        clearTimeout(timer); timer = null;
+      } else if (card._d2timer != null) {
+        clearTimeout(card._d2timer);
+        card._d2timer = null;
       }
     });
   }, {threshold: [0, 0.5, 1]});
