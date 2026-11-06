@@ -97,7 +97,7 @@
       <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
           {% if analysis_eligible %}
-          <p id="analysis-msg" style="margin:0 0 12px">Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.</p>
+          <p id="analysis-msg" style="margin:0 0 12px">Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.{% if analysis_prior_exists %} A previous Analysis Report exists for this report. Generating a new Analysis Report is a new {{ analysis_report_cost }}-credit purchase.{% endif %}</p>
           <div id="analysis-link-row" style="display:none;margin-bottom:12px">
             <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
           </div>

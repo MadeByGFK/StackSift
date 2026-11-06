@@ -108,10 +108,62 @@
     {% endif %}
   </section>
 
-  {# #162 Brief slot #}
+{# #162 Brief slot #}
   {# Issue #162: the Investigation Brief renders here — a front section
-     ahead of the per-group appendix, after the summary panel. #160 only
-     reserves the slot; #162 fills it without restructuring this page. #}
+     ahead of the per-group appendix, after the summary panel, in the
+     #160 design language. Renders only from the public projection; a
+     legacy artifact with no brief key renders no brief section. #}
+  {% if analysis_projection.brief %}
+  <div class="card group-card" style="margin-top:16px">
+    <h3 class="section-title" style="margin-top:0">Investigation Brief</h3>
+    {% for sentence in analysis_projection.brief.summary %}<p>{{ sentence }}</p>{% endfor %}
+    {% if analysis_projection.brief.lead %}
+    <p><strong>Investigation lead:</strong> {{ analysis_projection.brief.lead.template }} <span style="color:var(--muted);font-weight:400">× {{ analysis_projection.brief.lead.count }}</span></p>
+    {% if analysis_projection.brief.lead.symptom %}<p>{{ analysis_projection.brief.lead.symptom }}</p>{% endif %}
+    {% if analysis_projection.brief.lead.cause %}
+    <h4 class="subsection-title">What this may mean</h4>
+    <p>{{ analysis_projection.brief.lead.cause }}</p>
+    {% endif %}
+    {% if analysis_projection.brief.lead.excerpts %}
+    <h4 class="subsection-title">Evidence</h4>
+    {% for excerpt in analysis_projection.brief.lead.excerpts %}
+    <div class="evidence-block" style="background:var(--panel);border-left:3px solid var(--accent);border-radius:6px;padding:8px 10px;margin:6px 0">
+      <div class="evidence-ref" style="color:var(--muted);font-size:12px">analysis line {{ excerpt.analysis_line_number }}</div>
+      <pre class="evidence-text" style="font-family:var(--font-code);white-space:pre-wrap;word-break:break-word;margin:4px 0 0"><code>{{ excerpt.text }}</code></pre>
+    </div>
+    {% endfor %}
+    {% endif %}
+    {% if analysis_projection.brief.lead.limitations %}
+    <h4 class="subsection-title">Limitations</h4>
+    <div class="limitations-note" style="border-left:3px solid var(--muted);padding:2px 10px">
+    {% for limit in analysis_projection.brief.lead.limitations %}<p style="color:var(--muted)">{{ limit }}</p>{% endfor %}
+    </div>
+    {% endif %}
+    {% endif %}
+    {% if analysis_projection.brief.why_first %}
+    {% if analysis_projection.brief.why_first.statement %}<p>{{ analysis_projection.brief.why_first.statement }}</p>{% endif %}
+    {% if analysis_projection.brief.why_first.facts %}<p>{{ analysis_projection.brief.why_first.facts }}</p>{% endif %}
+    {% if analysis_projection.brief.why_first.limitation %}<p style="color:var(--muted)">{{ analysis_projection.brief.why_first.limitation }}</p>{% endif %}
+    {% endif %}
+    {% if analysis_projection.brief.sequence %}
+    <h4 class="subsection-title">Observed sequence</h4>
+    {% if analysis_projection.brief.sequence.caption %}<p style="color:var(--muted)">{{ analysis_projection.brief.sequence.caption }}</p>{% endif %}
+    {% for entry in analysis_projection.brief.sequence.entries %}
+    <p>{{ entry.first_seen }}{% if entry.last_seen and entry.last_seen != entry.first_seen %} – {{ entry.last_seen }}{% endif %}: {{ entry.template }}</p>
+    {% endfor %}
+    {% endif %}
+    {% if analysis_projection.brief.priority_checks %}
+    <h4 class="subsection-title">Priority checks</h4>
+    {% for check in analysis_projection.brief.priority_checks %}
+    <p>{{ check.text }}</p>
+    <p style="color:var(--muted)">{{ check.motivation }}</p>
+    <p style="color:var(--muted)">{{ check.support }}</p>
+    <p style="color:var(--muted)">{{ check.weaken }}</p>
+    {% endfor %}
+    {% endif %}
+    {% for limit in analysis_projection.brief.limitations %}<p style="color:var(--muted)">{{ limit }}</p>{% endfor %}
+  </div>
+  {% endif %}
 
   {% for group in analysis_projection.groups %}
   <div class="card group-card" style="margin-top:16px">

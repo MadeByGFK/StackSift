@@ -560,14 +560,66 @@ class _DesignedPDF(FPDF):
 
 
 def render_brief_slot(pdf_view, projection):
-    """Issue #162 seam: the Investigation Brief is a front section
-    ahead of the per-group appendix. Renders nothing while the
-    projection carries no brief data; #162 fills content here without
-    restructuring the renderer."""
-    # Pure no-op seam (decision 7): #160 renders nothing here even if
-    # a future projection carries brief data — #162 owns the Brief's
-    # structured rendering and fills this seam without restructuring.
-    _brief = (projection or {}).get("brief")  # noqa: F841 — seam only
+    """Issue #162: the Investigation Brief front section, rendered
+    here in the seam #160 reserved (decision 7) — directly from
+    public_projection()["brief"] with the designed renderer's own
+    methods (Amendment A1 / P1-2: projection_text_lines() has no
+    caller in the PDF path). A legacy artifact with no brief key
+    projects brief=None and renders no brief section."""
+    brief = (projection or {}).get("brief")
+    if not brief:
+        return None
+    view = pdf_view
+    view.section_heading("Investigation Brief")
+    for sentence in brief.get("summary") or []:
+        view.para(sentence)
+    lead = brief.get("lead")
+    if lead:
+        view.subhead(f"Investigation lead: {lead.get('template')} "
+                     f"x {lead.get('count')}")
+        if lead.get("symptom"):
+            view.para(f"Explanation: {lead['symptom']}")
+        if lead.get("cause"):
+            view.para(f"What this may mean: {lead['cause']}")
+        for excerpt in lead.get("excerpts") or []:
+            view.evidence_block(
+                f"analysis line {excerpt.get('analysis_line_number')}",
+                excerpt.get("text") or "",
+                truncated=bool(excerpt.get("text_truncated")))
+        for limit in lead.get("limitations") or []:
+            view.limitation_note(limit)
+    why = brief.get("why_first")
+    if why:
+        if why.get("statement"):
+            view.para(why["statement"])
+        if why.get("facts"):
+            view.para(why["facts"])
+        if why.get("limitation"):
+            view.limitation_note(why["limitation"])
+    sequence = brief.get("sequence")
+    if sequence:
+        view.subhead("Observed sequence")
+        if sequence.get("caption"):
+            view.para(sequence["caption"], style="I")
+        for entry in sequence.get("entries") or []:
+            span = entry.get("first_seen") or ""
+            if entry.get("last_seen") and \
+                    entry.get("last_seen") != entry.get("first_seen"):
+                span = f"{span} - {entry['last_seen']}"
+            view.para(f"{span}: {entry.get('template')}")
+    checks = brief.get("priority_checks") or []
+    if checks:
+        view.subhead("Priority checks")
+        for check in checks:
+            view.para(f"Check: {check.get('text')}")
+            if check.get("motivation"):
+                view.para(f"Motivation: {check['motivation']}", size=9)
+            if check.get("support"):
+                view.para(check["support"], size=9)
+            if check.get("weaken"):
+                view.para(check["weaken"], size=9)
+    for limit in brief.get("limitations") or []:
+        view.limitation_note(limit)
     return None
 
 
