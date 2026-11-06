@@ -2799,6 +2799,27 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         _done_id = credits_helpers.completed_analysis_result_id(
             db, _user.id, result.id)
         data["analysis_result_id"] = str(_done_id) if _done_id else None
+        # Issue #162 (Amendment A1 / P2-6): version-aware discovery.
+        # A completed artifact from an OLDER generator version still
+        # serves free on its own GET view, but it must not make a new
+        # Brief-bearing purchase unreachable: when the completed
+        # artifact's generator version differs from the current one,
+        # the source page offers the purchase popup again (stating it
+        # is a new purchase) instead of only linking the old artifact.
+        data["analysis_prior_exists"] = False
+        if _done_id is not None:
+            _prior_row = db.get(models.Result, _done_id)
+            _prior_version = None
+            if _prior_row is not None:
+                try:
+                    _prior_version = json.loads(
+                        _prior_row.storage_manifest or "{}").get(
+                            "generator_version")
+                except (ValueError, TypeError, AttributeError):
+                    _prior_version = None
+            if _prior_version != _dd_page.GENERATOR_VERSION:
+                data["analysis_prior_exists"] = True
+                data["analysis_result_id"] = None
     # Older manifests predate the elapsed field; the template requires it.
     data.setdefault("elapsed", 0.0)
     if result.type == "comparison":

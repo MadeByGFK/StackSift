@@ -27,7 +27,7 @@ import time
 # Internal identifiers (never user-facing copy).
 REPORT_KIND = "deep_dive"
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "106-stage2-v1"
+GENERATOR_VERSION = "162-brief-v1"
 
 # Generation bounds (spec: adjustable policy, enforced before charge
 # where possible and again at generation). Aligned with Stage 1's
@@ -46,6 +46,30 @@ LEGACY_MESSAGE = (
 )
 
 ABSTENTION = "The retained evidence does not establish the cause."
+
+# Issue #162: Investigation Brief constants. Every generated sentence
+# in the brief is either one of these constants or is assembled in
+# _build_brief from the sentence->source-field map in the #162 spec
+# (as amended by Amendment A1); no other generated sentence is
+# permitted.
+BRIEF_SEQUENCE_CAPTION = (
+    "Observed order in the log. This sequence shows what was "
+    "recorded first, next, and last \u2014 it does not show that any "
+    "event caused another.")
+BRIEF_NOT_ESTABLISHED = (
+    "This brief orders and summarizes what the log records. It does "
+    "not establish the root cause of any event, and it does not "
+    "establish that one recorded event caused another.")
+BRIEF_WHY_LIMITATION = (
+    "The brief does not re-rank findings; the ordering follows the "
+    "free report's ranking, whose internal scoring is not part of "
+    "this report.")
+BRIEF_NO_SEQUENCE_LIMITATION = (
+    "Timestamps were not recorded for these messages, so no observed "
+    "sequence can be shown.")
+BRIEF_NO_TIMESTAMPS_LIMITATION = (
+    "Some groups have no recorded timestamp, so they do not appear "
+    "in the observed sequence.")
 
 UNSUPPORTED_KINDS = ("comparison", "batch", "deep_dive")
 
@@ -366,6 +390,338 @@ def _group_projection(template, group, evidence_group):
     }
 
 
+def _claim_text(claims):
+    """First claim's text from an internal claim list, or None.
+
+    Internal group projections carry claims as {"text",
+    "evidence_refs"} dicts (Amendment A1 / P1-1): the brief extracts
+    .text explicitly and never copies a claim element verbatim.
+    """
+    if isinstance(claims, list) and claims:
+        first = claims[0]
+        if isinstance(first, dict) and isinstance(first.get("text"), str):
+            return first["text"]
+    return None
+
+
+def _minute_key(first_seen):
+    """Full-timestamp minute bucket (date + minute), or None.
+
+    Amendment A1 / P2-4(c): same-minute comparisons use the full
+    timestamp truncated to the minute, never clock minute across
+    dates. Works for ISO strings ("2026-10-11T08:31:52.000Z" ->
+    "2026-10-11T08:31") and "YYYY-MM-DD HH:MM:SS" shapes alike.
+    """
+    if not isinstance(first_seen, str) or len(first_seen) < 16:
+        return None
+    return first_seen[:16]
+
+
+def _build_brief(payload, groups, coverage, *, started, clock,
+                 deadline_seconds):
+    """Issue #162: assemble the Investigation Brief.
+
+    A projection over (a) the payload's retained free-synthesis
+    fields and (b) the INTERNAL group projections built in this same
+    run. Claim dicts are unwrapped via _claim_text; severity
+    distribution comes from the coverage map; diagnostic_explanation
+    strings are never rendered, quoted or paraphrased.
+    """
+    def _check_deadline():
+        if clock() - started > deadline_seconds:
+            raise AnalysisError("generation deadline exceeded")
+
+    _check_deadline()
+    if not isinstance(payload, dict):
+        payload = {}
+
+    # --- lead (decision 2): payload["diagnostic_issue"][0] ---------
+    lead_template = None
+    diagnostic_issue = payload.get("diagnostic_issue")
+    if isinstance(diagnostic_issue, (list, tuple)) and diagnostic_issue:
+        candidate = diagnostic_issue[0]
+        if isinstance(candidate, str) and candidate:
+            lead_template = candidate
+    lead_group = None
+    if lead_template is not None:
+        for group in groups:
+            if group.get("template") == lead_template:
+                lead_group = group
+                break
+    lead_coverage = {}
+    if lead_template is not None and isinstance(coverage, dict):
+        entry = coverage.get(lead_template)
+        if isinstance(entry, dict):
+            lead_coverage = entry
+    lead_level_counts = {}
+    raw_counts = lead_coverage.get("level_counts")
+    if isinstance(raw_counts, dict):
+        for lvl, n in raw_counts.items():
+            if isinstance(n, int):
+                lead_level_counts[str(lvl)] = n
+
+    limitations = []
+
+    lead = None
+    if lead_group is not None:
+        lead = {
+            "template": lead_template,
+            "count": lead_group.get("count") or 0,
+            "level": lead_group.get("level") or "",
+            "level_counts": lead_level_counts,
+            "services": [str(s) for s in lead_group.get("services") or []],
+            "first_seen": lead_group.get("first_seen"),
+            "last_seen": lead_group.get("last_seen"),
+            "symptom": _claim_text(lead_group.get("explanations")),
+            "cause": _claim_text(lead_group.get("possible_causes")),
+            "excerpts": [
+                {
+                    "analysis_line_number": e.get("analysis_line_number"),
+                    "text": e.get("text") or "",
+                    "timestamp": e.get("timestamp"),
+                    "service": e.get("service"),
+                    "level": e.get("level"),
+                    "text_truncated": bool(e.get("text_truncated")),
+                }
+                for e in (lead_group.get("excerpts") or [])[:2]
+            ],
+            "limitations": list(lead_group.get("limitations") or []),
+        }
+
+    # --- why-first (decision 3, as amended by A1/P2-5) --------------
+    why_first = None
+    if lead is not None:
+        dist = ", ".join(
+            f"{lvl}: {n}" for lvl, n in sorted(lead_level_counts.items()))
+        facts = (
+            f"Recorded facts for this group: {lead['count']} "
+            f"occurrence(s); peak severity {lead['level'] or 'not recorded'}"
+            + (f"; severity distribution {dist}" if dist else "")
+            + (f"; first recorded at {lead['first_seen']}"
+               if lead["first_seen"] else "")
+            + (f"; last recorded at {lead['last_seen']}"
+               if lead["last_seen"] else "")
+            + ".")
+        why_first = {
+            "statement": (
+                "This group is the same \"investigate first\" leader "
+                "the free diagnostic ranking puts first for this file."),
+            "facts": facts,
+            "count": lead["count"],
+            "level": lead["level"],
+            "level_counts": dict(lead_level_counts),
+            "first_seen": lead["first_seen"],
+            "last_seen": lead["last_seen"],
+            "limitation": BRIEF_WHY_LIMITATION,
+        }
+
+    _check_deadline()
+
+    # --- observed sequence (decision 4) -----------------------------
+    sequence = None
+    timed = [(idx, g) for idx, g in enumerate(groups) if g.get("first_seen")]
+    if timed:
+        if len(timed) < len(groups):
+            limitations.append(BRIEF_NO_TIMESTAMPS_LIMITATION)
+        ordered_timed = sorted(
+            timed, key=lambda pair: (pair[1]["first_seen"], pair[0]))
+        selected = []
+        seen_templates = set()
+        # Lead first (wherever it falls), then earliest others.
+        if lead_group is not None and lead_group.get("first_seen"):
+            selected.append(lead_group)
+            seen_templates.add(lead_group.get("template"))
+        for _idx, group in ordered_timed:
+            if len(selected) >= 8:
+                break
+            if group.get("template") in seen_templates:
+                continue
+            selected.append(group)
+            seen_templates.add(group.get("template"))
+        selected.sort(key=lambda g: (
+            g.get("first_seen") or "",
+            next(i for i, x in enumerate(groups) if x is g)))
+        sequence = {
+            "caption": BRIEF_SEQUENCE_CAPTION,
+            "entries": [
+                {
+                    "template": g.get("template"),
+                    "first_seen": g.get("first_seen"),
+                    "last_seen": g.get("last_seen"),
+                }
+                for g in selected
+            ],
+        }
+    else:
+        limitations.append(BRIEF_NO_SEQUENCE_LIMITATION)
+
+    _check_deadline()
+
+    # --- priority checks (decision 5, as amended by A1/P2-4/P2-8) ---
+    # Indexed lookups built in one pass: service -> groups and
+    # minute-bucket -> groups. No all-pairs scan.
+    service_index = {}
+    minute_index = {}
+    for group in groups:
+        for svc in group.get("services") or []:
+            service_index.setdefault(str(svc), []).append(group)
+        minute = _minute_key(group.get("first_seen"))
+        if minute:
+            minute_index.setdefault(minute, []).append(group)
+
+    def _motivation(group):
+        excerpts = group.get("excerpts") or []
+        if excerpts and isinstance(excerpts[0].get("text"), str) \
+                and excerpts[0].get("text"):
+            return excerpts[0]["text"]
+        if group.get("first_seen"):
+            text = f"First recorded at {group['first_seen']}"
+            services = group.get("services") or []
+            if services:
+                text += f" in service {services[0]}"
+            return text + "."
+        # A1/P2-4(a): no timestamp -> non-temporal factual fallback;
+        # a missing timestamp is never interpolated.
+        return (
+            f"Recorded {group.get('count') or 0} time(s) with peak "
+            f"severity {group.get('level') or 'not recorded'}.")
+
+    def _support(group):
+        if group.get("first_seen"):
+            return (
+                f"Support: a retained excerpt at or after "
+                f"{group['first_seen']} repeats this group's message. "
+                f"The retained excerpts are a sample; absence there "
+                f"does not count against this check.")
+        return (
+            "Support: a retained excerpt repeats this group's "
+            "message. The retained excerpts are a sample; absence "
+            "there does not count against this check.")
+
+    def _weaken(group):
+        if group.get("first_seen"):
+            return (
+                f"Weaken: no retained excerpt at or after "
+                f"{group['first_seen']} repeats this group's message. "
+                f"The retained excerpts are a sample; absence there "
+                f"does not count against this check.")
+        return (
+            "Weaken: no retained excerpt repeats this group's "
+            "message. The retained excerpts are a sample; absence "
+            "there does not count against this check.")
+
+    def _make_check(group, text):
+        return {
+            "template": group.get("template"),
+            "text": text,
+            "motivation": _motivation(group),
+            "support": _support(group),
+            "weaken": _weaken(group),
+        }
+
+    checks = []
+    seen_check_texts = set()
+
+    def _add_check(group, text, cap_for_group, added_for_group):
+        if not text or added_for_group >= cap_for_group:
+            return added_for_group
+        normalized = " ".join(str(text).split()).lower()
+        if normalized in seen_check_texts:
+            return added_for_group
+        seen_check_texts.add(normalized)
+        checks.append(_make_check(group, text))
+        return added_for_group + 1
+
+    findings = []
+    if lead_group is not None:
+        findings.append((lead_group, 3, True))
+    for group in groups:
+        if len(findings) >= 3:
+            break
+        if lead_group is not None and group is lead_group:
+            continue
+        findings.append((group, 2, False))
+
+    for group, cap, is_lead in findings:
+        added = 0
+        # Check A: the group's projected first check, verbatim text.
+        added = _add_check(
+            group, _claim_text(group.get("first_checks")), cap, added)
+        if is_lead:
+            # Check B: same-service, only the actual shared
+            # intersection (A1/P2-4(b)).
+            lead_services = [str(s) for s in group.get("services") or []]
+            if lead_services and group.get("first_seen"):
+                shared = sorted({
+                    svc for svc in lead_services
+                    for other in service_index.get(svc, [])
+                    if other is not group
+                })
+                if shared:
+                    added = _add_check(group, (
+                        f"Check the other messages recorded for "
+                        f"service(s) {', '.join(shared)} in this report "
+                        f"around {group['first_seen']}."), cap, added)
+            # Check C: same full-timestamp minute (A1/P2-4(c)).
+            minute = _minute_key(group.get("first_seen"))
+            if minute and any(
+                    other is not group
+                    for other in minute_index.get(minute, [])):
+                added = _add_check(group, (
+                    f"Check what else was first recorded at {minute} "
+                    f"alongside this group."), cap, added)
+
+    _check_deadline()
+
+    # --- opening summary (sentence -> source-field map) -------------
+    summary = []
+    filename = payload.get("filename")
+    first_seen = payload.get("first_seen")
+    last_seen = payload.get("last_seen")
+    if filename:
+        if first_seen and last_seen:
+            summary.append(
+                f"File {filename}: recorded from {first_seen} to "
+                f"{last_seen}.")
+        else:
+            summary.append(f"File {filename}.")
+    health = payload.get("health")
+    if isinstance(health, dict) and health.get("label"):
+        summary.append(
+            f"Overall, the recorded messages are labelled "
+            f"{health['label']}.")
+    results = payload.get("results")
+    parsed_lines = results.get("parsed_lines") if isinstance(results, dict) else None
+    if isinstance(parsed_lines, int):
+        total = sum(g.get("count") or 0 for g in groups)
+        summary.append(
+            f"{parsed_lines} lines were parsed, with {len(groups)} "
+            f"issue group(s) and {total} recorded occurrence(s).")
+    if lead is not None:
+        summary.append(
+            f"The investigation lead is \"{lead['template']}\" "
+            f"({lead['count']} occurrence(s)).")
+    elif lead_template is not None:
+        # Dangling diagnostic_issue: no group projection backs the
+        # named lead, so no lead is fabricated (A1 positive).
+        limitations.append(
+            "The free report's investigation lead has no matching "
+            "issue group in this report, so no lead is shown.")
+    if checks:
+        summary.append(f"Start with: {checks[0]['text']}")
+    summary.append(BRIEF_NOT_ESTABLISHED)
+
+    _check_deadline()
+    return {
+        "summary": summary,
+        "lead": lead,
+        "why_first": why_first,
+        "sequence": sequence,
+        "priority_checks": checks,
+        "limitations": limitations,
+    }
+
+
 def build_deep_dive(source_payload, *, source_result_id=None,
                     source_integrity_digest=None,
                     deadline_seconds=GENERATION_DEADLINE_SECONDS,
@@ -397,6 +753,13 @@ def build_deep_dive(source_payload, *, source_result_id=None,
     summary = (
         f"{len(groups)} issue group(s), {total} recorded occurrence(s) "
         f"explained from the retained evidence of the source report.")
+    if clock() - started > deadline_seconds:
+        raise AnalysisError("generation deadline exceeded")
+    brief = _build_brief(
+        source_payload, groups, coverage, started=started, clock=clock,
+        deadline_seconds=deadline_seconds)
+    if clock() - started > deadline_seconds:
+        raise AnalysisError("generation deadline exceeded")
     return {
         "report_kind": REPORT_KIND,
         "schema_version": SCHEMA_VERSION,
@@ -407,6 +770,7 @@ def build_deep_dive(source_payload, *, source_result_id=None,
         "generator_version": GENERATOR_VERSION,
         "filename": source_payload.get("filename"),
         "summary": summary,
+        "brief": brief,
         "groups": groups,
         "elapsed": round(clock() - started, 3),
     }
@@ -416,6 +780,102 @@ def build_deep_dive(source_payload, *, source_result_id=None,
 # Presentation projections — the ONLY shapes HTML/PDF/CSV/JSON may use.
 # Internal refs, digests and provenance internals never cross here.
 # ---------------------------------------------------------------------------
+
+def _public_brief(brief):
+    """Allowlisted Brief projection (Amendment A1 / P1-1).
+
+    Named fields only, strings only where strings belong: a stored
+    brief carrying nested claim dicts, evidence refs or digests
+    projects NONE of them. Returns None for a missing/malformed
+    brief (every pre-#162 artifact), which renderers treat as "no
+    brief section".
+    """
+    if not isinstance(brief, dict):
+        return None
+
+    def _strings(values):
+        return [v for v in values or [] if isinstance(v, str)]
+
+    def _counts(values):
+        if not isinstance(values, dict):
+            return {}
+        return {str(k): v for k, v in values.items() if isinstance(v, int)}
+
+    def _excerpt(excerpt):
+        if not isinstance(excerpt, dict):
+            return None
+        return {
+            "analysis_line_number": excerpt.get("analysis_line_number"),
+            "text": excerpt.get("text") if isinstance(excerpt.get("text"), str) else "",
+            "timestamp": excerpt.get("timestamp"),
+            "service": excerpt.get("service"),
+            "level": excerpt.get("level"),
+            "text_truncated": bool(excerpt.get("text_truncated")),
+        }
+
+    lead = None
+    raw_lead = brief.get("lead")
+    if isinstance(raw_lead, dict) and isinstance(raw_lead.get("template"), str):
+        lead = {
+            "template": raw_lead.get("template"),
+            "count": raw_lead.get("count") if isinstance(raw_lead.get("count"), int) else 0,
+            "level": raw_lead.get("level") if isinstance(raw_lead.get("level"), str) else "",
+            "level_counts": _counts(raw_lead.get("level_counts")),
+            "services": _strings(raw_lead.get("services")),
+            "first_seen": raw_lead.get("first_seen") if isinstance(raw_lead.get("first_seen"), str) else None,
+            "last_seen": raw_lead.get("last_seen") if isinstance(raw_lead.get("last_seen"), str) else None,
+            "symptom": raw_lead.get("symptom") if isinstance(raw_lead.get("symptom"), str) else None,
+            "cause": raw_lead.get("cause") if isinstance(raw_lead.get("cause"), str) else None,
+            "excerpts": [e for e in (_excerpt(x) for x in raw_lead.get("excerpts") or []) if e],
+            "limitations": _strings(raw_lead.get("limitations")),
+        }
+    why_first = None
+    raw_why = brief.get("why_first")
+    if isinstance(raw_why, dict):
+        why_first = {
+            "statement": raw_why.get("statement") if isinstance(raw_why.get("statement"), str) else None,
+            "facts": raw_why.get("facts") if isinstance(raw_why.get("facts"), str) else None,
+            "count": raw_why.get("count") if isinstance(raw_why.get("count"), int) else 0,
+            "level": raw_why.get("level") if isinstance(raw_why.get("level"), str) else "",
+            "level_counts": _counts(raw_why.get("level_counts")),
+            "first_seen": raw_why.get("first_seen") if isinstance(raw_why.get("first_seen"), str) else None,
+            "last_seen": raw_why.get("last_seen") if isinstance(raw_why.get("last_seen"), str) else None,
+            "limitation": raw_why.get("limitation") if isinstance(raw_why.get("limitation"), str) else None,
+        }
+    sequence = None
+    raw_sequence = brief.get("sequence")
+    if isinstance(raw_sequence, dict):
+        entries = []
+        for entry in raw_sequence.get("entries") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("template"), str):
+                entries.append({
+                    "template": entry.get("template"),
+                    "first_seen": entry.get("first_seen") if isinstance(entry.get("first_seen"), str) else None,
+                    "last_seen": entry.get("last_seen") if isinstance(entry.get("last_seen"), str) else None,
+                })
+        sequence = {
+            "caption": raw_sequence.get("caption") if isinstance(raw_sequence.get("caption"), str) else None,
+            "entries": entries,
+        }
+    checks = []
+    for check in brief.get("priority_checks") or []:
+        if isinstance(check, dict) and isinstance(check.get("text"), str):
+            checks.append({
+                "template": check.get("template") if isinstance(check.get("template"), str) else None,
+                "text": check.get("text"),
+                "motivation": check.get("motivation") if isinstance(check.get("motivation"), str) else "",
+                "support": check.get("support") if isinstance(check.get("support"), str) else "",
+                "weaken": check.get("weaken") if isinstance(check.get("weaken"), str) else "",
+            })
+    return {
+        "summary": _strings(brief.get("summary")),
+        "lead": lead,
+        "why_first": why_first,
+        "sequence": sequence,
+        "priority_checks": checks,
+        "limitations": _strings(brief.get("limitations")),
+    }
+
 
 def public_projection(artifact) -> dict:
     if not isinstance(artifact, dict) or artifact.get("report_kind") != REPORT_KIND:
@@ -452,6 +912,7 @@ def public_projection(artifact) -> dict:
         "schema_version": artifact.get("schema_version"),
         "filename": artifact.get("filename"),
         "summary": artifact.get("summary"),
+        "brief": _public_brief(artifact.get("brief")),
         "groups": groups,
         "elapsed": artifact.get("elapsed"),
     }
@@ -501,9 +962,77 @@ def projection_to_json(projection) -> bytes:
     return f"{text}\n".encode("utf-8")
 
 
+def brief_text_lines(brief) -> list[str]:
+    """Plain-text lines for an already-public Brief projection.
+
+    Used by projection_text_lines (the plain-text helper). The PDF
+    renderer does NOT use this helper — Amendment A1 / P1-2: it
+    renders the Brief directly from public_projection() inside
+    generate_deep_dive_pdf().
+    """
+    if not isinstance(brief, dict):
+        return []
+    lines = ["Investigation Brief"]
+    for sentence in brief.get("summary") or []:
+        lines.append(sentence)
+    lead = brief.get("lead")
+    if lead:
+        lines.append("")
+        lines.append(f"Investigation lead: {lead.get('template')} "
+                     f"x {lead.get('count')}")
+        if lead.get("symptom"):
+            lines.append(f"Explanation: {lead['symptom']}")
+        if lead.get("cause"):
+            lines.append(f"What this may mean: {lead['cause']}")
+        for excerpt in lead.get("excerpts") or []:
+            lines.append(f"Evidence (analysis line "
+                         f"{excerpt.get('analysis_line_number')}): "
+                         f"{excerpt.get('text')}")
+        for limit in lead.get("limitations") or []:
+            lines.append(f"Limit: {limit}")
+    why = brief.get("why_first")
+    if why:
+        if why.get("statement"):
+            lines.append(why["statement"])
+        if why.get("facts"):
+            lines.append(why["facts"])
+        if why.get("limitation"):
+            lines.append(why["limitation"])
+    sequence = brief.get("sequence")
+    if sequence:
+        lines.append("")
+        lines.append("Observed sequence")
+        if sequence.get("caption"):
+            lines.append(sequence["caption"])
+        for entry in sequence.get("entries") or []:
+            span = entry.get("first_seen") or ""
+            if entry.get("last_seen") and entry.get("last_seen") != entry.get("first_seen"):
+                span = f"{span} - {entry['last_seen']}"
+            lines.append(f"{span}: {entry.get('template')}")
+    checks = brief.get("priority_checks") or []
+    if checks:
+        lines.append("")
+        lines.append("Priority checks")
+        for check in checks:
+            lines.append(f"Check: {check.get('text')}")
+            if check.get("motivation"):
+                lines.append(f"Motivation: {check['motivation']}")
+            if check.get("support"):
+                lines.append(check["support"])
+            if check.get("weaken"):
+                lines.append(check["weaken"])
+    for limit in brief.get("limitations") or []:
+        lines.append(f"Limit: {limit}")
+    return lines
+
+
 def projection_text_lines(projection) -> list[str]:
     """Plain-language lines for the PDF renderer."""
     lines = [projection.get("summary") or ""]
+    brief_lines = brief_text_lines(projection.get("brief"))
+    if brief_lines:
+        lines.append("")
+        lines.extend(brief_lines)
     for group in projection.get("groups") or []:
         lines.append("")
         lines.append(f"[{group.get('level')}] {group.get('template')} "
