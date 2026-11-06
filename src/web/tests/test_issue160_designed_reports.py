@@ -653,7 +653,7 @@ def _page_runs(data: bytes):
                     raw, cmaps.get(name_to_font.get(font, 0), {}))
                 runs.append({"font": font_info.get(
                     name_to_font.get(font, 0), font or ""),
-                    "x": x, "y": y, "text": decoded})
+                    "x": x, "y": y, "text": decoded, "color": color})
             elif m.group(2):
                 font = m.group(2)
             elif m.group(3) is not None:
@@ -1030,3 +1030,32 @@ def test_a1_fonts_resolve_module_relative_from_any_cwd(tmp_path,
     monkeypatch.chdir(tmp_path)
     blob = generate_deep_dive_pdf(json.dumps(_artifact()), "sample.log")
     assert b"DMSans" in blob and b"IBMPlexMono" in blob
+
+
+# --- PR #165 Codex P2: truncated-analysis warning color -------------------
+
+
+def test_complexity_notice_keeps_warning_color():
+    # Codex P2 on PR #165 (head 8c25c524): generate_report_pdf sets the
+    # warning orange before the complexity notice, but the designed
+    # para() reset it to body ink, dropping the warning treatment that
+    # the pre-#160 renderer preserved. Fixture health is Healthy/green
+    # and there are no issues, so the ONLY orange text on the page is
+    # the notice itself.
+    manifest = json.dumps({
+        "filename": "truncated.log",
+        "results": {"total_lines": 10, "parsed_lines": 10,
+                    "malformed_lines": 0},
+        "health": {"label": "Healthy", "color": "green"},
+        "sorted_issues": [],
+        "complexity_truncated": True,
+        "complexity_notice": "Truncated analysis warning probe notice.",
+    })
+    blob = generate_report_pdf(manifest, "truncated.log")
+    runs = _all_runs(blob)
+    notice_runs = [r for r in runs
+                   if "Truncated analysis warning probe" in r["text"]
+                   or "probe notice" in r["text"]]
+    assert notice_runs, "complexity notice text not rendered"
+    assert all(r["color"] == (217, 119, 6) for r in notice_runs), \
+        [(r["text"], r["color"]) for r in notice_runs]

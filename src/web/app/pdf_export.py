@@ -396,12 +396,13 @@ class _DesignedPDF(FPDF):
                        new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(*self.tokens.ink)
 
-    def para(self, text, size=10, style=""):
+    def para(self, text, size=10, style="", color=None):
         pdf = self
         self.font(style, size)
-        pdf.set_text_color(*self.tokens.ink)
+        pdf.set_text_color(*(color or self.tokens.ink))
         pdf.multi_cell(0, 5.8, self._t(text), align="L",
                        new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(*self.tokens.ink)
         pdf.ln(1)
 
     def text_line(self, text, size=11, style="", height=7, color=None):
@@ -611,8 +612,8 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
         view.text_line(text, size=size, style=style, height=height,
                        color=color)
 
-    def para(text, size=10, style=""):
-        view.para(text, size=size, style=style)
+    def para(text, size=10, style="", color=None):
+        view.para(text, size=size, style=style, color=color)
 
     results = data.get("results") or {}
     sorted_issues = data.get("sorted_issues") or []
@@ -629,11 +630,11 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
         if data.get("elapsed"):
             line(f"Analysis time: {data['elapsed']:.2f}s", size=10)
 
-    # Complexity notice
+    # Complexity notice — warning orange, preserved through the
+    # designed para() via its explicit color argument (PR #165 Codex
+    # P2: the design layer previously reset every paragraph to ink).
     if data.get("complexity_truncated") and data.get("complexity_notice"):
-        pdf.set_text_color(217, 119, 6)
-        para(data["complexity_notice"], style="I")
-        pdf.set_text_color(*BLACK)
+        para(data["complexity_notice"], style="I", color=(217, 119, 6))
 
     # Statistics
     if results:
