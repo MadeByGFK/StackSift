@@ -253,6 +253,13 @@ def test_pricing_page_carries_offer_viewed_beacon(route_env):
     assert "offer_viewed" in resp.text
     assert "/events/d2" in resp.text
     assert "sendBeacon" in resp.text
+    # Codex P2 remediation (PR #157): the observer must watch the
+    # individual pack cards, not the #packs grid — at <=800px the grid
+    # stacks taller than the viewport, so its ratio can never reach
+    # 0.5 and offer_viewed would never fire on mobile.
+    assert 'querySelectorAll(".pack")' in resp.text
+    assert "observer.observe(card)" in resp.text
+    assert "observer.observe(packs)" not in resp.text
 
 
 # --- group 10 (cookie half): attribution caps ---------------------------------
@@ -414,6 +421,31 @@ def test_signup_with_cookie_creates_exactly_one_link(route_env):
         created = session.query(User).filter(
             User.email == "d2signup@example.com").one()
         assert str(links[0].user_id) == str(created.id)
+
+
+def test_signup_existing_unverified_account_does_not_link_visitor(route_env):
+    """Codex P2 remediation (PR #157): the existing-unverified signup
+    path never checks the submitted password against the stored hash,
+    so it must NOT merge the caller's visitor cookie — otherwise anyone
+    who knows an unverified account's email could permanently attach
+    their visitor history to it (first-merge-wins would also block the
+    real owner's later merge). Response behaviour is unchanged."""
+    # Owner signs up (no visitor cookie): creates an UNVERIFIED account.
+    resp = route_env.client.post(
+        "/auth/signup",
+        data={"email": "d2owner@example.com", "password": TEST_PASSWORD})
+    assert resp.status_code == 200, resp.text
+    assert _links(route_env) == []
+    # Attacker re-submits signup for the same email with THEIR visitor
+    # cookie and a different (never verified) password.
+    attacker_vid = str(uuid.uuid4())
+    _set_visitor(route_env.client, attacker_vid)
+    resp = route_env.client.post(
+        "/auth/signup",
+        data={"email": "d2owner@example.com",
+              "password": "An0ther!Passw0rd"})
+    assert resp.status_code == 200, resp.text  # generic response unchanged
+    assert _links(route_env) == []  # no link created for the attacker
 
 
 def test_login_remerge_idempotent(route_env):

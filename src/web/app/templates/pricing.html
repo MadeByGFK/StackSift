@@ -266,15 +266,23 @@
 {% include "nav_script.html" %}
 <script>
 /* Issue #156: offer_viewed beacon — fires exactly once per page view
-   when the credit-pack grid (#packs) has been at least 50% visible
-   continuously for at least 1 second. First-party only: a beacon to
-   our own /events/d2; the server reads attribution from the
+   when a credit-pack card has been at least 50% visible continuously
+   for at least 1 second. Individual cards are observed, NOT the
+   #packs grid (Codex P2, PR #157): at the <=800px breakpoint the grid
+   stacks vertically and is taller than the viewport, so the grid's
+   intersectionRatio could never reach 0.5 on mobile and offer_viewed
+   would never fire there. A single card (name + price + credits) at
+   >=50% for >=1s is the offer encounter. First-party only: a beacon
+   to our own /events/d2; the server reads attribution from the
    d2_attribution cookie, so the body carries no attribution data. */
 (function () {
   var packs = document.getElementById("packs");
   if (!packs || !("IntersectionObserver" in window)) return;
+  var cards = packs.querySelectorAll(".pack");
+  if (!cards.length) return;
   var fired = false;
   var timer = null;
+  var qualifying = 0;
   function fire() {
     if (fired) return;
     fired = true;
@@ -288,16 +296,21 @@
   }
   var observer = new IntersectionObserver(function (entries) {
     entries.forEach(function (entry) {
-      if (entry.intersectionRatio >= 0.5) {
+      var was = entry.target._d2qualifying === true;
+      var is = entry.intersectionRatio >= 0.5;
+      if (is === was) return;
+      entry.target._d2qualifying = is;
+      qualifying += is ? 1 : -1;
+      if (qualifying > 0) {
         if (timer === null) {
           timer = setTimeout(function () { observer.disconnect(); fire(); }, 1000);
         }
-      } else {
-        if (timer !== null) { clearTimeout(timer); timer = null; }
+      } else if (timer !== null) {
+        clearTimeout(timer); timer = null;
       }
     });
   }, {threshold: [0, 0.5, 1]});
-  observer.observe(packs);
+  cards.forEach(function (card) { observer.observe(card); });
 })();
 </script>
 </body>

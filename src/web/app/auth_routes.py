@@ -332,11 +332,13 @@ async def signup(
     # Hash for both existing and new addresses to remove the large timing split.
     password_hash = auth_helpers.hash_password(password)
     existing = db.query(User).filter(User.email == email_norm).first()
+    newly_created = False
     if not existing:
         try:
             existing = User(email=email_norm, email_verified=False, password_hash=password_hash)
             db.add(existing)
             db.flush()
+            newly_created = True
         except IntegrityError:
             # Race: another request created the user. Re-query for consistent handling.
             db.rollback()
@@ -361,8 +363,16 @@ async def signup(
                              expires_at=datetime.now(timezone.utc) + timedelta(hours=24)))
     background.add_task(email_helpers.send_verification_email, existing.email, token)
     db.commit()
-    # Issue #156: identity merge on signup (best-effort, after commit).
-    _link_d2_visitor(request, db, existing.id)
+    # Issue #156: identity merge on signup (best-effort, after commit) —
+    # NEWLY CREATED accounts only (Codex P2, PR #157). On the
+    # existing-unverified path the submitted password is never checked
+    # against the stored hash, so ownership is not established: linking
+    # there would let anyone attach their visitor history to someone
+    # else's account (first-merge-wins would also block the real owner's
+    # later merge). Existing accounts merge at login, where the password
+    # IS verified.
+    if newly_created:
+        _link_d2_visitor(request, db, existing.id)
     return JSONResponse({"message": GENERIC_SIGNUP})
 
 
