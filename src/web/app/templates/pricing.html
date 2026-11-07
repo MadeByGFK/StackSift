@@ -231,6 +231,8 @@
 
   <section class="faq">
     <h2>FAQ</h2>
+    <h3>What does the Analysis Report include?</h3>
+    <p>The Analysis Report (Investigation Report) adds an Investigation Brief — the investigation lead, the observed sequence, and prioritized checks — ahead of the full per-issue analysis of your log. It costs 3 credits per run, charged only on success. <a href="/sample-report">See a sample Investigation Report →</a></p>
     <h3>How many credits does a PDF export cost?</h3>
     <p>2 credits per report.</p>
     <h3>How many credits does an oversize analysis cost?</h3>
@@ -264,6 +266,62 @@
   </footer>
 {% include "auth_form_script.html" %}
 {% include "nav_script.html" %}
+<script>
+/* Issue #156: offer_viewed beacon — fires exactly once per page view
+   when a credit-pack card has been at least 50% visible continuously
+   for at least 1 second. Individual cards are observed, NOT the
+   #packs grid (Codex P2, PR #157): at the <=800px breakpoint the grid
+   stacks vertically and is taller than the viewport, so the grid's
+   intersectionRatio could never reach 0.5 on mobile and offer_viewed
+   would never fire there. A single card (name + price + credits) at
+   >=50% for >=1s is the offer encounter. First-party only: a beacon
+   to our own /events/d2; the server reads attribution from the
+   d2_attribution cookie, so the body carries no attribution data. */
+(function () {
+  var packs = document.getElementById("packs");
+  if (!packs || !("IntersectionObserver" in window)) return;
+  var cards = packs.querySelectorAll(".pack");
+  if (!cards.length) return;
+  var fired = false;
+  function fire() {
+    if (fired) return;
+    fired = true;
+    var body = JSON.stringify({event: "offer_viewed"});
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/events/d2", new Blob([body], {type: "application/json"}));
+    } else if (window.fetch) {
+      fetch("/events/d2", {method: "POST", keepalive: true,
+        headers: {"Content-Type": "application/json"}, body: body}).catch(function () {});
+    }
+  }
+  /* Per-card continuous-visibility timers (Codex P2, PR #157
+     remediation round 2): a shared timer would keep running while
+     ANY card qualifies, so scrolling from card A to card B could
+     fire the beacon although neither card was individually >=50%
+     visible for a continuous 1s. Each card carries its own timer
+     (_d2timer), started when THAT card reaches >=0.5 and cleared
+     when it drops below; the once-per-page guard is `fired`. */
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      var card = entry.target;
+      var is = entry.intersectionRatio >= 0.5;
+      if (is) {
+        if (!fired && card._d2timer == null) {
+          card._d2timer = setTimeout(function () {
+            card._d2timer = null;
+            observer.disconnect();
+            fire();
+          }, 1000);
+        }
+      } else if (card._d2timer != null) {
+        clearTimeout(card._d2timer);
+        card._d2timer = null;
+      }
+    });
+  }, {threshold: [0, 0.5, 1]});
+  cards.forEach(function (card) { observer.observe(card); });
+})();
+</script>
 </body>
 </html>
 

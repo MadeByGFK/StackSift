@@ -9,6 +9,13 @@
   --text: #ffffff;
   --muted: #9db1cc;
   --accent: #d4af37;
+  /* Issue #160 (A1 P2-4): shared web/PDF brand tokens — these names and
+     values are the CSS side of the seam whose PDF side is the BRAND
+     defaults in app/pdf_export.py; agreement is asserted by test. */
+  --navy: #1e2a4a;
+  --severity-critical: #b91c1c;
+  --severity-warning: #d97706;
+  --severity-info: #646464;
   --green: #3fb950;
   --yellow: #e3a72f;
   --red: #f85149;
