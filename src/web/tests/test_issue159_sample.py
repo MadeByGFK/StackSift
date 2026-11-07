@@ -160,6 +160,27 @@ def test_sample_page_no_forms_no_csrf_no_account_scripts(sample_client):
     assert "/reports/" not in body
 
 
+def test_sample_page_keeps_mobile_nav_script(sample_client):
+    """Remediation (Codex P2 on PR #167): the sample page's header carries
+    the mobile nav toggle button, and style.css hides .nav-links at
+    <=768px unless it gets the `open` class — only nav_script.html toggles
+    it. That script is navigation-only (no user context, no fetches, no
+    CSRF), so it must render on the sample page even though the account
+    script stays suppressed."""
+    r = sample_client.get("/sample-report")
+    assert r.status_code == 200
+    body = r.text
+    # The nav toggle handler itself is present.
+    assert "querySelector('.nav-toggle')" in body
+    assert "classList.toggle('open'" in body
+    # ...while every account-script guarantee from v2 still holds.
+    assert "<form" not in body.lower()
+    assert "csrf" not in body.lower()
+    assert "/auth/balance" not in body
+    assert "/credits/checkout" not in body
+    assert "/events/d2" not in body
+
+
 def test_sample_handlers_do_not_resolve_current_user(sample_client,
                                                       monkeypatch):
     def _boom(request):

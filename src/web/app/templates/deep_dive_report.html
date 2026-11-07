@@ -223,7 +223,10 @@
 </div>
 {% if not is_sample %}
 {% include 'auth_form_script.html' %}
-{% include "nav_script.html" %}
 {% endif %}
+{# nav_script.html is navigation-only (mobile menu toggle; no user context,
+   no fetches, no CSRF) — it must render on the sample page too, or the
+   header menu button is dead at <=768px (Codex P2, PR #167). #}
+{% include "nav_script.html" %}
 </body>
 </html>
