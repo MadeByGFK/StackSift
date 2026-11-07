@@ -964,6 +964,35 @@ def test_remed_rgba_alpha_preserved_after_metadata_strip():
     assert _iccp_profile(stored) is None
 
 
+def test_remed2_rgb_color_key_transparency_preserved():
+    """Codex P2 round 2 (4503449379): an RGB PNG whose transparency is a
+    tRNS color key stores the transparent color in im.info, not the
+    pixels — the metadata-free rebuild must convert it to alpha first,
+    or formerly transparent pixels come back opaque."""
+    img = Image.new("RGB", (8, 8), (255, 0, 0))
+    img.putpixel((0, 0), (0, 255, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", transparency=(255, 0, 0))
+    stored, media, w, h = B.validate_and_canonicalize_logo(buf.getvalue())
+    out = Image.open(io.BytesIO(stored)).convert("RGBA")
+    assert out.getpixel((1, 1)) == (255, 0, 0, 0)  # keyed color: clear
+    assert out.getpixel((0, 0)) == (0, 255, 0, 255)  # other pixel: solid
+
+
+def test_remed2_grayscale_color_key_transparency_preserved():
+    """Codex P2 round 2 (4503449379): same tRNS contract for grayscale
+    (mode L) PNG logos — the keyed gray level must become alpha 0 and a
+    non-keyed level must stay opaque."""
+    img = Image.new("L", (8, 8), 128)
+    img.putpixel((0, 0), 64)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", transparency=128)
+    stored, media, w, h = B.validate_and_canonicalize_logo(buf.getvalue())
+    out = Image.open(io.BytesIO(stored)).convert("RGBA")
+    assert out.getpixel((1, 1))[3] == 0  # keyed gray: clear
+    assert out.getpixel((0, 0)) == (64, 64, 64, 255)  # other level: solid
+
+
 def _form_value(page_text, field):
     m = re.search(r'name="%s"[^>]*value="([^"]*)"' % field, page_text)
     assert m, f"input {field} not found"

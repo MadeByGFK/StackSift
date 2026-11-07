@@ -63,10 +63,22 @@ def _metadata_free_image(image):
     ICC profile, text chunks, EXIF and anything else the decoder
     attached. Palette images are expanded first, because their
     palette/transparency live outside the pixel bytes.
+
+    Round-2 remediation (Codex P2 4503449379 on PR #169): the same
+    applies to color-key transparency — an RGB or grayscale PNG encodes
+    its transparent color in a ``tRNS`` chunk, which Pillow surfaces as
+    ``image.info["transparency"]``, NOT in the raw pixels. Rebuilding
+    such an image from bytes alone made formerly transparent pixels
+    opaque, so any non-palette image carrying color-key transparency
+    is converted to an alpha-bearing mode first (Pillow's conversion
+    applies the key), and only then rebuilt from pixels.
     """
     if image.mode == "P":
         image = image.convert(
             "RGBA" if "transparency" in image.info else "RGB")
+    elif "transparency" in image.info and image.mode not in (
+            "RGBA", "LA", "PA"):
+        image = image.convert("RGBA")
     return Image.frombytes(image.mode, image.size, image.tobytes())
 
 
