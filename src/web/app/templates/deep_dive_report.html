@@ -133,8 +133,9 @@
     <div class="branding-panel" style="margin-top:1rem">
       <h3 style="margin:0 0 6px">Branding</h3>
       <p style="color:var(--muted);margin:0 0 8px">Add your business branding to this report. Branding applies to every PDF generated after it is set.</p>
-      <form method="post" enctype="multipart/form-data" action="/reports/{{ report_id }}/branding" style="margin:0 0 8px">
+      <form method="post" enctype="multipart/form-data" action="/reports/{{ report_id }}/branding" data-auth-form data-success-url="/reports/{{ report_id }}" style="margin:0 0 8px">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" style="margin:0 0 6px"></p>
         <label>Business name <input type="text" name="business_name" maxlength="80" value="{{ branding_values.business_name if branding_values else '' }}"></label>
         <label>Client name <input type="text" name="client_name" maxlength="80" value="{{ branding_values.client_name if branding_values else '' }}"></label>
         <label>Report title <input type="text" name="report_title" maxlength="120" value="{{ branding_values.report_title if branding_values else '' }}"></label>
@@ -143,8 +144,9 @@
         {% if branding_values and branding_values.has_logo %}<label><input type="checkbox" name="remove_logo" value="1"> Remove logo</label>{% endif %}
         <button type="submit" class="btn-small">Save branding</button>
       </form>
-      <form method="post" action="/reports/{{ report_id }}/branding/clear" style="margin:0">
+      <form method="post" action="/reports/{{ report_id }}/branding/clear" data-auth-form data-success-url="/reports/{{ report_id }}" style="margin:0">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" style="margin:0 0 6px"></p>
         <button type="submit" class="btn-small">Clear branding</button>
       </form>
     </div>

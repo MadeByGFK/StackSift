@@ -910,3 +910,141 @@ def test_unbranded_owned_page_and_pdf_unchanged(auth_env):
     pdf = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                data={"csrf_token": csrf})
     assert "Prepared for:" not in _pdf_text(pdf.content)
+
+
+# --- Remediation round: Codex review of PR #169 head 5aaa150b ---------------
+# All four tests below FAIL on head 5aaa150b (teeth) and pass on the
+# remediated head. Findings verified by Sunny, disposition comment on
+# PR #169 (comment 6711987636).
+
+def _iccp_profile(data):
+    """Decompressed iCCP profile bytes of a PNG, or None."""
+    i = 8
+    while i + 8 <= len(data):
+        ln = struct.unpack(">I", data[i:i + 4])[0]
+        typ = data[i + 4:i + 8]
+        chunk = data[i + 8:i + 8 + ln]
+        if typ == b"iCCP":
+            nul = chunk.index(b"\x00")
+            return zlib.decompress(chunk[nul + 2:])
+        i += 12 + ln
+    return None
+
+
+def _png_with_icc(payload=b"ATTACKER-ICC-PAYLOAD-0123456789"):
+    img = Image.new("RGB", (16, 16), (10, 20, 30))
+    img.info["icc_profile"] = payload
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_remed_png_icc_profile_stripped_by_reencode():
+    """Codex P2 (4503408262): inherited PNG metadata (iCCP) must NOT
+    survive the A1 canonical re-encode; pixels must."""
+    data = _png_with_icc()
+    assert _iccp_profile(data) is not None  # fixture really is poisoned
+    stored, media, w, h = B.validate_and_canonicalize_logo(data)
+    assert media == "image/png" and (w, h) == (16, 16)
+    assert _iccp_profile(stored) is None
+    px = Image.open(io.BytesIO(stored)).convert("RGB").getpixel((0, 0))
+    assert px == (10, 20, 30)
+
+
+def test_remed_rgba_alpha_preserved_after_metadata_strip():
+    """The metadata-free reconstruction must keep alpha semantics."""
+    img = Image.new("RGBA", (8, 8), (200, 100, 50, 128))
+    img.info["icc_profile"] = b"X" * 64
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    stored, media, w, h = B.validate_and_canonicalize_logo(buf.getvalue())
+    out = Image.open(io.BytesIO(stored))
+    assert out.mode == "RGBA"
+    assert out.getpixel((0, 0)) == (200, 100, 50, 128)
+    assert _iccp_profile(stored) is None
+
+
+def _form_value(page_text, field):
+    m = re.search(r'name="%s"[^>]*value="([^"]*)"' % field, page_text)
+    assert m, f"input {field} not found"
+    return m.group(1)
+
+
+def test_remed_partial_save_form_values_empty_not_none(auth_env):
+    """Codex P2 (4503408267): after saving only a business name, the
+    re-rendered form must show empty values, never the string None."""
+    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
+    r = _post_branding(auth_env, dd_id, csrf,
+                       data={"business_name": "Acme"})
+    assert r.status_code == 200, r.text[:300]
+    page = auth_env.client.get(f"/reports/{dd_id}")
+    assert page.status_code == 200
+    assert 'value="None"' not in page.text
+    assert _form_value(page.text, "client_name") == ""
+    assert _form_value(page.text, "report_title") == ""
+    assert _form_value(page.text, "accent") == ""
+
+
+def test_remed_cleared_branding_form_values_empty_not_none(auth_env):
+    """Codex P2 (4503408267): the retained cleared row (all NULLs) must
+    also render empty form values."""
+    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
+    _post_branding(auth_env, dd_id, csrf, data={
+        "business_name": "Acme", "client_name": "Client",
+        "report_title": "Title", "accent": "#1a2b3c"}, logo=_png())
+    r = auth_env.client.post(f"/reports/{dd_id}/branding/clear",
+                             data={"csrf_token": csrf})
+    assert r.status_code == 200, r.text[:300]
+    page = auth_env.client.get(f"/reports/{dd_id}")
+    assert 'value="None"' not in page.text
+    assert _form_value(page.text, "business_name") == ""
+    assert _form_value(page.text, "accent") == ""
+
+
+def test_remed_logo_read_410_for_owned_soft_deleted(auth_env):
+    """Codex P2 (4503408270): owned soft-deleted (not expired) logo
+    read -> 410, matching the A8 lifecycle contract on set/clear."""
+    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
+    _post_branding(auth_env, dd_id, csrf,
+                   data={"business_name": "Acme"}, logo=_png())
+    _expire(auth_env, dd_id, deleted=True)  # deleted AND expired
+    r = auth_env.client.get(f"/reports/{dd_id}/branding/logo")
+    assert r.status_code == 410
+
+
+def test_remed_logo_read_410_after_cleanup_soft_delete(auth_env):
+    """Codex P2 (4503408270): after cleanup_results() soft-deletes an
+    expired report, the owner's logo read is 410, not 404."""
+    from app import credit_maintenance
+    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
+    _post_branding(auth_env, dd_id, csrf,
+                   data={"business_name": "Acme"}, logo=_png())
+    _expire(auth_env, dd_id)
+    db = auth_env.sessions()
+    try:
+        credit_maintenance.cleanup_results(db)
+    finally:
+        db.close()
+    r = auth_env.client.get(f"/reports/{dd_id}/branding/logo")
+    assert r.status_code == 410
+
+
+def test_remed_branding_forms_use_inpage_auth_form_pattern(auth_env):
+    """Codex P2 (4503408273): both branding forms must be wired to the
+    site's in-page auth-form handler with a success URL back to this
+    report and a status element, so browser submissions never land on
+    a raw JSON page."""
+    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
+    page = auth_env.client.get(f"/reports/{dd_id}")
+    assert page.status_code == 200
+    panel = page.text.split("branding-panel")[1].split("</section>")[0]
+    set_form = re.search(
+        r'<form[^>]*action="/reports/%s/branding"[^>]*>' % dd_id, panel)
+    clear_form = re.search(
+        r'<form[^>]*action="/reports/%s/branding/clear"[^>]*>' % dd_id,
+        panel)
+    assert set_form and "data-auth-form" in set_form.group(0)
+    assert clear_form and "data-auth-form" in clear_form.group(0)
+    assert f'data-success-url="/reports/{dd_id}"' in set_form.group(0)
+    assert f'data-success-url="/reports/{dd_id}"' in clear_form.group(0)
+    assert 'role="status"' in panel

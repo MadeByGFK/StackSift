@@ -52,6 +52,24 @@ class BrandingError(ValueError):
 # Logo validation (A1)
 # ---------------------------------------------------------------------------
 
+def _metadata_free_image(image):
+    """Return a pixel-identical copy of ``image`` with empty metadata.
+
+    Remediation (Codex P2 on PR #169): the decoded image object still
+    carries ``im.info`` into the encoder — Pillow's PNG writer falls
+    back to ``im.info["icc_profile"]`` and writes it back out, so an
+    attacker-controlled iCCP profile survived the canonical re-encode
+    byte-identically. Rebuilding from the raw pixel bytes drops the
+    ICC profile, text chunks, EXIF and anything else the decoder
+    attached. Palette images are expanded first, because their
+    palette/transparency live outside the pixel bytes.
+    """
+    if image.mode == "P":
+        image = image.convert(
+            "RGBA" if "transparency" in image.info else "RGB")
+    return Image.frombytes(image.mode, image.size, image.tobytes())
+
+
 def validate_and_canonicalize_logo(data: bytes):
     """Validate uploaded logo bytes and return the canonical form.
 
@@ -104,16 +122,18 @@ def validate_and_canonicalize_logo(data: bytes):
                         "Logo dimensions must be between 1x1 and "
                         "2048x2048 pixels.")
                 # (5): canonical re-encode to the SAME format from the
-                # decoded pixels. PNG ancillary text chunks and JPEG
-                # EXIF/metadata are not carried over; appended trailing
-                # payloads cannot survive re-encoding.
+                # decoded pixels, via a metadata-free reconstruction
+                # (_metadata_free_image): no inherited chunk/metadata
+                # (iCCP, text chunks, EXIF) is carried over, and
+                # appended trailing payloads cannot survive re-encoding.
                 buffer = io.BytesIO()
                 if expected == "PNG":
-                    image.save(buffer, format="PNG")
+                    _metadata_free_image(image).save(buffer, format="PNG")
                 else:
                     rgb = image if image.mode == "RGB" else \
                         image.convert("RGB")
-                    rgb.save(buffer, format="JPEG", quality=95)
+                    _metadata_free_image(rgb).save(
+                        buffer, format="JPEG", quality=95)
         except BrandingError:
             raise
         except Exception:

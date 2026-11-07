@@ -2916,11 +2916,14 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         _brow = _branding_row_for(db, result.id)
         data["branding"] = _branding_view.web_branding_from_row(
             _brow, result.id)
+        # Nullable row fields normalize to "" — a partial save or the
+        # retained cleared row must never render the literal string
+        # "None" into the form (Codex P2 on PR #169).
         data["branding_values"] = {
-            "business_name": _brow.business_name if _brow else "",
-            "client_name": _brow.client_name if _brow else "",
-            "report_title": _brow.report_title if _brow else "",
-            "accent": _brow.accent if _brow else "",
+            "business_name": (_brow.business_name or "") if _brow else "",
+            "client_name": (_brow.client_name or "") if _brow else "",
+            "report_title": (_brow.report_title or "") if _brow else "",
+            "accent": (_brow.accent or "") if _brow else "",
             "has_logo": bool(_brow and _brow.logo_bytes),
         }
         # Issue #160: the designed header block shows when this report
@@ -4196,9 +4199,14 @@ async def report_branding_logo(request: Request, result_id: str,
         models.Result.id == rid,
         models.Result.user_id == user.id,
     ).first()
-    if not result or result.deleted_at is not None:
+    if not result:
         return JSONResponse({"error": "Report not found"}, status_code=404)
-    if credits_helpers._as_aware(result.expires_at) <= \
+    # A8 lifecycle contract (Codex P2 on PR #169): an OWNED target that
+    # is expired OR soft-deleted answers 410 on logo-read too, matching
+    # set/clear — cleanup_results() setting deleted_at must not change
+    # the owner's answer from 410 to 404. Unknown/non-owner stays 404.
+    if result.deleted_at is not None or \
+            credits_helpers._as_aware(result.expires_at) <= \
             datetime.now(timezone.utc):
         return JSONResponse({"error": "Report has expired"}, status_code=410)
     row = _branding_row_for(db, result.id)
