@@ -25,3 +25,7 @@ psycopg2-binary==2.9.13
 
 PyJWT[crypto]==2.15.1
 fpdf2==2.8.9
+# Issue #163 (Amendment A1): Pillow was already the transitive raster
+# decoder of pinned fpdf2; it is now a DIRECT pin because logo upload
+# validation performs a full decode + canonical re-encode with it.
+Pillow==13.0.0

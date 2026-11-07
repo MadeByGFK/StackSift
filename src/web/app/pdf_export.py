@@ -16,6 +16,7 @@ Presentation only: no content, engine, pricing or credit behavior here.
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -121,6 +122,9 @@ class ResolvedTokens:
     client_name: str | None = None
     report_title: str | None = None
     logo_path: str | None = None
+    # Issue #163 (A6): stored pixel dimensions for contain-fit scaling.
+    logo_width: int | None = None
+    logo_height: int | None = None
 
 
 def resolve_tokens(branding=None) -> ResolvedTokens:
@@ -143,6 +147,8 @@ def resolve_tokens(branding=None) -> ResolvedTokens:
         client_name=b.get("client_name") or None,
         report_title=b.get("report_title") or None,
         logo_path=b.get("logo_path") or None,
+        logo_width=b.get("logo_width") or None,
+        logo_height=b.get("logo_height") or None,
     )
 
 
@@ -321,13 +327,35 @@ class _DesignedPDF(FPDF):
         pdf = self
         tok = self.tokens
         if tok.logo_path:
+            # Issue #163 (A6): contain-fit inside max 40mm x 10mm,
+            # aspect preserved, dimensions computed from the stored
+            # pixel dimensions (or the image file itself). A render
+            # failure never fails the export — the business-name text
+            # still renders — but it is logged as a warning containing
+            # no branding text or bytes.
             try:
                 if Path(str(tok.logo_path)).is_file():
-                    pdf.image(str(tok.logo_path), x=pdf.l_margin,
-                              y=pdf.get_y(), h=10)
-                    pdf.ln(12)
+                    px_w, px_h = tok.logo_width, tok.logo_height
+                    if not px_w or not px_h:
+                        from PIL import Image as _PILImage
+                        with _PILImage.open(str(tok.logo_path)) as _im:
+                            px_w, px_h = _im.size
+                    if px_w and px_h:
+                        scale = min(40.0 / px_w, 10.0 / px_h)
+                        img_w, img_h = px_w * scale, px_h * scale
+                    else:
+                        img_w, img_h = None, 10.0
+                    if img_w:
+                        pdf.image(str(tok.logo_path), x=pdf.l_margin,
+                                  y=pdf.get_y(), w=img_w, h=img_h)
+                    else:
+                        pdf.image(str(tok.logo_path), x=pdf.l_margin,
+                                  y=pdf.get_y(), h=img_h)
+                    pdf.ln(img_h + 2)
             except Exception:
-                pass  # a bad logo must never fail an export
+                logging.getLogger(__name__).warning(
+                    "Branding logo could not be rendered; export "
+                    "continues without the logo image.")
         if tok.business_name:
             self.font("B", 9)
             pdf.set_text_color(*tok.accent)
