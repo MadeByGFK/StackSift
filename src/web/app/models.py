@@ -799,6 +799,42 @@ class ReportSharing(Base):
     )
 
 
+class ReportBranding(Base):
+    """Issue #163: per-report branding for a paid Analysis Report.
+
+    1:1 with ``results.id`` (FK ON DELETE CASCADE covers physical
+    deletes only; expiry/soft-delete removal is explicit in
+    ``credit_maintenance.cleanup_results`` — Amendment A2). Owner is
+    enforced through the Result. A row with every field NULL is the
+    CLEARED state (Amendment A8(e)): clear retains the row, and the
+    row's existence is what defeats stale stored-PDF replay (A3).
+    ``logo_bytes`` holds ONLY the canonical re-encoded bytes produced
+    by ``app.branding.validate_and_canonicalize_logo`` (A1).
+    """
+
+    __tablename__ = "report_branding"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    result_id = Column(GUID(), ForeignKey("results.id", ondelete="CASCADE"),
+                       nullable=False)
+    business_name = Column(Text, nullable=True)
+    client_name = Column(Text, nullable=True)
+    report_title = Column(Text, nullable=True)
+    accent = Column(String(7), nullable=True)
+    logo_bytes = Column(sa.LargeBinary, nullable=True)
+    logo_media_type = Column(String(20), nullable=True)
+    logo_sha256 = Column(String(64), nullable=True)
+    logo_width = Column(Integer, nullable=True)
+    logo_height = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("result_id", name="uq_report_branding_result_id"),
+        Index("ix_report_branding_result_id", "result_id", unique=True),
+    )
+
+
 class ReportAction(Base):
     __tablename__ = "report_actions"
 

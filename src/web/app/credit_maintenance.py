@@ -106,6 +106,21 @@ def cleanup_results(db):
             sharing.raw_token = None
             sharing.revoked_at = C._utcnow()
             sharing.generation += 1
+    # Issue #163 (Amendment A2): branding removal in the SAME commit.
+    # The FK cascade never fires on this soft delete, so the rows for
+    # the just-expired ids are deleted explicitly here; a sweep also
+    # deletes any branding row whose Result already has deleted_at set
+    # (soft deletes from any other path, caught on a later run). This
+    # is logical removal from the live database, not secure erasure
+    # from backups.
+    already_deleted_ids = db.scalars(select(M.Result.id).where(
+        M.Result.deleted_at.isnot(None))).all()
+    branding_ids = set(expired_ids) | set(already_deleted_ids)
+    if branding_ids:
+        brandings = db.scalars(select(M.ReportBranding).where(
+            M.ReportBranding.result_id.in_(branding_ids)))
+        for branding in brandings:
+            db.delete(branding)
     db.commit()
 
 

@@ -334,8 +334,29 @@ _OVERSIZE_GUARD_BYTES = MAX_OVERSIZE_UPLOAD_BYTES + 1024 * 1024
 _BATCH_GUARD_BYTES = 51 * 1024 * 1024
 
 
+# Issue #163 (Amendment A8(a)): the branding upload route joins the
+# Content-Length pre-guard pattern with a 1 MiB declared-length
+# ceiling -> 413 before the handler. Per the #104 precedent this is an
+# early reject only (framework spooling precedes it); the authoritative
+# bound is the route's bounded chunked read of the logo part.
+_BRANDING_GUARD_BYTES = 1024 * 1024
+
+
 @app.middleware("http")
 async def oversize_body_guard(request: Request, call_next):
+    if (request.method == "POST"
+            and request.url.path.startswith("/reports/")
+            and request.url.path.endswith("/branding")
+            and request.headers.get("content-length")):
+        try:
+            declared_branding = int(request.headers["content-length"])
+        except ValueError:
+            declared_branding = 0
+        if declared_branding > _BRANDING_GUARD_BYTES:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                {"error": "Branding submission too large."},
+                status_code=413)
     if (request.method == "POST" and request.url.path == "/batch"
             and request.headers.get("content-length")):
         try:
@@ -837,15 +858,21 @@ def _build_sample_cache():
     validated = _dd.validate_artifact(artifact)
     projection = _dd.public_projection(validated)
     raw_json = _json.dumps(validated)
+    # Issue #163 (Decision 8 / Amendment A5): the sample renders under
+    # the WellInstance constant profile — a server-side constant, NOT
+    # the owner machinery (the sample has no Result/owner). The PDF
+    # report_title remains the existing SAMPLE label.
+    from app import branding as _branding_sample
     pdf_bytes = _pdf_export.generate_deep_dive_pdf(
         raw_json,
         filename="sample-analysis-report",
-        branding={"report_title": "SAMPLE — StackSift Analysis Report"},
+        branding=_branding_sample.sample_branding_dict(),
     )
     return {
         "raw_artifact_json": raw_json,
         "projection": projection,
         "pdf_bytes": pdf_bytes,
+        "branding_web": _branding_sample.sample_web_branding(),
         "metadata": {
             "generator_version": _dd.GENERATOR_VERSION,
             "sample_filename": SAMPLE_FILENAME,
@@ -890,6 +917,9 @@ async def sample_report(request: Request):
             "analysis_projection": cache["projection"],
             "filename": cache["projection"].get("filename") or SAMPLE_FILENAME,
             "is_sample": True,
+            # A5: brand header from the constant profile; no form, no
+            # per-user context (is_sample gating is unchanged).
+            "branding": cache.get("branding_web"),
         },
     )
 
@@ -2800,6 +2830,33 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     })
 
 
+# ---------------------------------------------------------------------------
+# Issue #163: per-report branding helpers (owned deep_dive reports only).
+# ---------------------------------------------------------------------------
+
+def _branding_row_for(db, result_id):
+    from app import models as _models
+    return db.query(_models.ReportBranding).filter(
+        _models.ReportBranding.result_id == result_id).first()
+
+
+def _generate_deep_dive_pdf_branded(db, result, filename):
+    """Generate a deep_dive PDF with the report's stored branding.
+
+    The branding dict is assembled server-side from the stored row
+    only; stored logo bytes are materialised to a server-owned temp
+    file for the render and unlinked afterwards (A8(f)). With no row,
+    generation is exactly the pre-#163 unbranded call.
+    """
+    from app import branding as _branding_mod
+    from app.pdf_export import generate_deep_dive_pdf as _gen
+    row = _branding_row_for(db, result.id)
+    with _branding_mod.branding_dict_with_temp_logo(row) as _bdict:
+        if _bdict:
+            return _gen(result.storage_manifest, filename, branding=_bdict)
+        return _gen(result.storage_manifest, filename)
+
+
 @app.get("/reports/{result_id}", response_class=HTMLResponse)
 async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     """View a specific past analysis report (ownership-checked, analysis only)."""
@@ -2853,6 +2910,22 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
             return JSONResponse({"error": "Report data corrupted"}, status_code=500)
         data["export_unlocked"] = credits_helpers.is_export_unlocked(
             db, _user.id, result.id)
+        # Issue #163: branded header band + branding form state for
+        # THIS report only (per-report, never per-account).
+        from app import branding as _branding_view
+        _brow = _branding_row_for(db, result.id)
+        data["branding"] = _branding_view.web_branding_from_row(
+            _brow, result.id)
+        # Nullable row fields normalize to "" — a partial save or the
+        # retained cleared row must never render the literal string
+        # "None" into the form (Codex P2 on PR #169).
+        data["branding_values"] = {
+            "business_name": (_brow.business_name or "") if _brow else "",
+            "client_name": (_brow.client_name or "") if _brow else "",
+            "report_title": (_brow.report_title or "") if _brow else "",
+            "accent": (_brow.accent or "") if _brow else "",
+            "has_logo": bool(_brow and _brow.logo_bytes),
+        }
         # Issue #160: the designed header block shows when this report
         # was generated (the artifact Result's ready_at) — display only.
         if result.ready_at:
@@ -3038,6 +3111,14 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     # into a second 2-credit charge. Every early return after this
     # point rolls back to release the lock.
     credits_helpers.lock_global_paid_scope(db)
+    # Issue #163 (Amendment A3): for a deep_dive Result, ANY
+    # report_branding row (set OR cleared-state) defeats the stored-PDF
+    # replay below — the route then falls through to the unlocked
+    # fresh-generation path (no charge, no new Operation). Reports
+    # that never had branding keep today's replay behaviour exactly.
+    _has_branding_row = False
+    if result.type == "deep_dive":
+        _has_branding_row = _branding_row_for(db, rid) is not None
     existing_op = db.query(models.Operation).filter(
         models.Operation.user_id == user.id,
         models.Operation.type == "pdf",
@@ -3078,7 +3159,8 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         idempotency_key = f"{base_idempotency_key}-retry-{_uuid.uuid4().hex[:8]}"
         existing_op = None  # Force fresh admission with new key
     if existing_op:
-        if existing_op.status == "completed" and existing_op.result_id:
+        if existing_op.status == "completed" and existing_op.result_id \
+                and not _has_branding_row:
             # Validate the saved PDF result before replaying (integrity, ownership, expiry)
             pdf_result = db.get(models.Result, existing_op.result_id)
             if pdf_result:
@@ -3140,7 +3222,9 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
             )
             _filename = _manifest_data.get("filename", "report")
             if result.type == "deep_dive":
-                _pdf_bytes = _gen_dd_pdf(result.storage_manifest, _filename)
+                # Issue #163: fresh generation carries stored branding.
+                _pdf_bytes = _generate_deep_dive_pdf_branded(
+                    db, result, _filename)
             elif _manifest_data.get("report_kind") == "batch":
                 _pdf_bytes = _gen_batch_pdf(result.storage_manifest, _filename)
             elif result.type == "comparison":
@@ -3188,7 +3272,10 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
         )
         filename = manifest_data.get("filename", "report")
         if result.type == "deep_dive":
-            pdf_bytes = generate_deep_dive_pdf(result.storage_manifest, filename)
+            # Issue #163: the admitted first-export generation also
+            # carries stored branding (same cost as unbranded).
+            pdf_bytes = _generate_deep_dive_pdf_branded(
+                db, result, filename)
         elif manifest_data.get("report_kind") == "batch":
             # Issue #103 (trim B5): ONE 2-credit export for the whole
             # combined artifact — the charge above is the standard
@@ -3859,6 +3946,280 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
         "report_url": f"/reports/{artifact.id}",
         "cost": cost,
     })
+
+
+# ---------------------------------------------------------------------------
+# Issue #163: branding routes — POST set, POST clear, GET logo.
+#
+# Included with the paid Analysis Report: these routes create NO
+# Operation, Consent or CreditLedger rows, never touch the deep-dive
+# canonical identity/digest, and never change the #129 unlock state.
+# Branding text/bytes are never logged.
+# ---------------------------------------------------------------------------
+
+def _branding_target_under_lock(db, user, result_id: str):
+    """Lock (global:paid, the same scope cleanup uses — A2) and
+    re-read the branding target Result under the lock.
+
+    Returns (result, None) or (None, error_response). Semantics mirror
+    the deep-dive route, with the A2/A8(g) re-check under the lock:
+    unknown/non-owner -> 404; non-deep_dive -> 422; expired OR
+    soft-deleted -> 410 (an upload committing after cleanup selected
+    the report must not resurrect branding on it).
+    """
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import select as _select
+    from app import credits as credits_helpers
+    from app import models
+    from datetime import datetime, timezone
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return None, JSONResponse(
+            {"error": "Invalid report ID"}, status_code=400)
+    credits_helpers.lock_global_paid_scope(db)
+    found = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+    ).first()
+    if not found:
+        db.rollback()
+        return None, JSONResponse(
+            {"error": "Report not found"}, status_code=404)
+    result = db.execute(
+        _select(models.Result).where(models.Result.id == found.id)
+        .with_for_update().execution_options(populate_existing=True)
+    ).scalar_one()
+    if result.deleted_at is not None or \
+            credits_helpers._as_aware(result.expires_at) <= \
+            datetime.now(timezone.utc):
+        db.rollback()
+        return None, JSONResponse(
+            {"error": "Report has expired"}, status_code=410)
+    if result.type != "deep_dive":
+        db.rollback()
+        return None, JSONResponse(
+            {"error": "Branding is only available for Analysis Reports"},
+            status_code=422)
+    return result, None
+
+
+@app.post("/reports/{result_id}/branding")
+async def report_branding_set(request: Request, result_id: str,
+                              db=Depends(get_db)):
+    """Set/replace the branding on an owned paid Analysis Report."""
+    from fastapi.responses import JSONResponse
+    from app import auth as auth_helpers
+    from app import branding as branding_mod
+    from app import models
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return err
+
+    # A8(b): exactly one file part, named "logo"; any other file part
+    # is a 400. Text fields are byte-capped raw before trim/length.
+    # NOTE: form parts are Starlette UploadFile instances; FastAPI's
+    # UploadFile is a SUBCLASS of it, so the isinstance check must use
+    # the Starlette base class or every upload is silently missed.
+    from starlette.datastructures import UploadFile as _StarletteUploadFile
+    file_parts = [(key, value) for key, value in form.multi_items()
+                  if isinstance(value, _StarletteUploadFile)]
+    if len(file_parts) > 1 or any(key != "logo" for key, _ in file_parts):
+        return JSONResponse(
+            {"error": "Submit exactly one logo file."}, status_code=400)
+    raw_fields = {}
+    for field in ("business_name", "client_name", "report_title", "accent"):
+        value = form.get(field)
+        if value is not None and not isinstance(value, str):
+            return JSONResponse(
+                {"error": "Branding fields must be plain text."},
+                status_code=400)
+        if isinstance(value, str) and len(
+                value.encode("utf-8", "surrogatepass")) > \
+                branding_mod.MAX_TEXT_FIELD_BYTES:
+            return JSONResponse(
+                {"error": "A branding field is too long."},
+                status_code=400)
+        raw_fields[field] = value
+
+    # A8(a): bounded chunked read of the logo part — abort past
+    # 512 KiB. No file part OR a 0-byte file part = keep existing logo.
+    logo_data = None
+    if file_parts:
+        upload = file_parts[0][1]
+        if upload.filename:
+            buffer = bytearray()
+            while True:
+                chunk = await upload.read(64 * 1024)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                if len(buffer) > branding_mod.MAX_LOGO_BYTES:
+                    return JSONResponse(
+                        {"error": "Logo is too large. Logos are at "
+                                  "most 512 KB."},
+                        status_code=400)
+            if buffer:
+                logo_data = bytes(buffer)
+    remove_logo = str(form.get("remove_logo") or "").lower() in (
+        "1", "true", "on", "yes")
+
+    # A8(c) ATOMICITY: ALL validation (text + logo, A1 full decode +
+    # canonical re-encode) completes before any write, and before the
+    # lock — an invalid replacement rejects the WHOLE update and the
+    # prior row stays byte-for-byte untouched.
+    try:
+        business_name = branding_mod.clean_text_field(
+            raw_fields["business_name"], label="Business name",
+            max_chars=branding_mod.BUSINESS_NAME_MAX)
+        client_name = branding_mod.clean_text_field(
+            raw_fields["client_name"], label="Client name",
+            max_chars=branding_mod.CLIENT_NAME_MAX)
+        report_title = branding_mod.clean_text_field(
+            raw_fields["report_title"], label="Report title",
+            max_chars=branding_mod.REPORT_TITLE_MAX)
+        accent = branding_mod.validate_accent(raw_fields["accent"])
+        canonical_logo = None
+        if logo_data is not None:
+            canonical_logo = branding_mod.validate_and_canonicalize_logo(
+                logo_data)
+    except branding_mod.BrandingError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # A2/A8(g): serialize with cleanup on global:paid and re-read the
+    # Result under the lock immediately before commit.
+    result, err = _branding_target_under_lock(db, user, result_id)
+    if err is not None:
+        return err
+    row = _branding_row_for(db, result.id)
+    if row is None:
+        row = models.ReportBranding(result_id=result.id)
+        db.add(row)
+    row.business_name = business_name
+    row.client_name = client_name
+    row.report_title = report_title
+    row.accent = accent
+    if remove_logo:
+        row.logo_bytes = None
+        row.logo_media_type = None
+        row.logo_sha256 = None
+        row.logo_width = None
+        row.logo_height = None
+    elif canonical_logo is not None:
+        stored, media_type, width, height = canonical_logo
+        row.logo_bytes = stored
+        row.logo_media_type = media_type
+        row.logo_sha256 = branding_mod.logo_sha256(stored)
+        row.logo_width = width
+        row.logo_height = height
+    # else: no/empty file part — keep the existing logo untouched.
+    row.updated_at = _utcnow_for_branding()
+    db.commit()
+    return JSONResponse({
+        "status": "branding_updated", "result_id": str(result.id)})
+
+
+def _utcnow_for_branding():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+@app.post("/reports/{result_id}/branding/clear")
+async def report_branding_clear(request: Request, result_id: str,
+                                db=Depends(get_db)):
+    """Clear branding (A8(e)): nulls all fields but RETAINS the row
+    with a bumped updated_at — the cleared-state row is what makes
+    A3's replay rule survive a clear. Only lifecycle cleanup (A2)
+    deletes the row."""
+    from fastapi.responses import JSONResponse
+    from app import auth as auth_helpers
+    from app import models
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    form, err = await _check_owner_csrf(request, session, db)
+    if err is not None:
+        return err
+    result, err = _branding_target_under_lock(db, user, result_id)
+    if err is not None:
+        return err
+    row = _branding_row_for(db, result.id)
+    if row is None:
+        row = models.ReportBranding(result_id=result.id)
+        db.add(row)
+    row.business_name = None
+    row.client_name = None
+    row.report_title = None
+    row.accent = None
+    row.logo_bytes = None
+    row.logo_media_type = None
+    row.logo_sha256 = None
+    row.logo_width = None
+    row.logo_height = None
+    row.updated_at = _utcnow_for_branding()
+    db.commit()
+    return JSONResponse({
+        "status": "branding_cleared", "result_id": str(result.id)})
+
+
+@app.get("/reports/{result_id}/branding/logo")
+async def report_branding_logo(request: Request, result_id: str,
+                               db=Depends(get_db)):
+    """Serve the stored logo for the OWNER only.
+
+    Content-Type comes from the stored validated type, with nosniff
+    and private no-store. Non-owner/unknown -> 404; anonymous -> 401.
+    Expiry/deleted state is re-checked at read time (A2). Nothing
+    about the bytes is logged.
+    """
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse, Response
+    from app import auth as auth_helpers
+    from app import credits as credits_helpers
+    from datetime import datetime, timezone
+
+    session = auth_helpers.get_session_from_cookie(db, request)
+    if not session:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    user = session.user
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    from app import models
+    result = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == user.id,
+    ).first()
+    if not result:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    # A8 lifecycle contract (Codex P2 on PR #169): an OWNED target that
+    # is expired OR soft-deleted answers 410 on logo-read too, matching
+    # set/clear — cleanup_results() setting deleted_at must not change
+    # the owner's answer from 410 to 404. Unknown/non-owner stays 404.
+    if result.deleted_at is not None or \
+            credits_helpers._as_aware(result.expires_at) <= \
+            datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    row = _branding_row_for(db, result.id)
+    if row is None or not row.logo_bytes:
+        return JSONResponse({"error": "No logo stored"}, status_code=404)
+    return Response(
+        content=row.logo_bytes,
+        media_type=row.logo_media_type or "application/octet-stream",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

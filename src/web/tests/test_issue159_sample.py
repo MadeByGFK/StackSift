@@ -129,6 +129,11 @@ def test_sample_pdf_public_brief_and_sample_label(sample_client):
     assert "connection pool exhausted" in text
     assert "SAMPLE" in text
     assert "08:31:07" in text and "08:35:44" in text
+    # Issue #163 (A9 premise change 2): EXTENDED — the sample PDF now
+    # ALSO carries the WellInstance brand header (Decision 8 / A5
+    # constant profile), together with the SAMPLE label above, never
+    # instead of it.
+    assert "WellInstance" in text
 
 
 def test_sample_secret_redacted_on_both_surfaces(sample_client):
@@ -274,9 +279,13 @@ def _fresh_projection_and_pdf_text():
     artifact = _sample_artifact()
     projection = dd.public_projection(dd.validate_artifact(artifact))
     from app.pdf_export import generate_deep_dive_pdf
+    # Issue #163 (A9 premise change 1): the helper's branding dict is
+    # now the A5 constant sample profile (WellInstance brand + the
+    # SAMPLE report_title), not the title-only dict.
+    from app import branding as _branding
     pdf = generate_deep_dive_pdf(
         json.dumps(artifact), filename="sample-analysis-report",
-        branding={"report_title": "SAMPLE — StackSift Analysis Report"})
+        branding=_branding.sample_branding_dict())
     return projection, _pdf_text(pdf)
 
 
