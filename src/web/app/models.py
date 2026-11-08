@@ -930,6 +930,18 @@ class ProductPurchase(Base):
     # them; NULL on rows never refunded (and on pre-0018 full-refund
     # rows, where reconciliation falls back to amount_cents).
     refunded_cents = Column(Integer, nullable=True)
+    # Remediation3 (migration 0019): dedicated reversal accounting
+    # fields that dispute/refund processing cannot erase or move.
+    # ``refunded_at`` is the processing time of the refund event that
+    # set the current (maximum) cumulative ``refunded_cents``;
+    # ``dispute_lost_at`` records that a dispute was lost, ever,
+    # regardless of later reversal_kind overwrites. Reconciliation
+    # keys product refund/dispute deductions off these fields (plus
+    # ``refunded_cents``) bucketed by ``completed_at`` — the charge
+    # creation / settlement day — never off reversal_*/reversed_at,
+    # which track only the LATEST reversal event's provenance.
+    refunded_at = Column(DateTime(timezone=True), nullable=True)
+    dispute_lost_at = Column(DateTime(timezone=True), nullable=True)
     needs_manual_review = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
