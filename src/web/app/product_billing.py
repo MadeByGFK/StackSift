@@ -58,6 +58,60 @@ class SettlementError(ProductError):
 # Purchases
 # ---------------------------------------------------------------------------
 
+def admission_lock_key(user_id, source_result_id, sku) -> str:
+    return f"product-admission:{user_id}:{source_result_id}:{sku}"
+
+
+def lock_product_admission(db: Session, user_id, source_result_id, sku):
+    """Stable shared lock serialising checkout admission vs settlement
+    (remediation2 P1-C).
+
+    ``live_entitlement(for_update=True)`` cannot lock an ABSENT row:
+    if settlement committed between checkout's entitlement lookup and
+    its pending-purchase lookup, checkout created (and collected) a
+    second purchase despite F1. Both sides therefore take this stable
+    per-(user, source, sku) lock FIRST — a CapacityScope row via the
+    house upsert-then-SELECT-FOR-UPDATE pattern (credits.
+    _ensure_capacity_scope, the lock_global_paid_scope precedent) —
+    so the entitlement lookup, the pending lookup, and the pending
+    insert are atomic w.r.t. settlement's grant, and vice versa.
+    Lock order: this scope precedes purchase/entitlement row locks on
+    both sides. On SQLite FOR UPDATE is a no-op (house caveat); the
+    PostgreSQL legs are the live evidence.
+    """
+    from app import credits as credits_helpers
+    return credits_helpers._ensure_capacity_scope(
+        db, admission_lock_key(user_id, source_result_id, sku), 1)
+
+
+def _session_conclusively_expired(purchase) -> bool:
+    """True only when Stripe CONFIRMS the purchase's session is dead
+    (remediation2 P1-B). Local age alone never proves it: a session
+    lives 24h from SESSION creation, which can postdate the row.
+
+    - Session id recorded: ask the API. Only status 'expired' is
+      conclusive; 'open'/'complete' mean the session can still (or
+      did) take payment, and a retrieval failure is NOT evidence.
+    - No session id recorded: a session, if Stripe created one at
+      all, was created contemporaneously with the row (the only
+      later-creation path — the checkout reuse branch — backfills
+      the session id), so past 25h of row age every such session is
+      conclusively past its 24h lifetime.
+    """
+    from app import stripe_billing
+    if purchase.stripe_session_id:
+        try:
+            session = stripe_billing.fetch_checkout_session(
+                purchase.stripe_session_id)
+        except stripe_billing.CheckoutError:
+            logger.warning(
+                "product purchase %s: session state unconfirmed; "
+                "treating as live", purchase.id)
+            return False
+        return session.get("status") == "expired"
+    return _as_aware(purchase.created_at) <= _utcnow() - timedelta(hours=25)
+
+
 def live_entitlement(db: Session, user_id, source_result_id, sku, *, for_update: bool = False):
     """An available|reserved entitlement for (buyer, source, sku), or None.
 
@@ -91,6 +145,10 @@ def create_pending_product_purchase(db: Session, user_id, sku: str, source_resul
     entry = stripe_billing.get_product_sku(sku)
     if entry is None:
         raise ProductError(f"unknown product sku: {sku}")
+    # P1-C: the stable admission lock is taken BEFORE either lookup,
+    # and held (by the caller's transaction) across lookup + insert,
+    # so settlement cannot commit an entitlement in between.
+    lock_product_admission(db, user_id, source_result_id, sku)
     existing_ent = live_entitlement(db, user_id, source_result_id, sku,
                                     for_update=True)
     if existing_ent is not None:
@@ -114,8 +172,14 @@ def create_pending_product_purchase(db: Session, user_id, sku: str, source_resul
             # (checkout:product:{purchase_id}), so Stripe returns the
             # original session instead of minting a second one (P2-1).
             return pending, True
-        # Stale pending row (session lifetime is 24h): close it out so
-        # the partial unique pending index lets a fresh row be created.
+        # Older than 23h: local age is NOT proof the session is dead
+        # (P1-B — its 24h lifetime runs from session creation, which
+        # can postdate this row). Retire the row ONLY when the
+        # session is conclusively expired; otherwise reuse it, so a
+        # payment on the original session still settles/grants
+        # against this row instead of dying as a 'duplicate'.
+        if not _session_conclusively_expired(pending):
+            return pending, True
         pending.status = "failed"
         db.flush()
     from app import credits as credits_helpers
@@ -125,9 +189,15 @@ def create_pending_product_purchase(db: Session, user_id, sku: str, source_resul
         stripe_price_id=stripe_billing.product_price_id(sku),
         pricing_version=credits_helpers.PRICING_VERSION, status="pending",
     )
-    db.add(purchase)
     try:
+        # P2-A: the savepoint is established BEFORE the purchase is
+        # added/flushed. Adding first let the nested begin flush the
+        # insert OUTSIDE the savepoint, so a pending-unique violation
+        # aborted the OUTER transaction (PostgreSQL) and the winner
+        # requery died with PendingRollbackError instead of reusing
+        # the winner.
         with db.begin_nested():
+            db.add(purchase)
             db.flush()
     except Exception:
         # Partial unique pending index (P2-1): a concurrent checkout
@@ -160,6 +230,12 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
     Returns 'processed' or 'duplicate'.
     """
     from app import credits as credits_helpers
+    # P1-C: the SAME stable admission lock checkout takes, taken
+    # BEFORE the purchase row lock (shared lock order), so a grant
+    # cannot commit between a concurrent checkout's entitlement and
+    # pending lookups.
+    lock_product_admission(db, purchase.user_id, purchase.source_result_id,
+                           purchase.sku)
     locked = db.execute(
         select(models.ProductPurchase).where(
             models.ProductPurchase.id == purchase.id).with_for_update()
@@ -264,6 +340,11 @@ def fail_product_purchase(db: Session, purchase, *, reason: str,
 
 
 def expire_stale_pending_product_purchases(db: Session, *, older_than_hours: int = 24) -> int:
+    # P1-B: age alone never retires a row whose session may still
+    # take payment — each candidate must be conclusively expired
+    # (Stripe-confirmed for rows with a session id; see
+    # _session_conclusively_expired). Unconfirmed rows stay pending
+    # and are re-examined on the next maintenance pass.
     cutoff = _utcnow() - timedelta(hours=older_than_hours)
     stale = db.execute(
         select(models.ProductPurchase).where(
@@ -271,10 +352,14 @@ def expire_stale_pending_product_purchases(db: Session, *, older_than_hours: int
             models.ProductPurchase.created_at < cutoff,
         ).with_for_update()
     ).scalars().all()
+    expired = 0
     for purchase in stale:
+        if not _session_conclusively_expired(purchase):
+            continue
         purchase.status = "failed"
+        expired += 1
     db.flush()
-    return len(stale)
+    return expired
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +398,14 @@ def apply_refund(db: Session, purchase, *, stripe_event_id: str,
     locked.reversal_event_id = stripe_event_id
     locked.reversal_kind = "refund"
     locked.reversed_at = _utcnow()
+    # P2-C: persist the refunded amount (Stripe's amount_refunded is
+    # cumulative per charge, so the latest event's value replaces —
+    # never adds). Partials previously recorded provenance only, so
+    # reconciliation's ledger side excluded the amount while the
+    # Stripe side subtracted it: a permanent false mismatch. F3
+    # semantics are unchanged: a partial never touches the
+    # entitlement (below, only the full branch acts on it).
+    locked.refunded_cents = refunded_cents
     if not full:
         db.flush()
         return "partial_recorded"

@@ -940,6 +940,55 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
                 ).scalar_one_or_none()
         return purchase
 
+    def _resolve_product_by_charge():
+        """Local join, then Stripe-API resolution (remediation2 P1-A).
+
+        Returns (purchase, retryable). Both local joins miss when a
+        reversal webhook precedes checkout.session.completed
+        settlement: real Charge objects carry no purchase metadata,
+        and the purchase row's PI snapshot is only written AT
+        settlement. The PaymentIntent carries the purchase metadata
+        from session creation, so retrieve it and join on that. A
+        charge with NO product relation at all is genuinely unknown
+        (retryable=False -> caller may ignore it); a charge the API
+        ties to the product family whose purchase cannot be resolved
+        yet, or whose resolution itself failed transiently, is
+        retryable (retryable=True -> caller rolls back and answers
+        500, committing NO event row, so redelivery can repair the
+        ordering once settlement lands). A purchase RESOLVED here
+        while still pending is processed normally: a full refund of
+        a pending purchase is terminal in apply_refund, and the
+        later settlement then grants nothing (duplicate).
+        """
+        purchase = _find_product_by_charge()
+        if purchase is not None:
+            return purchase, False
+        pi = stripe_obj.get("payment_intent")
+        if isinstance(pi, dict):
+            pi = pi.get("id")
+        if not pi:
+            return None, False
+        try:
+            pi_metadata = stripe_billing.fetch_payment_intent_metadata(pi)
+        except stripe_billing.CheckoutError:
+            log.warning("webhook %s: PI resolution failed transiently; "
+                        "asking Stripe to redeliver", event_id)
+            return None, True
+        if pi_metadata.get("kind") != "product":
+            return None, False  # not a product charge at all
+        purchase_ref = pi_metadata.get("purchase_id")
+        resolved = None
+        if purchase_ref:
+            try:
+                resolved = db.get(_models.ProductPurchase, purchase_ref)
+            except Exception:
+                resolved = None
+        if resolved is not None:
+            return resolved, False
+        log.warning("webhook %s: product charge for unresolved purchase "
+                    "%r; asking Stripe to redeliver", event_id, purchase_ref)
+        return None, True
+
     # F4: async success is NOT a grant route in Phase A.
     if event_type == "checkout.session.async_payment_succeeded":
         webhook_event.outcome = "ignored"
@@ -956,7 +1005,14 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
             webhook_event.note = "pack reversal handled by reconciliation"
             db.commit()
             return JSONResponse({"status": "ignored"})
-        purchase = _find_product_by_charge()
+        purchase, retryable = _resolve_product_by_charge()
+        if purchase is None and retryable:
+            # P1-A: never consume the event id for a product reversal
+            # we cannot resolve yet — roll back (no committed event
+            # row) and answer 500 so Stripe redelivers after the
+            # settlement ordering repairs itself.
+            db.rollback()
+            raise HTTPException(500, "transient settlement failure")
         if purchase is None:
             webhook_event.outcome = "ignored"
             webhook_event.note = "unknown purchase"

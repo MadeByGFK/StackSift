@@ -375,6 +375,29 @@ def compute_reconciliation(
                 continue
             if sid not in matched_latest or completed_at > matched_latest[sid]:
                 matched_latest[sid] = completed_at
+        # Remediation2 P2-B: product purchases join the SAME
+        # settlement-date bucketing BEFORE family partitioning.
+        # Previously matched_latest was credit-only, so a product
+        # session created before UTC midnight and settled after
+        # counted on its creation day (orphan there, since the
+        # product ledger gross keys on completed_at) and was missing
+        # from its settlement day's prior_sessions pairing — false
+        # mismatches on BOTH days. Product purchases whose current
+        # status moved on to refunded/disputed still settled on
+        # their completed_at, so they bucket identically.
+        for sid, completed_at in db.execute(
+            select(M.ProductPurchase.stripe_session_id,
+                   M.ProductPurchase.completed_at).where(
+                M.ProductPurchase.status.in_(
+                    ("completed", "refunded", "disputed")),
+                M.ProductPurchase.completed_at.isnot(None),
+                M.ProductPurchase.stripe_session_id.in_(all_ids),
+            )
+        ).all():
+            if sid is None or completed_at is None:
+                continue
+            if sid not in matched_latest or completed_at > matched_latest[sid]:
+                matched_latest[sid] = completed_at
     included: list[dict] = []
     for s in sessions:
         sid = s["id"]
@@ -696,14 +719,26 @@ def compute_reconciliation(
     ).scalars().all()
     product_ledger_gross = sum(p.amount_cents or 0 for p in product_purchases)
     product_ledger_session_ids = {p.stripe_session_id for p in product_purchases if p.stripe_session_id}
+    # Remediation2 P2-C: the product ledger refund total is the sum
+    # of PERSISTED refunded amounts (product_purchases.refunded_cents,
+    # migration 0018) for every purchase whose latest refund event
+    # landed this day — partial refunds included, at their partial
+    # amount. Previously only status='refunded' rows counted, at
+    # FULL amount, so a $3 partial on a $9 purchase left the ledger
+    # net at 900 while the Stripe side netted 600: a permanent false
+    # mismatch. Pre-0018 full-refund rows carry refunded_cents NULL
+    # and fall back to their full amount_cents.
     product_refunded = db.execute(
         select(M.ProductPurchase).where(
-            M.ProductPurchase.status == "refunded",
+            M.ProductPurchase.reversal_kind == "refund",
             M.ProductPurchase.reversed_at >= start,
             M.ProductPurchase.reversed_at < end,
         )
     ).scalars().all()
-    product_ledger_refunds = sum(p.amount_cents or 0 for p in product_refunded)
+    product_ledger_refunds = sum(
+        (p.refunded_cents if p.refunded_cents is not None
+         else (p.amount_cents or 0) if p.status == "refunded" else 0)
+        for p in product_refunded)
     # P2-2: product Stripe refunds/disputes were already partitioned
     # in the charge loop above via the PaymentIntent join (product_
     # stripe_refunds / product_stripe_disputes) — real charges do not

@@ -923,6 +923,13 @@ class ProductPurchase(Base):
     reversal_kind = Column(String(20), nullable=True)
     # 'refund' | 'dispute_open' | 'dispute_lost' | 'dispute_won'
     reversed_at = Column(DateTime(timezone=True), nullable=True)
+    # Remediation2 P2-C (migration 0018): cumulative refunded cents
+    # from the latest charge.refunded event (Stripe's amount_refunded
+    # is cumulative per charge). Partials persist their amount here
+    # so reconciliation's product ledger refund total can include
+    # them; NULL on rows never refunded (and on pre-0018 full-refund
+    # rows, where reconciliation falls back to amount_cents).
+    refunded_cents = Column(Integer, nullable=True)
     needs_manual_review = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)

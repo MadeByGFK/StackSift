@@ -42,6 +42,20 @@ def _run_job(db, name, fn):
     log = logging.getLogger(__name__)
     try:
         result = fn(db)
+        # Remediation2 P2-D: explicit committed boundary per job.
+        # Jobs share one session and several only flush; without a
+        # commit here, a later job's unconditional rollback (the
+        # recovery jobs roll back after candidate selection;
+        # _reconcile_all_accounts rolls back on entry) silently
+        # discarded an earlier job's flushed-but-uncommitted work —
+        # e.g. expire_stale_pending_purchases' expiry was thrown away
+        # by recover_expired_redemptions, and the product expire /
+        # lapse jobs' work by reconciliation. Jobs that commit
+        # internally are unaffected (a second commit is a no-op);
+        # read-only jobs commit nothing. A commit failure is a job
+        # failure (the except path rolls back and counts it).
+        if db is not None:
+            db.commit()
     except Exception:
         if db is not None:
             try:
@@ -92,6 +106,15 @@ def cleanup_results(db):
         M.Entitlement.status.in_(('available', 'reserved')),
         M.Entitlement.redemption_deadline.isnot(None),
         M.Entitlement.redemption_deadline >= C._utcnow())).all())
+    # Remediation2 P1-D: a source with a PENDING product purchase is
+    # protected on the same terms — its session can still settle
+    # (pending purchases retire only when conclusively expired, P1-B),
+    # and settlement grants an entitlement whose redemption reads
+    # exactly the prerequisites cleanup would destroy. Once the
+    # purchase is terminal (failed/refunded/completed — a completed
+    # one protects via its entitlement above), protection ends.
+    _protected_sources |= set(db.scalars(select(M.ProductPurchase.source_result_id).where(
+        M.ProductPurchase.status == 'pending')).all())
     rows = [r for r in db.scalars(select(M.Result).where(M.Result.expires_at <= C._utcnow(), M.Result.deleted_at.is_(None)))
             if r.id not in _protected_sources]
     expired_ids = []

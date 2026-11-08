@@ -1304,6 +1304,463 @@ def test_cleanup_after_window_lapse_proceeds_normally_p3_10(p164_env):
         assert db.get(models.Entitlement, ent_id).status == "refund_eligible"
 
 
+# --- Remediation round 2 (Codex PR #172: P1-A..P1-D, P2-A..P2-D) -----------
+
+_PI_META = {"value": {}}
+
+
+def _stub_stripe_get_combined(monkeypatch):
+    """httpx.get stub serving PI-metadata + line-items + session GETs.
+
+    Replaces the autouse line-items-only stub for tests whose code
+    path also resolves PaymentIntents (P1-A) or Checkout Sessions
+    (P1-B) through the Stripe API.
+    """
+    import httpx
+    _PI_META["value"] = {}
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def _get(url, params=None, auth=None, headers=None, timeout=None):
+        if "/payment_intents/" in url:
+            return Resp({"metadata": dict(_PI_META["value"])})
+        if url.endswith("/line_items"):
+            if _LINE_PRICE["id"] is None:
+                return Resp({"data": []})
+            return Resp({"data": [{"price": {"id": _LINE_PRICE["id"]}}]})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(httpx, "get", _get)
+    return _get
+
+
+def _stub_session_get(monkeypatch, status_by_id):
+    """httpx.get stub for GET /checkout/sessions/{id} (P1-B)."""
+    import httpx
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def _get(url, params=None, auth=None, headers=None, timeout=None):
+        sid = url.rsplit("/", 1)[-1]
+        assert sid in status_by_id, url
+        return Resp({"id": sid, "status": status_by_id[sid]})
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+
+def _backdate_purchase(p164_env, pid, *, hours):
+    from app import models
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, pid)
+        p.created_at = datetime.now(timezone.utc) - timedelta(hours=hours)
+        db.commit()
+
+
+def test_refund_before_completion_via_pi_resolution_grants_nothing_p1a(p164_env, monkeypatch):
+    # The reversal arrives BEFORE checkout.session.completed: the
+    # charge carries NO purchase metadata and the purchase row has
+    # NO snapshotted PI id yet, so both local joins miss. Resolution
+    # must go through the PaymentIntent's metadata (Stripe API); the
+    # full refund then makes the pending purchase terminal and the
+    # later settlement grants NOTHING.
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    _stub_stripe_get_combined(monkeypatch)
+    _PI_META["value"] = {"kind": "product", "purchase_id": str(purchase.id),
+                         "user_id": str(user_id), "sku": "investigation_report",
+                         "pricing_version": "1"}
+    charge = {"id": "ch_early", "amount": 900, "amount_refunded": 900,
+              "payment_intent": "pi_early", "metadata": {}}
+    ev = {"id": "evt_refund_early", "type": "charge.refunded",
+          "livemode": False, "data": {"object": charge}}
+    r = _post_event(p164_env, ev)
+    assert r.json()["status"] == "processed"
+    from app import models
+    with p164_env.sessions() as db:
+        assert db.get(models.ProductPurchase, purchase.id).status == "refunded"
+    r2 = _post_event(p164_env, _product_completed_event(
+        "evt_complete_after_refund", purchase, pi="pi_early"))
+    assert r2.json()["status"] == "duplicate"
+    with p164_env.sessions() as db:
+        assert db.query(models.Entitlement).count() == 0
+
+
+def test_product_reversal_unresolved_is_retryable_not_ignored_p1a(p164_env, monkeypatch):
+    # PI metadata ties the charge to the product family but the
+    # purchase_id does not resolve locally yet: the event id must
+    # NOT be consumed as 'ignored'. The handler rolls back (no
+    # committed event row) and answers 500; once the purchase row
+    # exists, redelivery of the SAME event processes the refund.
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    ghost_id = uuid.uuid4()
+    _stub_stripe_get_combined(monkeypatch)
+    _PI_META["value"] = {"kind": "product", "purchase_id": str(ghost_id),
+                         "user_id": str(user_id), "sku": "investigation_report",
+                         "pricing_version": "1"}
+    charge = {"id": "ch_ghost", "amount": 900, "amount_refunded": 900,
+              "payment_intent": "pi_ghost", "metadata": {}}
+    ev = {"id": "evt_refund_ghost", "type": "charge.refunded",
+          "livemode": False, "data": {"object": charge}}
+    r = _post_event(p164_env, ev)
+    assert r.status_code == 500
+    from app import models
+    with p164_env.sessions() as db:
+        assert db.query(models.StripeWebhookEvent).filter_by(
+            stripe_event_id="evt_refund_ghost").count() == 0
+        p = models.ProductPurchase(
+            id=ghost_id, user_id=user_id, sku="investigation_report",
+            source_result_id=rid, stripe_session_id="cs_test_1",
+            amount_cents=900, currency="usd", stripe_price_id=PRICE_ID,
+            pricing_version=1, status="pending")
+        db.add(p)
+        db.commit()
+    r2 = _post_event(p164_env, ev)
+    assert r2.json()["status"] == "processed"
+    with p164_env.sessions() as db:
+        assert db.get(models.ProductPurchase, ghost_id).status == "refunded"
+        assert db.query(models.Entitlement).count() == 0
+
+
+def test_reversal_with_no_product_relation_still_ignored_p1a(p164_env, monkeypatch):
+    # Boundary of P1-A: a charge whose PI metadata shows NO product
+    # relation at all is genuinely unknown — ignored with 200, as
+    # before (pack reversals keep their reconciliation-only path).
+    _make_user(p164_env)
+    _stub_stripe_get_combined(monkeypatch)
+    _PI_META["value"] = {"kind": "pack", "pack_id": "starter"}
+    charge = {"id": "ch_pack", "amount": 500, "amount_refunded": 500,
+              "payment_intent": "pi_pack", "metadata": {}}
+    ev = {"id": "evt_pack_refund", "type": "charge.refunded",
+          "livemode": False, "data": {"object": charge}}
+    r = _post_event(p164_env, ev)
+    assert r.status_code == 200 and r.json()["status"] == "ignored"
+
+
+def test_checkout_23_24h_window_reuses_when_session_open_p1b(p164_env, monkeypatch):
+    # 23.5h-old pending row whose Stripe session is STILL OPEN (its
+    # 24h lifetime runs from session creation, which postdated the
+    # row): the row must be reused, never retired — paying that
+    # session settles against this row and grants.
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id="cs_old")
+    _backdate_purchase(p164_env, pid, hours=23.5)
+    _stub_session_get(monkeypatch, {"cs_old": "open"})
+    _fake_stripe(monkeypatch, [])
+    r = _checkout(p164_env, rid, csrf)
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["purchase_id"] == str(pid)
+    from app import models
+    with p164_env.sessions() as db:
+        assert db.query(models.ProductPurchase).count() == 1
+        assert db.get(models.ProductPurchase, pid).status == "pending"
+
+
+def test_checkout_stale_pending_reuses_when_session_state_unconfirmed_p1b(p164_env, monkeypatch):
+    # A Stripe retrieval FAILURE is not evidence of expiry: the
+    # fail-safe is reuse, never retirement on a guess.
+    import httpx
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id="cs_old")
+    _backdate_purchase(p164_env, pid, hours=26)
+
+    def _boom(url, params=None, auth=None, headers=None, timeout=None):
+        raise ConnectionError("stripe unreachable")
+    monkeypatch.setattr(httpx, "get", _boom)
+    _fake_stripe(monkeypatch, [])
+    r = _checkout(p164_env, rid, csrf)
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["purchase_id"] == str(pid)
+    from app import models
+    with p164_env.sessions() as db:
+        assert db.query(models.ProductPurchase).count() == 1
+
+
+def test_checkout_stale_pending_retires_when_session_expired_p1b(p164_env, monkeypatch):
+    # The preserved behaviour: a Stripe-CONFIRMED expired session
+    # retires its row and a fresh purchase is created.
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id="cs_old")
+    _backdate_purchase(p164_env, pid, hours=26)
+    _stub_session_get(monkeypatch, {"cs_old": "expired"})
+    _fake_stripe(monkeypatch, [])
+    r = _checkout(p164_env, rid, csrf)
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["purchase_id"] != str(pid)
+    from app import models
+    with p164_env.sessions() as db:
+        assert db.query(models.ProductPurchase).count() == 2
+        assert db.get(models.ProductPurchase, pid).status == "failed"
+
+
+def test_expire_stale_product_purchase_requires_confirmed_expiry_p1b(p164_env, monkeypatch):
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id="cs_job")
+    _backdate_purchase(p164_env, pid, hours=48)
+    _stub_session_get(monkeypatch, {"cs_job": "open"})
+    with p164_env.sessions() as db:
+        assert pb.expire_stale_pending_product_purchases(db) == 0
+        db.commit()
+        assert db.get(models.ProductPurchase, pid).status == "pending"
+    _stub_session_get(monkeypatch, {"cs_job": "expired"})
+    with p164_env.sessions() as db:
+        assert pb.expire_stale_pending_product_purchases(db) == 1
+        db.commit()
+        assert db.get(models.ProductPurchase, pid).status == "failed"
+
+
+def test_admission_and_settlement_share_stable_lock_p1c(p164_env):
+    # Construction evidence (sqlite): settlement and checkout
+    # admission take the SAME stable per-(user, source, sku)
+    # CapacityScope lock row, and the row is a lock only (used == 0,
+    # no capacity consumed). The live serialisation is PostgreSQL —
+    # see the pg-gated test below (CI evidence).
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id="cs_test_1")
+    key = pb.admission_lock_key(user_id, rid, "investigation_report")
+    with p164_env.sessions() as db:
+        purchase = db.get(models.ProductPurchase, pid)
+        out = pb.settle_product_purchase(
+            db, purchase, stripe_event_id="evt_lock",
+            stripe_session_id="cs_test_1",
+            event_metadata={"kind": "product", "purchase_id": str(pid),
+                            "user_id": str(user_id),
+                            "sku": "investigation_report",
+                            "pricing_version": "1"},
+            amount_cents=900, currency="usd", payment_intent_id="pi_test_1",
+            payment_status="paid", session_status="complete",
+            mode="payment", session_price_id=PRICE_ID, livemode=False)
+        assert out == "processed"
+        db.commit()
+        scope = db.query(models.CapacityScope).filter_by(scope_key=key).one()
+        assert scope.used == 0
+    rid2 = _source(p164_env, user_id)
+    key2 = pb.admission_lock_key(user_id, rid2, "investigation_report")
+    with p164_env.sessions() as db:
+        _p, reused = pb.create_pending_product_purchase(
+            db, user_id, "investigation_report", rid2)
+        assert reused is False
+        db.commit()
+        scope2 = db.query(models.CapacityScope).filter_by(scope_key=key2).one()
+        assert scope2.used == 0
+
+
+def test_cleanup_preserves_source_with_pending_purchase_p1d(p164_env):
+    # A pending product purchase protects its source's redemption
+    # prerequisites exactly like an open-window entitlement: the
+    # session can still settle and grant. Once the purchase is
+    # terminal, cleanup proceeds normally.
+    from app import credit_maintenance
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id="cs_pend")
+    with p164_env.sessions() as db:
+        src = db.get(models.Result, rid)
+        manifest_before = src.storage_manifest
+        src.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        db.commit()
+    with p164_env.sessions() as db:
+        credit_maintenance.cleanup_results(db)
+    with p164_env.sessions() as db:
+        src = db.get(models.Result, rid)
+        assert src.deleted_at is None
+        assert src.storage_manifest == manifest_before
+        p = db.get(models.ProductPurchase, pid)
+        p.status = "failed"
+        db.commit()
+    with p164_env.sessions() as db:
+        credit_maintenance.cleanup_results(db)
+    with p164_env.sessions() as db:
+        src = db.get(models.Result, rid)
+        assert src.deleted_at is not None
+        assert src.storage_manifest == "{}"
+
+
+def test_pending_insert_race_reuses_winner_p2a(p164_env, monkeypatch):
+    # The winner of a pending-insert race is inserted (via the same
+    # session, flushed) at the one moment the loser has already
+    # SELECTed pending=None but not yet constructed its row — the
+    # product_price_id call inside purchase construction. The loser's
+    # flush then hits the partial unique index INSIDE its savepoint
+    # and it must reuse the winner, not die with the outer
+    # transaction aborted.
+    from app import product_billing as pb
+    from app import models, stripe_billing
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    orig_price = stripe_billing.product_price_id
+    state = {"done": False, "winner_id": None}
+    holder = {}
+    def sneaky_price(sku):
+        if not state["done"]:
+            state["done"] = True
+            db = holder["db"]
+            w = models.ProductPurchase(
+                user_id=user_id, sku="investigation_report",
+                source_result_id=rid, amount_cents=900, currency="usd",
+                stripe_price_id=PRICE_ID, pricing_version=1, status="pending")
+            db.add(w)
+            db.flush()
+            state["winner_id"] = w.id
+        return orig_price(sku)
+    monkeypatch.setattr(stripe_billing, "product_price_id", sneaky_price)
+    with p164_env.sessions() as db:
+        holder["db"] = db
+        purchase, reused = pb.create_pending_product_purchase(
+            db, user_id, "investigation_report", rid)
+        assert reused is True
+        assert purchase.id == state["winner_id"]
+        db.commit()
+        assert db.query(models.ProductPurchase).filter_by(
+            status="pending").count() == 1
+
+
+def test_reconciliation_product_cross_midnight_settles_clean_both_days_p2b(p164_env):
+    # Session CREATED day 1, purchase SETTLED (completed_at) day 2:
+    # the session counts on day 2 (settlement day) on BOTH sides.
+    # Day 1 must show neither an orphan session nor a mismatch;
+    # day 2 pairs the prior-day session with the ledger gross.
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    ent_id = _seed_entitlement(p164_env, user_id, rid)
+    day1 = datetime(2026, 1, 1, tzinfo=timezone.utc).date()
+    day2 = datetime(2026, 1, 2, tzinfo=timezone.utc).date()
+    with p164_env.sessions() as db:
+        ent = db.get(models.Entitlement, ent_id)
+        pid = ent.product_purchase_id
+        p = db.get(models.ProductPurchase, pid)
+        p.stripe_session_id = "cs_xmid"
+        p.completed_at = datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
+        db.commit()
+        session = {"id": "cs_xmid", "amount_total": 900,
+                   "payment_intent": "pi_xmid",
+                   "metadata": {"kind": "product", "purchase_id": str(pid),
+                                "sku": "investigation_report"}}
+        r1 = PR.compute_reconciliation(db, day1, [session], [])
+        fam1 = r1["per_family"]["product"]
+        assert fam1["stripe_gross_cents"] == 0
+        assert fam1["ledger_gross_cents"] == 0
+        assert not [d for d in r1["differences"] if d.get("family") == "product"]
+        r2 = PR.compute_reconciliation(db, day2, [], [], prior_sessions=[session])
+        fam2 = r2["per_family"]["product"]
+        assert fam2["stripe_gross_cents"] == 900
+        assert fam2["ledger_gross_cents"] == 900
+        assert fam2["stripe_net_cents"] == fam2["ledger_net_cents"] == 900
+        assert not [d for d in r2["differences"] if d.get("family") == "product"]
+
+
+def test_reconciliation_partial_product_refund_nets_clean_p2c(p164_env):
+    # The finding's example: a $3 partial refund on a $9 purchase.
+    # The amount is persisted on the purchase, the entitlement stays
+    # intact (F3), and reconciliation nets 600 == 600 with no
+    # family_total_mismatch.
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_partial_p2c", purchase, etype="charge.refunded",
+        amount=900, refunded=300))
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.refunded_cents == 300
+        assert p.status == "completed"
+        assert db.query(models.Entitlement).one().status == "available"
+        day = p.completed_at.date()
+        session = {"id": p.stripe_session_id or "cs_test_1",
+                   "amount_total": 900, "payment_intent": "pi_test_1",
+                   "metadata": {"kind": "product", "purchase_id": str(p.id),
+                                "sku": "investigation_report"}}
+        charge = {"id": "ch_partial_p2c", "amount": 900,
+                  "amount_refunded": 300, "payment_intent": "pi_test_1",
+                  "metadata": {}, "disputed": False}
+        result = PR.compute_reconciliation(db, day, [session], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["stripe_refund_cents"] == 300
+    assert fam["ledger_refund_cents"] == 300
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 600
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+def test_run_once_stale_credit_expiry_survives_recovery_p2d(p164_env, monkeypatch):
+    # run_once order: expire_stale_pending_purchases flushes the
+    # expiry, then recover_expired_redemptions unconditionally rolls
+    # back after candidate selection. With per-job committed
+    # boundaries the expiry PERSISTS in a fresh session.
+    from app import credit_maintenance as cm
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    with p164_env.sessions() as db:
+        p = models.CreditPurchase(
+            user_id=user_id, pack_id="starter", credits=10,
+            pricing_version=1, status="pending")
+        db.add(p)
+        db.commit()
+        pid = p.id
+        p.created_at = datetime.now(timezone.utc) - timedelta(hours=48)
+        db.commit()
+    monkeypatch.setattr("app.main.cleanup_pending_uploads", lambda: None)
+    cm.run_once(reconcile=False)
+    with p164_env.sessions() as db:
+        assert db.get(models.CreditPurchase, pid).status == "failed"
+
+
+def test_run_once_product_expire_and_lapse_survive_reconcile_p2d(p164_env, monkeypatch):
+    # With reconcile=True, _reconcile_all_accounts' entry rollback
+    # previously discarded the product expire + lapse jobs' flushed
+    # work. Both must persist after a full run_once.
+    from app import credit_maintenance as cm
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id=None)
+    _backdate_purchase(p164_env, pid, hours=48)
+    ent_id = _seed_entitlement(
+        p164_env, user_id, rid,
+        deadline=datetime.now(timezone.utc) - timedelta(days=1))
+    monkeypatch.setattr("app.main.cleanup_pending_uploads", lambda: None)
+    cm.run_once(reconcile=True)
+    with p164_env.sessions() as db:
+        assert db.get(models.ProductPurchase, pid).status == "failed"
+        assert db.get(models.Entitlement, ent_id).status == "refund_eligible"
+
+
 # --- A1: PostgreSQL concurrency legs (CI only) ------------------------------
 # Unique schema migrated to Alembic head per test (which also proves
 # migration 0017 upgrades cleanly on PostgreSQL), NullPool factories so
@@ -1400,6 +1857,87 @@ def test_pg_same_entitlement_race_exactly_one_reserves(pg_factory):
         live = db.query(M.EntitlementRedemption).filter(
             M.EntitlementRedemption.status == "reserved").count()
         assert live == 1
+
+
+def _pg_seed_pending(factory):
+    from app import models as M
+    now = datetime.now(timezone.utc)
+    with factory() as db:
+        user = M.User(email=f"pg_{uuid.uuid4().hex[:8]}@example.com", email_verified=True)
+        db.add(user)
+        db.flush()
+        source = M.Result(
+            user_id=user.id, type="analysis", free_request_id=f"pg-{uuid.uuid4().hex}",
+            storage_manifest="{}", integrity_digest="x" * 64, byte_count=2,
+            ready_at=now, expires_at=now + timedelta(days=7))
+        db.add(source)
+        db.flush()
+        purchase = M.ProductPurchase(
+            user_id=user.id, sku="investigation_report", source_result_id=source.id,
+            stripe_session_id="cs_pg_1", amount_cents=900, currency="usd",
+            stripe_price_id=PRICE_ID, pricing_version=1, status="pending")
+        db.add(purchase)
+        db.commit()
+        return user.id, source.id, purchase.id
+
+
+@pgmark
+def test_pg_admission_lock_blocks_settlement_until_release_p1c(pg_factory):
+    # Deterministic P1-C evidence on PostgreSQL: while a checkout
+    # admission transaction holds the stable per-(user, source, sku)
+    # lock, a concurrent settlement of the same (user, source, sku)
+    # CANNOT commit its grant in between the admission lookups; it
+    # proceeds only after the admission transaction ends, and then
+    # grants exactly one entitlement.
+    import threading
+    from app import product_billing as pb
+    from app import models as M
+    factory, _engine = pg_factory
+    uid, rid, pid = _pg_seed_pending(factory)
+    locked = threading.Event()
+    release = threading.Event()
+    settled = threading.Event()
+    outcome = {}
+
+    def hold_admission():
+        with factory() as db:
+            pb.lock_product_admission(db, uid, rid, "investigation_report")
+            db.flush()
+            locked.set()
+            release.wait(timeout=20)
+            db.commit()
+
+    def settle():
+        with factory() as db:
+            purchase = db.get(M.ProductPurchase, pid)
+            outcome["result"] = pb.settle_product_purchase(
+                db, purchase, stripe_event_id="evt_pg_lock",
+                stripe_session_id="cs_pg_1",
+                event_metadata={"kind": "product", "purchase_id": str(pid),
+                                "user_id": str(uid),
+                                "sku": "investigation_report",
+                                "pricing_version": "1"},
+                amount_cents=900, currency="usd",
+                payment_intent_id="pi_pg_1", payment_status="paid",
+                session_status="complete", mode="payment",
+                session_price_id=PRICE_ID, livemode=False)
+            db.commit()
+            settled.set()
+
+    holder = threading.Thread(target=hold_admission)
+    holder.start()
+    assert locked.wait(timeout=15)
+    worker = threading.Thread(target=settle)
+    worker.start()
+    # While the admission lock is held, settlement must not finish.
+    assert not settled.wait(timeout=3)
+    release.set()
+    assert settled.wait(timeout=20)
+    holder.join(timeout=20)
+    worker.join(timeout=20)
+    assert outcome["result"] == "processed"
+    with factory() as db:
+        assert db.query(M.Entitlement).count() == 1
 
 
 @pgmark

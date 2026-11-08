@@ -413,6 +413,72 @@ def fetch_session_line_item_price_id(session_id: str) -> str | None:
     return None
 
 
+def fetch_payment_intent_metadata(payment_intent_id: str) -> dict:
+    """Retrieve a PaymentIntent's metadata from the Stripe API.
+
+    Remediation2 P1-A: a ``charge.refunded`` / dispute webhook that
+    arrives BEFORE ``checkout.session.completed`` settlement cannot
+    join locally — real Charge objects carry no purchase metadata and
+    the purchase row's snapshotted PI id is only written at
+    settlement. The PaymentIntent DOES carry the purchase metadata
+    (set at session creation via ``payment_intent_data[metadata]``),
+    so the webhook resolves the pending purchase through this
+    retrieval. Raises CheckoutError on transport/API failure so the
+    caller can answer non-2xx and let Stripe redeliver.
+    """
+    if not payment_intent_id:
+        raise CheckoutError("missing payment intent id for retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/payment_intents/{payment_intent_id}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe payment-intent request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe payment-intent request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe payment-intent returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe payment-intent request failed")
+    body = resp.json()
+    meta = body.get("metadata") if isinstance(body, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def fetch_checkout_session(session_id: str) -> dict:
+    """Retrieve a Checkout Session object from the Stripe API.
+
+    Remediation2 P1-B: local row age is NOT proof a session is dead
+    (sessions live 24h from SESSION creation, which can postdate the
+    purchase row). Callers confirm ``status`` (open|complete|expired)
+    here before retiring a pending purchase. Raises CheckoutError on
+    transport/API failure — an unconfirmed session must be treated
+    as still live, never retired on a guess.
+    """
+    if not session_id:
+        raise CheckoutError("missing session id for retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/checkout/sessions/{session_id}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe session request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe session request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe session returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe session request failed")
+    body = resp.json()
+    return body if isinstance(body, dict) else {}
+
+
 def create_product_checkout_session(
     *,
     user_id,
