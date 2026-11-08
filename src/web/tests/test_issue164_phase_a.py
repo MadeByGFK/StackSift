@@ -1960,3 +1960,324 @@ def test_pg_revoke_during_generation_wins(pg_factory):
             pb.complete_redemption(db, red_id, "w1", result_id=None)
         db.rollback()
         assert db.get(M.Entitlement, ent_id).status == "revoked"
+
+
+# --- Remediation round 3 (Codex PR #172: 1xP1, 4xP2) -----------------------
+# Stale-instance simulations use exec_driver_sql: raw SQL in the SAME
+# transaction updates the row while bypassing the ORM identity map
+# entirely, which is exactly the state a caller-loaded instance is in
+# after a CONCURRENT transaction commits a different status — the
+# session's in-memory copy stays stale, and only a populate_existing
+# re-select under the row lock can see the committed truth.
+
+def _driver_update(p164_env, db, pid, sql_tail, params):
+    db.connection().exec_driver_sql(
+        f"UPDATE product_purchases SET {sql_tail} WHERE id = ?",
+        (str(pid),) + tuple(params))
+
+
+def test_r3_settle_refreshes_stale_pending_after_concurrent_refund(p164_env):
+    # P1: caller-loaded purchase reads stale 'pending' while the row
+    # was concurrently committed 'refunded'. Settlement must refresh
+    # under the lock, return duplicate, and grant NOTHING.
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, session_id="cs_test_1")
+    with p164_env.sessions() as db:
+        purchase = db.get(models.ProductPurchase, pid)
+        assert purchase.status == "pending"
+        _driver_update(p164_env, db, pid, "status = 'refunded'", ())
+        assert purchase.status == "pending"  # stale premise
+        out = pb.settle_product_purchase(
+            db, purchase, stripe_event_id="evt_r3_stale",
+            stripe_session_id="cs_test_1",
+            event_metadata={"kind": "product", "purchase_id": str(pid),
+                            "user_id": str(user_id),
+                            "sku": "investigation_report",
+                            "pricing_version": "1"},
+            amount_cents=900, currency="usd", payment_intent_id="pi_test_1",
+            payment_status="paid", session_status="complete",
+            mode="payment", session_price_id=PRICE_ID, livemode=False)
+        assert out == "duplicate"
+        db.commit()
+    with p164_env.sessions() as db:
+        assert db.get(models.ProductPurchase, pid).status == "refunded"
+        assert db.query(models.Entitlement).count() == 0
+
+
+def test_r3_apply_dispute_refreshes_stale_instance_no_resurrect(p164_env):
+    # P1 (apply_dispute leg): caller-stale 'completed' must not
+    # resurrect a concurrently committed 'refunded' purchase to
+    # 'disputed', and no dispute_lost_at may be recorded for it.
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    with p164_env.sessions() as db:
+        stale = db.get(models.ProductPurchase, purchase.id)
+        assert stale.status == "completed"
+        _driver_update(p164_env, db, purchase.id, "status = 'refunded'", ())
+        assert stale.status == "completed"  # stale premise
+        pb.apply_dispute(db, stale, stripe_event_id="evt_r3_disp_stale",
+                         dispute_status="lost")
+        db.commit()
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.status == "refunded"
+        assert getattr(p, "dispute_lost_at", None) is None
+
+
+def test_r3_apply_refund_refreshes_stale_refunded_cents(p164_env):
+    # P1+P2 (apply_refund leg): the persisted cumulative is already
+    # 600 (concurrently committed) while the caller instance is
+    # stale at None; a 300 partial event must keep 600, not 300.
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    with p164_env.sessions() as db:
+        stale = db.get(models.ProductPurchase, purchase.id)
+        assert stale.refunded_cents is None
+        _driver_update(p164_env, db, purchase.id, "refunded_cents = 600", ())
+        assert stale.refunded_cents is None  # stale premise
+        out = pb.apply_refund(db, stale, stripe_event_id="evt_r3_ref_stale",
+                              refunded_cents=300, charge_amount_cents=900)
+        assert out == "partial_recorded"
+        db.commit()
+    with p164_env.sessions() as db:
+        assert db.get(models.ProductPurchase, purchase.id).refunded_cents == 600
+
+
+def test_r3_lost_dispute_on_pending_purchase_is_terminal(p164_env):
+    # P2: dispute lost BEFORE checkout completion — the pending
+    # purchase becomes terminal and the later completion grants
+    # nothing (previously pending survived and settlement granted).
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    from app import models
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        p.stripe_payment_intent_id = "pi_test_1"
+        db.commit()
+    r = _post_event(p164_env, _charge_event(
+        "evt_r3_disp_lost_pending", purchase,
+        etype="charge.dispute.closed", status="lost"))
+    assert r.json()["status"] == "processed"
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.status == "disputed"  # terminal for settlement
+        assert getattr(p, "dispute_lost_at", None) is not None
+    r2 = _post_event(p164_env, _product_completed_event(
+        "evt_r3_complete_after_lost", purchase))
+    assert r2.json()["status"] == "duplicate"
+    with p164_env.sessions() as db:
+        assert db.query(models.Entitlement).count() == 0
+
+
+def test_r3_settlement_rejects_pending_with_recorded_lost_dispute(p164_env):
+    # P2 (legacy-row leg): a pending purchase that ALREADY carries a
+    # recorded lost dispute (written by the pre-fix code path) must
+    # not settle even though its status is still 'pending'.
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        p.reversal_kind = "dispute_lost"
+        p.reversed_at = datetime.now(timezone.utc)
+        db.commit()
+    r = _post_event(p164_env, _product_completed_event(
+        "evt_r3_legacy_lost", purchase))
+    assert r.json()["status"] == "duplicate"
+    with p164_env.sessions() as db:
+        assert db.query(models.Entitlement).count() == 0
+        assert db.get(models.ProductPurchase, purchase.id).status == "disputed"
+
+
+def test_r3_out_of_order_partial_refunds_persist_maximum(p164_env):
+    # P2: distinct partial-refund events delivered out of order
+    # (600 event processed before the older 300 event) must persist
+    # the maximum cumulative total — never regress to 300.
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_r3_ref_600", purchase, etype="charge.refunded",
+        amount=900, refunded=600))
+    _post_event(p164_env, _charge_event(
+        "evt_r3_ref_300_late", purchase, etype="charge.refunded",
+        amount=900, refunded=300))
+    from app import models
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.refunded_cents == 600
+        assert p.status == "completed"  # partials never terminal (F3)
+        assert db.query(models.Entitlement).one().status == "available"
+
+
+def _r3_backdate_completion(p164_env, pid, when):
+    from app import models
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, pid)
+        p.completed_at = when
+        db.commit()
+
+
+def _r3_product_session(purchase_id):
+    return {"id": "cs_test_1", "amount_total": 900,
+            "payment_intent": "pi_test_1",
+            "metadata": {"kind": "product", "purchase_id": str(purchase_id),
+                         "sku": "investigation_report"}}
+
+
+def test_r3_reconciliation_refund_bucketed_by_charge_creation_day(p164_env):
+    # P2 (finding 3, refund leg): purchase completed (charge
+    # created) Jan 1; the refund is PROCESSED days later. The
+    # Stripe side attributes amount_refunded to the charge's
+    # creation day, so the ledger side must deduct on Jan 1 too —
+    # and must NOT deduct on the processing day.
+    from app import payment_reconcile as PR
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    charge_day = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    _r3_backdate_completion(p164_env, purchase.id, charge_day)
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        out = pb.apply_refund(db, p, stripe_event_id="evt_r3_ref_day",
+                              refunded_cents=300, charge_amount_cents=900)
+        assert out == "partial_recorded"
+        db.commit()
+        processing_day = db.get(
+            models.ProductPurchase, purchase.id).reversed_at.date()
+        assert processing_day != charge_day.date()
+        charge = {"id": "ch_r3_ref", "amount": 900, "amount_refunded": 300,
+                  "payment_intent": "pi_test_1", "metadata": {},
+                  "disputed": False}
+        result = PR.compute_reconciliation(
+            db, charge_day.date(), [_r3_product_session(purchase.id)], [charge])
+        fam = result["per_family"]["product"]
+        assert fam["ledger_refund_cents"] == 300
+        assert fam["stripe_refund_cents"] == 300
+        assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 600
+        assert not any(d["kind"] == "family_total_mismatch"
+                       for d in result["differences"])
+        result2 = PR.compute_reconciliation(db, processing_day, [], [])
+        assert result2["per_family"]["product"]["ledger_refund_cents"] == 0
+
+
+def test_r3_reconciliation_dispute_bucketed_by_charge_creation_day(p164_env):
+    # P2 (finding 3, dispute leg): same attribution rule for a lost
+    # dispute processed days after the charge's creation day.
+    from app import payment_reconcile as PR
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    charge_day = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    _r3_backdate_completion(p164_env, purchase.id, charge_day)
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        pb.apply_dispute(db, p, stripe_event_id="evt_r3_disp_day",
+                         dispute_status="lost")
+        db.commit()
+        processing_day = db.get(
+            models.ProductPurchase, purchase.id).reversed_at.date()
+        assert processing_day != charge_day.date()
+        charge = {"id": "ch_r3_disp", "amount": 900, "amount_refunded": 0,
+                  "payment_intent": "pi_test_1", "metadata": {},
+                  "disputed": True,
+                  "dispute": {"status": "lost", "amount": 900}}
+        result = PR.compute_reconciliation(
+            db, charge_day.date(), [_r3_product_session(purchase.id)], [charge])
+        fam = result["per_family"]["product"]
+        assert fam["ledger_dispute_cents"] == 900
+        assert fam["stripe_dispute_cents"] == 900
+        assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 0
+        assert not any(d["kind"] == "family_total_mismatch"
+                       for d in result["differences"])
+        result2 = PR.compute_reconciliation(db, processing_day, [], [])
+        assert result2["per_family"]["product"]["ledger_dispute_cents"] == 0
+
+
+def test_r3_reconciliation_refund_survives_later_dispute_events(p164_env):
+    # P2 (finding 5): a partially refunded purchase that later sees
+    # dispute events (open, then closed/won) keeps its refund
+    # deduction — dispute processing overwrites reversal_kind, so
+    # reconciliation must key on the dedicated refund fields.
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_r3_ref_before_disp", purchase, etype="charge.refunded",
+        amount=900, refunded=300))
+    _post_event(p164_env, _charge_event(
+        "evt_r3_disp_open", purchase, etype="charge.dispute.created"))
+    _post_event(p164_env, _charge_event(
+        "evt_r3_disp_won", purchase, etype="charge.dispute.closed",
+        status="won"))
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.reversal_kind == "dispute_won"  # provenance overwritten
+        assert p.refunded_cents == 300
+        assert getattr(p, "refunded_at", None) is not None
+        day = p.completed_at.date()
+        charge = {"id": "ch_r3_surv", "amount": 900, "amount_refunded": 300,
+                  "payment_intent": "pi_test_1", "metadata": {},
+                  "disputed": False}
+        result = PR.compute_reconciliation(
+            db, day, [_r3_product_session(purchase.id)], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["ledger_refund_cents"] == 300
+    assert fam["stripe_refund_cents"] == 300
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 600
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+def test_r3_reconciliation_dispute_survives_later_refund_and_caps(p164_env):
+    # P2 (finding 5, symmetric leg): a lost dispute followed by a
+    # partial refund keeps BOTH deductions, with the dispute capped
+    # at the unrefunded remainder exactly as the Stripe side caps
+    # it — total deductions equal the charge, never more.
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_r3_disp_lost_first", purchase,
+        etype="charge.dispute.closed", status="lost"))
+    _post_event(p164_env, _charge_event(
+        "evt_r3_ref_after_disp", purchase, etype="charge.refunded",
+        amount=900, refunded=300))
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.reversal_kind == "refund"  # provenance overwritten
+        assert getattr(p, "dispute_lost_at", None) is not None
+        day = p.completed_at.date()
+        charge = {"id": "ch_r3_both", "amount": 900, "amount_refunded": 300,
+                  "payment_intent": "pi_test_1", "metadata": {},
+                  "disputed": True,
+                  "dispute": {"status": "lost", "amount": 900}}
+        result = PR.compute_reconciliation(
+            db, day, [_r3_product_session(purchase.id)], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["ledger_refund_cents"] == 300
+    assert fam["ledger_dispute_cents"] == 600
+    assert fam["stripe_refund_cents"] == 300
+    assert fam["stripe_dispute_cents"] == 600
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 0
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
