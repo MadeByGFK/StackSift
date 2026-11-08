@@ -763,7 +763,8 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
                 ("observed", "Observed",
                  "Shares infrastructure with the lead issue."),
                 ("correlated", "Correlated",
-                 "Appears in the same time pattern as the lead issue; "
+                 "Aligned with the degradation window, or persistent "
+                 "across the observation window; "
                  "no shared cause is established."),
                 ("hypothesized", "Hypothesized",
                  "Shares infrastructure with the lead issue and shows "

@@ -467,11 +467,14 @@
     <div class="stat"><div class="num">{{ sorted_issues|length }}</div><div class="lbl">Unique issues</div>{% set occ_total = sorted_issues|map(attribute='1.count')|sum %}{% if occ_total %}<div class="s1-stat-note">{{ occ_total }} total occurrences</div>{% endif %}</div>
   </div>
 
-  {% if current_user and report_id and analysis_eligible and not analysis_result_id and not is_demo %}
-  {# Issue #170 S1 (Decision 6 as amended by A5): the premium upsell
-     card renders ONLY for an owned, standard, analysis-eligible
-     source report with no Brief and no already-purchased derived
-     artifact — never on anonymous/demo/sample/legacy-paid surfaces.
+  {% if current_user and report_id and analysis_eligible and not analysis_result_id and not analysis_prior_exists and not is_demo %}
+  {# Issue #170 S1 (Decision 6 as amended by A5; PR #171 Codex P2-2):
+     the premium upsell card renders ONLY for an owned, standard,
+     analysis-eligible source report with no Brief and no
+     already-purchased derived artifact — including an
+     older-generator prior purchase (analysis_prior_exists, whose
+     disclosed upgrade path stays in the Actions modal) — never on
+     anonymous/demo/sample/legacy-paid surfaces.
      Interim credit-era copy + the existing Analysis purchase flow
      (the Actions-menu modal) only; no dollar copy pre-#164A. The
      button forwards to the existing #analysis-btn so the charge
@@ -539,7 +542,7 @@
     </div>
     <div class="s1-evidence-group" data-s1-group="correlated">
       <h4>Correlated</h4>
-      <p class="s1-evidence-caption">Appears in the same time pattern as the lead issue; no shared cause is established.</p>
+      <p class="s1-evidence-caption">Aligned with the degradation window, or persistent across the observation window; no shared cause is established.</p>
       {% for item in se.get('correlated', []) %}<div class="s1-evidence-item"><span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
       {% if se.get('correlated_total', 0) > se.get('correlated', [])|length %}<div class="s1-evidence-more">{{ se.get('correlated_total', 0) - se.get('correlated', [])|length }} more not shown</div>{% endif %}
     </div>

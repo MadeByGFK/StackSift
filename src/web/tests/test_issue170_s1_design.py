@@ -29,8 +29,8 @@ NONE_MSG = (
     "the system is healthy \u2014 persistent issues may not produce "
     "spikes.")
 CORRELATED_CAPTION = (
-    "Appears in the same time pattern as the lead issue; "
-    "no shared cause is established.")
+    "Aligned with the degradation window, or persistent across "
+    "the observation window; no shared cause is established.")
 OBSERVED_CAPTION = "Shares infrastructure with the lead issue."
 HYPOTHESIZED_CAPTION = (
     "Shares infrastructure with the lead issue and shows a possible "
@@ -222,6 +222,10 @@ def test_s1_correlated_items_equal_projection_and_caption():
         assert item[0] in segment
     assert "shared infra symptom" not in segment
     assert CORRELATED_CAPTION in segment
+    # PR #171 Codex P2-1: correlated membership never compares the
+    # candidate's buckets with the lead issue's — the caption must
+    # not claim a shared time pattern with the lead issue.
+    assert "same time pattern as the lead issue" not in html
     assert OBSERVED_CAPTION in _group_segment(html, "observed")
     assert HYPOTHESIZED_CAPTION in _group_segment(html, "hypothesized")
     # A1: the withdrawn caption must never render (regression gate).
@@ -352,6 +356,13 @@ def test_s1_premium_card_only_for_owned_eligible_standard():
     # Already purchased -> the card never re-offers.
     assert "data-s1-premium-card" not in _owned(
         analysis_result_id="derived-1")
+    # PR #171 Codex P2-2 / A5: an older-generator prior purchase
+    # (analysis_prior_exists, result id cleared by report_view for
+    # the disclosed modal upgrade path) is still an already-purchased
+    # report — the card must not render; the upgrade stays available
+    # through the Actions modal, which carries the disclosure copy.
+    assert "data-s1-premium-card" not in _owned(
+        analysis_prior_exists=True)
     # Not eligible (e.g. legacy/insufficient evidence) -> no card.
     assert "data-s1-premium-card" not in _owned(analysis_eligible=False)
     # Anonymous immediate render -> no card.
