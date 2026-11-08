@@ -236,13 +236,33 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
     # pending lookups.
     lock_product_admission(db, purchase.user_id, purchase.source_result_id,
                            purchase.sku)
+    # Remediation3 P1: populate_existing=True — without it the
+    # re-select returns the caller-loaded identity-map instance
+    # WITHOUT refreshing its attributes, so a purchase whose row was
+    # concurrently committed as 'refunded' (full refund of a pending
+    # purchase) could still read stale status 'pending' here and be
+    # settled, overwriting 'refunded' and granting an entitlement
+    # for refunded money. Refresh under the row lock before testing.
     locked = db.execute(
         select(models.ProductPurchase).where(
             models.ProductPurchase.id == purchase.id).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one()
     if locked.status != "pending":
         logger.info("product webhook %s: purchase %s already %s",
                     stripe_event_id, purchase.id, locked.status)
+        return "duplicate"
+    if locked.reversal_kind == "dispute_lost":
+        # Remediation3 P2 (defence for rows recorded before the
+        # apply_dispute fix, which left a lost-disputed PENDING
+        # purchase pending): a recorded lost dispute is terminal —
+        # settlement must never grant. Repair the row to the same
+        # terminal 'disputed' state apply_dispute now writes.
+        locked.status = "disputed"
+        db.flush()
+        logger.info("product webhook %s: purchase %s has a lost "
+                    "dispute; settlement refused", stripe_event_id,
+                    purchase.id)
         return "duplicate"
 
     def _fail(note: str):
@@ -325,9 +345,13 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
 
 def fail_product_purchase(db: Session, purchase, *, reason: str,
                           stripe_event_id: str | None = None) -> bool:
+    # Remediation3 P1: populate_existing for the same stale-instance
+    # hazard as settle_product_purchase (a caller-stale 'pending'
+    # must not overwrite a concurrently committed terminal status).
     locked = db.execute(
         select(models.ProductPurchase).where(
             models.ProductPurchase.id == purchase.id).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one()
     if locked.status != "pending":
         return False
@@ -372,6 +396,7 @@ def revoke_entitlement(db: Session, entitlement) -> bool:
     locked = db.execute(
         select(models.Entitlement).where(
             models.Entitlement.id == entitlement.id).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one()
     if locked.status in ("revoked", "redeemed", "refund_eligible"):
         return False
@@ -390,11 +415,14 @@ def apply_refund(db: Session, purchase, *, stripe_event_id: str,
     artifact is NOT clawed back and flags for founder manual review.
     A pending purchase that is fully refunded becomes terminal.
     """
+    # Remediation3 P1: populate_existing for the same stale-instance
+    # hazard as settle (status and refunded_cents must be the
+    # committed values under the row lock, not a caller-stale copy).
     locked = db.execute(
         select(models.ProductPurchase).where(
             models.ProductPurchase.id == purchase.id).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one()
-    full = charge_amount_cents > 0 and refunded_cents >= charge_amount_cents
     locked.reversal_event_id = stripe_event_id
     locked.reversal_kind = "refund"
     locked.reversed_at = _utcnow()
@@ -405,7 +433,19 @@ def apply_refund(db: Session, purchase, *, stripe_event_id: str,
     # Stripe side subtracted it: a permanent false mismatch. F3
     # semantics are unchanged: a partial never touches the
     # entitlement (below, only the full branch acts on it).
-    locked.refunded_cents = refunded_cents
+    # Remediation3 P2: persist the MAXIMUM cumulative amount, never a
+    # direct assignment — out-of-order delivery of distinct partial-
+    # refund events (e.g. the 600¢ event processed before the 300¢
+    # event) must not regress the persisted total to the older,
+    # smaller cumulative value. ``refunded_at`` (migration 0019)
+    # moves only when the maximum moves, and is a dedicated field
+    # dispute processing never touches, so a later dispute cannot
+    # erase or move the refund deduction in reconciliation.
+    previous_refunded = locked.refunded_cents or 0
+    if refunded_cents > previous_refunded or locked.refunded_cents is None:
+        locked.refunded_at = _utcnow()
+    locked.refunded_cents = max(previous_refunded, refunded_cents)
+    full = charge_amount_cents > 0 and locked.refunded_cents >= charge_amount_cents
     if not full:
         db.flush()
         return "partial_recorded"
@@ -437,9 +477,15 @@ def apply_dispute(db: Session, purchase, *, stripe_event_id: str,
     Closed/won: recorded + founder-manual flag; NEVER auto-restores a
     revoked entitlement (F3).
     """
+    # Remediation3 P1: populate_existing for the same stale-instance
+    # hazard as settle/apply_refund (the status transitions below
+    # must act on the committed status, not a caller-stale copy —
+    # a stale 'completed' must not resurrect a 'refunded' purchase
+    # to 'disputed').
     locked = db.execute(
         select(models.ProductPurchase).where(
             models.ProductPurchase.id == purchase.id).with_for_update()
+        .execution_options(populate_existing=True)
     ).scalar_one()
     locked.reversal_event_id = stripe_event_id
     locked.reversed_at = _utcnow()
@@ -451,8 +497,23 @@ def apply_dispute(db: Session, purchase, *, stripe_event_id: str,
         return "dispute_opened"
     if dispute_status == "lost":
         locked.reversal_kind = "dispute_lost"
-        if locked.status in ("completed", "disputed"):
+        if locked.status in ("pending", "completed", "disputed"):
+            # Remediation3 P2: a lost dispute is TERMINAL for a
+            # pending purchase too. Previously pending was left
+            # pending (no entitlement exists to revoke yet), so a
+            # checkout-completion event arriving afterwards settled
+            # and granted an entitlement despite the lost dispute.
+            # 'disputed' is terminal for settlement (settle grants
+            # only from 'pending'), exactly as a full refund's
+            # 'refunded' is terminal for a pending purchase.
+            # dispute_lost_at (migration 0019) is the dedicated,
+            # overwrite-proof record reconciliation keys on; it is
+            # NOT set when the purchase is already 'refunded' /
+            # 'failed' — the Stripe side caps a lost dispute's
+            # portion at the unrefunded remainder (zero there), so
+            # recording a second deduction would double-count.
             locked.status = "disputed"
+            locked.dispute_lost_at = _utcnow()
         ent = db.execute(
             select(models.Entitlement).where(
                 models.Entitlement.product_purchase_id == locked.id)
