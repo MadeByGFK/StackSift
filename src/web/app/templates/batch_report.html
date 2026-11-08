@@ -42,7 +42,7 @@
   </section>
 
   <section>
-    <h3>Combined summary</h3>
+    <div class="s1-section-head"><span class="s1-section-num">01</span><h3 class="section-title">Combined summary</h3></div>
     <ul>
       <li>Files: {{ summary.file_count }}</li>
       <li>Total lines: {{ summary.total_lines }}</li>
@@ -55,7 +55,7 @@
   </section>
 
   <section>
-    <h3>Combined issues ({{ combined_issues|length }})</h3>
+    <div class="s1-section-head"><span class="s1-section-num">02</span><h3 class="section-title">Combined issues ({{ combined_issues|length }})</h3></div>
     {% for entry in combined_issues %}
     <div>
       <strong>(x{{ entry.count }})</strong> {{ entry.template }}<br>

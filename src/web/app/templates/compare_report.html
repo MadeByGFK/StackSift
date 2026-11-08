@@ -43,7 +43,7 @@
   </section>
 
   <section>
-    <h3>Summary</h3>
+    <div class="s1-section-head"><span class="s1-section-num">01</span><h3 class="section-title">Summary</h3></div>
     <ul>
       <li>New in B: {{ summary.new }}</li>
       <li>Resolved (absent from B): {{ summary.resolved }}</li>
@@ -58,35 +58,35 @@
   </section>
 
   <section>
-    <h3>New in B ({{ new|length }})</h3>
+    <div class="s1-section-head"><span class="s1-section-num">02</span><h3 class="section-title">New in B ({{ new|length }})</h3></div>
     {% for e in new %}
     <div><strong>[{{ e.b_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>
     {% else %}<p>None.</p>{% endfor %}
   </section>
 
   <section>
-    <h3>Resolved ({{ resolved|length }})</h3>
+    <div class="s1-section-head"><span class="s1-section-num">03</span><h3 class="section-title">Resolved ({{ resolved|length }})</h3></div>
     {% for e in resolved %}
     <div><strong>[{{ e.a_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>
     {% else %}<p>None.</p>{% endfor %}
   </section>
 
   <section>
-    <h3>Volume changes ({{ volume_changes|length }})</h3>
+    <div class="s1-section-head"><span class="s1-section-num">04</span><h3 class="section-title">Volume changes ({{ volume_changes|length }})</h3></div>
     {% for e in volume_changes %}
     <div><strong>[{{ e.b_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>
     {% else %}<p>None.</p>{% endfor %}
   </section>
 
   <section>
-    <h3>Severity shifts ({{ severity_shifts|length }})</h3>
+    <div class="s1-section-head"><span class="s1-section-num">05</span><h3 class="section-title">Severity shifts ({{ severity_shifts|length }})</h3></div>
     {% for e in severity_shifts %}
     <div><strong>{{ e.a_highest_severity }} → {{ e.b_highest_severity }} ({{ e.a_count }} → {{ e.b_count }})</strong><br>{{ e.template }}</div>
     {% else %}<p>None.</p>{% endfor %}
   </section>
 
   <section>
-    <h3>Shared ({{ shared|length }})</h3>
+    <div class="s1-section-head"><span class="s1-section-num">06</span><h3 class="section-title">Shared ({{ shared|length }})</h3></div>
     <p>Unchanged-identity groups. Showing the first 50.</p>
     {% for e in shared[:50] %}
     <div><strong>[{{ e.b_highest_severity }}] {{ e.a_count }} → {{ e.b_count }}</strong><br>{{ e.template }}</div>

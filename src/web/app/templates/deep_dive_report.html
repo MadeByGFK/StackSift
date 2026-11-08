@@ -160,7 +160,7 @@
      legacy artifact with no brief key renders no brief section. #}
   {% if analysis_projection.brief %}
   <div class="card group-card" style="margin-top:16px">
-    <h3 class="section-title" style="margin-top:0">Investigation Brief</h3>
+    <div class="s1-section-head" style="margin-top:0"><span class="s1-section-num">01</span><h3 class="section-title" style="margin-top:0">Investigation Brief</h3></div>
     {% for sentence in analysis_projection.brief.summary %}<p>{{ sentence }}</p>{% endfor %}
     {% if analysis_projection.brief.lead %}
     <p><strong>Investigation lead:</strong> {{ analysis_projection.brief.lead.template }} <span style="color:var(--muted);font-weight:400">× {{ analysis_projection.brief.lead.count }}</span></p>
@@ -211,8 +211,9 @@
   {% endif %}
 
   {% for group in analysis_projection.groups %}
-  <div class="card group-card" style="margin-top:16px">
+  <div class="card group-card" style="margin-top:16px" data-s1-group-index="{{ loop.index }}">
     <div class="group-head" style="display:flex;align-items:center;gap:8px">
+      <span class="s1-section-num">{{ "%02d"|format(loop.index + 1) }}</span>
       <span class="severity-chip" data-level="{{ group.level }}" style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;color:#fff;background:{% if group.level in ['CRITICAL', 'ERROR'] %}var(--severity-critical){% elif group.level in ['WARN', 'WARNING'] %}var(--severity-warning){% else %}var(--severity-info){% endif %}">{{ group.level }}</span>
       <span class="count-badge" style="color:var(--muted);font-weight:600">× {{ group.count }}</span>
     </div>
