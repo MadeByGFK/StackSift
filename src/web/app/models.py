@@ -942,6 +942,22 @@ class ProductPurchase(Base):
     # which track only the LATEST reversal event's provenance.
     refunded_at = Column(DateTime(timezone=True), nullable=True)
     dispute_lost_at = Column(DateTime(timezone=True), nullable=True)
+    # Remediation4 (migration 0020): the AMOUNT of the dispute Stripe
+    # reported (a dispute can be for less than the full charge), so
+    # reconciliation's ledger-side lost-dispute deduction can mirror
+    # the Stripe side's per-charge cap instead of always deducting
+    # the full unrefunded remainder. NULL on rows whose dispute
+    # events predate the field (full-remainder fallback there).
+    disputed_cents = Column(Integer, nullable=True)
+    # Remediation4 (migration 0020): the Stripe charge creation
+    # timestamp, persisted at settlement from the completed session
+    # object's ``created`` value (the charge/session creation anchor
+    # the Stripe reconciliation fetch keys on). Reconciliation
+    # buckets product gross AND reversal membership by this anchor,
+    # so a charge created before midnight whose settlement webhook
+    # is processed after midnight lands on ONE day on both sides.
+    # NULL on pre-0020 rows, which fall back to completed_at.
+    stripe_charge_created_at = Column(DateTime(timezone=True), nullable=True)
     needs_manual_review = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)

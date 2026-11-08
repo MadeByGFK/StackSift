@@ -385,8 +385,15 @@ def compute_reconciliation(
         # mismatches on BOTH days. Product purchases whose current
         # status moved on to refunded/disputed still settled on
         # their completed_at, so they bucket identically.
-        for sid, completed_at in db.execute(
+        # Remediation4 (fix 6): the product bucketing anchor is the
+        # persisted Stripe charge creation time when present (the
+        # day the Stripe charge fetch keys on), falling back to
+        # completed_at for pre-0020 rows — so a charge created
+        # before midnight but settled after it counts on its
+        # CHARGE day on both sides.
+        for sid, _charge_created, completed_at in db.execute(
             select(M.ProductPurchase.stripe_session_id,
+                   M.ProductPurchase.stripe_charge_created_at,
                    M.ProductPurchase.completed_at).where(
                 M.ProductPurchase.status.in_(
                     ("completed", "refunded", "disputed")),
@@ -396,8 +403,10 @@ def compute_reconciliation(
         ).all():
             if sid is None or completed_at is None:
                 continue
-            if sid not in matched_latest or completed_at > matched_latest[sid]:
-                matched_latest[sid] = completed_at
+            anchor_at = _charge_created if _charge_created is not None \
+                else completed_at
+            if sid not in matched_latest or anchor_at > matched_latest[sid]:
+                matched_latest[sid] = anchor_at
     included: list[dict] = []
     for s in sessions:
         sid = s["id"]
@@ -710,11 +719,30 @@ def compute_reconciliation(
         differences.append(diff_entry)
 
     # --- Product family ledger side (A8) ---
+    # Remediation4 (fix 6): product gross AND reversal membership
+    # bucket by ONE shared anchor — the persisted Stripe charge
+    # creation time (stripe_charge_created_at, migration 0020),
+    # falling back to completed_at for pre-0020 rows. The Stripe
+    # charge fetch keys on charge creation time, so a charge
+    # created before midnight whose settlement was processed after
+    # midnight must land on the charge day here too, not on the
+    # local completed_at day.
+    from sqlalchemy import and_ as _and, or_ as _or
+
+    def _product_anchor_in_range():
+        return _or(
+            _and(M.ProductPurchase.stripe_charge_created_at.isnot(None),
+                 M.ProductPurchase.stripe_charge_created_at >= start,
+                 M.ProductPurchase.stripe_charge_created_at < end),
+            _and(M.ProductPurchase.stripe_charge_created_at.is_(None),
+                 M.ProductPurchase.completed_at >= start,
+                 M.ProductPurchase.completed_at < end),
+        )
+
     product_purchases = db.execute(
         select(M.ProductPurchase).where(
             M.ProductPurchase.status.in_(("completed", "refunded", "disputed")),
-            M.ProductPurchase.completed_at >= start,
-            M.ProductPurchase.completed_at < end,
+            _product_anchor_in_range(),
         )
     ).scalars().all()
     product_ledger_gross = sum(p.amount_cents or 0 for p in product_purchases)
@@ -728,16 +756,16 @@ def compute_reconciliation(
     # mismatch. Pre-0018 full-refund rows carry refunded_cents NULL
     # and fall back to their full amount_cents.
     # Remediation3 (findings 3+5): BOTH product reversal totals are
-    # bucketed by completed_at — the settlement day, the ledger's
-    # anchor for the charge's creation day, which is exactly where
-    # the Stripe charge loop above attributes amount_refunded and
-    # dispute portions (it iterates charges CREATED this day). The
-    # previous reversed_at (processing-day) bucketing counted a
+    # bucketed by the charge anchor — originally completed_at as the
+    # ledger's proxy for the charge's creation day, which is exactly
+    # where the Stripe charge loop above attributes amount_refunded
+    # and dispute portions (it iterates charges CREATED this day).
+    # The previous reversed_at (processing-day) bucketing counted a
     # refund processed days later on the processing day, where the
     # Stripe side never counts it: false mismatches on both days.
-    # The legacy pack family is the house pattern for the Stripe
-    # anchor (charges fetched by creation day); product ledger gross
-    # already buckets by completed_at for the same reason.
+    # Remediation4 (fix 6) replaces the completed_at proxy with the
+    # persisted charge creation time itself (see _product_anchor_
+    # in_range above); pre-0020 rows still fall back to completed_at.
     # Membership is keyed on the DEDICATED reversal fields
     # (refunded_cents / refunded_at / dispute_lost_at, migrations
     # 0018+0019), never on reversal_kind/reversed_at alone: a later
@@ -746,11 +774,9 @@ def compute_reconciliation(
     # pre-0019 rows countable: refunded_cents set by the 0018-era
     # code, status='refunded' for pre-0018 full refunds, and
     # reversal_kind='dispute_lost' for pre-0019 lost disputes.
-    from sqlalchemy import or_ as _or
     product_refunded = db.execute(
         select(M.ProductPurchase).where(
-            M.ProductPurchase.completed_at >= start,
-            M.ProductPurchase.completed_at < end,
+            _product_anchor_in_range(),
             _or(M.ProductPurchase.refunded_at.isnot(None),
                 M.ProductPurchase.refunded_cents.isnot(None),
                 M.ProductPurchase.status == "refunded"),
@@ -766,20 +792,28 @@ def compute_reconciliation(
     # carry kind=product metadata on the charge object. The ledger
     # side of a lost dispute: purchases that EVER lost a dispute
     # (dedicated dispute_lost_at, or the pre-0019 provenance
-    # fallback), bucketed by completed_at as above. The amount is
-    # capped at the unrefunded remainder, mirroring the Stripe
+    # fallback), bucketed by the charge anchor as above. The amount
+    # is capped at the unrefunded remainder, mirroring the Stripe
     # side's per-charge cap, so a refunded-then-disputed (or
     # disputed-then-refunded) purchase is never deducted twice.
+    # Remediation4 (fix 2): when the dispute's own amount was
+    # persisted (disputed_cents, migration 0020), the deduction is
+    # min(disputed_cents, amount - refunded) — a PARTIAL lost
+    # dispute deducts only its amount, exactly as the Stripe side
+    # caps it. Legacy rows without a persisted amount keep the
+    # full-remainder behaviour as fallback.
     product_disputed = db.execute(
         select(M.ProductPurchase).where(
-            M.ProductPurchase.completed_at >= start,
-            M.ProductPurchase.completed_at < end,
+            _product_anchor_in_range(),
             _or(M.ProductPurchase.dispute_lost_at.isnot(None),
                 M.ProductPurchase.reversal_kind == "dispute_lost"),
         )
     ).scalars().all()
     product_ledger_disputes = sum(
-        max(0, (p.amount_cents or 0) - (p.refunded_cents or 0))
+        (min(p.disputed_cents,
+             max(0, (p.amount_cents or 0) - (p.refunded_cents or 0)))
+         if getattr(p, "disputed_cents", None) is not None
+         else max(0, (p.amount_cents or 0) - (p.refunded_cents or 0)))
         for p in product_disputed)
     for s in product_included:
         if s["id"] not in product_ledger_session_ids:
@@ -1091,8 +1125,15 @@ def reconcile_missing_days(db, *, stripe_get=None, today: date | None = None
                 M.CreditPurchase.status == "completed"
             )
         ).scalar()
+        # Remediation4 (fix 6): the product scan start is the
+        # earliest product ANCHOR day (charge creation, falling back
+        # to completed_at) — starting at completed_at would skip the
+        # charge day of a first-ever cross-midnight settlement, and
+        # that day would never be reconciled at all.
         _earliest_product = db.execute(
-            select(func.min(M.ProductPurchase.completed_at)).where(
+            select(func.min(func.coalesce(
+                M.ProductPurchase.stripe_charge_created_at,
+                M.ProductPurchase.completed_at))).where(
                 M.ProductPurchase.status == "completed"
             )
         ).scalar()

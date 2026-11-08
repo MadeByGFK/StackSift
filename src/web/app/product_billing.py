@@ -133,6 +133,25 @@ def live_entitlement(db: Session, user_id, source_result_id, sku, *, for_update:
     return db.execute(stmt).scalars().first()
 
 
+def available_entitlement(db: Session, user_id, source_result_id, sku):
+    """A live entitlement that can be redeemed RIGHT NOW, or None.
+
+    Remediation4 (fixes 1+7): 'available' status inside the F5
+    window (deadline at-or-after now, mirroring reserve_redemption's
+    ``deadline < now`` lapse rule; a NULL deadline never lapses).
+    Reserved/revoked/redeemed entitlements do not count — surfaces
+    built on this helper must not offer a redemption that cannot
+    proceed.
+    """
+    ent = live_entitlement(db, user_id, source_result_id, sku)
+    if ent is None or ent.status != "available":
+        return None
+    if ent.redemption_deadline is not None and \
+            _as_aware(ent.redemption_deadline) < _utcnow():
+        return None
+    return ent
+
+
 def create_pending_product_purchase(db: Session, user_id, sku: str, source_result_id):
     """Create/reuse the pending product purchase (A7) with F1 blocking.
 
@@ -217,11 +236,35 @@ def create_pending_product_purchase(db: Session, user_id, sku: str, source_resul
     return purchase, False
 
 
+def _coerce_stripe_timestamp(value):
+    """Coerce a Stripe ``created`` value to an aware datetime.
+
+    Accepts a datetime, unix seconds (int/float — the shape Stripe
+    sends), or an ISO string; returns None for anything else.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _as_aware(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        try:
+            return _as_aware(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+    return None
+
+
 def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
                             stripe_session_id: str, event_metadata: dict,
                             amount_cents, currency, payment_intent_id,
                             payment_status, session_status, mode,
-                            session_price_id, livemode=None) -> str:
+                            session_price_id, livemode=None,
+                            stripe_charge_created_at=None) -> str:
     """Settle one product purchase exactly once (A4 + F4). Strict facts.
 
     Grants ONLY on checkout.session.completed with payment_status=paid,
@@ -324,6 +367,18 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
     locked.stripe_payment_intent_id = payment_intent_id
     locked.stripe_event_id = stripe_event_id
     locked.completed_at = _utcnow()
+    # Remediation4 (fix 6): persist the Stripe charge creation anchor
+    # carried on the completed session object (its ``created``), so
+    # reconciliation can bucket this purchase by charge creation
+    # time — the day the Stripe charge fetch keys on — instead of
+    # the local settlement-processing time (completed_at), which a
+    # delayed webhook delivery can push across midnight. When no
+    # usable timestamp is carried, the column stays NULL and
+    # reconciliation falls back to completed_at (the pre-0020
+    # behaviour, preserved for rows settled without the anchor).
+    _anchor = _coerce_stripe_timestamp(stripe_charge_created_at)
+    if _anchor is not None:
+        locked.stripe_charge_created_at = _anchor
 
     source = db.get(models.Result, locked.source_result_id)
     deadline = None
@@ -406,6 +461,46 @@ def revoke_entitlement(db: Session, entitlement) -> bool:
     return True
 
 
+def _locked_entitlement_for_purchase(db: Session, purchase_id):
+    """The purchase's entitlement, re-read UNDER ITS ROW LOCK.
+
+    Remediation4 (fix 4): the manual-review decision (redeemed ->
+    founder review, otherwise revoke) must be made on the committed
+    entitlement state, not on an instance or unlocked read that a
+    concurrent redemption completion can invalidate between the
+    check and the act. ``populate_existing`` forces the refresh, and
+    callers additionally honour ``revoke_entitlement``'s return, so
+    a redemption that lands despite the refresh still flags manual
+    review instead of being silently treated as revoked.
+    """
+    return db.execute(
+        select(models.Entitlement).where(
+            models.Entitlement.product_purchase_id == purchase_id)
+        .with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
+def _revoke_or_flag_manual_review(db: Session, locked_purchase, ent) -> None:
+    """Full-reversal entitlement act, decided on the LOCKED row."""
+    if ent is None:
+        return
+    if ent.status == "redeemed":
+        locked_purchase.needs_manual_review = True
+        return
+    if not revoke_entitlement(db, ent):
+        # Revocation refused: the refreshed row is in a terminal
+        # state our read did not predict. A redeemed artifact is
+        # never clawed back — it flags for founder manual review;
+        # already-revoked / refund_eligible needs nothing further.
+        refreshed = db.execute(
+            select(models.Entitlement).where(
+                models.Entitlement.id == ent.id)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if refreshed is not None and refreshed.status == "redeemed":
+            locked_purchase.needs_manual_review = True
+
+
 def apply_refund(db: Session, purchase, *, stripe_event_id: str,
                  refunded_cents: int, charge_amount_cents: int) -> str:
     """Record a charge.refunded against a product purchase (A5/F3).
@@ -449,27 +544,24 @@ def apply_refund(db: Session, purchase, *, stripe_event_id: str,
     if not full:
         db.flush()
         return "partial_recorded"
-    ent = db.execute(
-        select(models.Entitlement).where(
-            models.Entitlement.product_purchase_id == locked.id)
-    ).scalar_one_or_none()
+    ent = _locked_entitlement_for_purchase(db, locked.id)
     # P3-5: a full refund is terminal from ANY non-terminal paid
     # state — including 'disputed' (dispute opened, then refunded):
     # leaving it 'disputed' after the money is gone would strand the
     # status machine inconsistent with the entitlement revocation.
     if locked.status in ("pending", "completed", "disputed"):
         locked.status = "refunded"
-    if ent is not None:
-        if ent.status == "redeemed":
-            locked.needs_manual_review = True
-        else:
-            revoke_entitlement(db, ent)
+    # Remediation4 (fix 4): decide on the entitlement re-read under
+    # its lock above; a concurrently redeemed entitlement flags
+    # manual review instead of being treated as revocable.
+    _revoke_or_flag_manual_review(db, locked, ent)
     db.flush()
     return "refunded"
 
 
 def apply_dispute(db: Session, purchase, *, stripe_event_id: str,
-                  dispute_status: str | None) -> str:
+                  dispute_status: str | None,
+                  disputed_cents: int | None = None) -> str:
     """Record charge.dispute.created|closed (A5/F3).
 
     Open: purchase disputed + provenance, entitlement untouched (the
@@ -489,6 +581,19 @@ def apply_dispute(db: Session, purchase, *, stripe_event_id: str,
     ).scalar_one()
     locked.reversal_event_id = stripe_event_id
     locked.reversed_at = _utcnow()
+    # Remediation4 (fix 2): persist the disputed amount Stripe
+    # reported, on ANY dispute event that carries one (created and
+    # closed alike), so a partial lost dispute deducts only its own
+    # amount in reconciliation. The amount is a fact about the
+    # dispute, not a cumulative total, so the latest reported value
+    # stands (equal on redelivery of the same dispute).
+    if disputed_cents is not None:
+        try:
+            locked.disputed_cents = int(disputed_cents)
+        except (TypeError, ValueError):
+            logger.warning("product purchase %s: unusable disputed "
+                           "amount %r; not persisted", locked.id,
+                           disputed_cents)
     if dispute_status is None:  # dispute.created
         if locked.status == "completed":
             locked.status = "disputed"
@@ -514,15 +619,11 @@ def apply_dispute(db: Session, purchase, *, stripe_event_id: str,
             # recording a second deduction would double-count.
             locked.status = "disputed"
             locked.dispute_lost_at = _utcnow()
-        ent = db.execute(
-            select(models.Entitlement).where(
-                models.Entitlement.product_purchase_id == locked.id)
-        ).scalar_one_or_none()
-        if ent is not None:
-            if ent.status == "redeemed":
-                locked.needs_manual_review = True
-            else:
-                revoke_entitlement(db, ent)
+        # Remediation4 (fix 4): decide on the entitlement re-read
+        # under its lock; a concurrently redeemed entitlement flags
+        # manual review instead of being treated as revocable.
+        ent = _locked_entitlement_for_purchase(db, locked.id)
+        _revoke_or_flag_manual_review(db, locked, ent)
         db.flush()
         return "dispute_lost_revoked"
     if dispute_status == "won":

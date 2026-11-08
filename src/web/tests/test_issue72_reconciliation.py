@@ -323,6 +323,13 @@ def test_skipped_when_checkout_not_configured(recon_env, monkeypatch):
     monkeypatch.delenv("STRIPE_PRICE_STARTER")
     monkeypatch.delenv("STRIPE_PRICE_GROWTH")
     monkeypatch.delenv("STRIPE_PRICE_POWER")
+    # Remediation4 (issue #164 Phase A, fix 3): the readiness gate
+    # now also counts PRODUCT prices, so "not configured" must unset
+    # the product price too (it leaks into the suite process via a
+    # module-level setdefault in test_release4_pr149_remediation).
+    # The assertion below is unchanged: with NOTHING configured the
+    # day is skipped.
+    monkeypatch.delenv("STRIPE_PRICE_INVESTIGATION_REPORT", raising=False)
     day = date(2026, 10, 20)
     with recon_env.sessions() as db:
         run = pr.reconcile_day(db, day, stripe_get=_fake())

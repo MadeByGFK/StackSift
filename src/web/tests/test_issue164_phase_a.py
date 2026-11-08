@@ -2281,3 +2281,343 @@ def test_r3_reconciliation_dispute_survives_later_refund_and_caps(p164_env):
     assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 0
     assert not any(d["kind"] == "family_total_mismatch"
                    for d in result["differences"])
+
+
+# --- Remediation round 4 (Codex PR #172 comment 6726844095: 7 findings) -----
+# Every test below FAILS on the pre-fix tree (ea5fc6a) and PASSES on the
+# remediation-4 tree — verified by stashing the fixes (see report).
+
+def _r4_expire_source(p164_env, rid, *, days=1):
+    from app import models
+    with p164_env.sessions() as db:
+        src = db.get(models.Result, rid)
+        src.expires_at = datetime.now(timezone.utc) - timedelta(days=days)
+        db.commit()
+
+
+# Fix 1: redemption unreachable after source expiry ---------------------------
+
+def test_r4_expired_source_with_live_entitlement_gets_redemption_only_page(p164_env):
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _seed_entitlement(p164_env, user_id, rid)
+    _r4_expire_source(p164_env, rid)
+    page = p164_env.client.get(f"/reports/{rid}")
+    assert page.status_code == 200, page.text[:300]
+    assert 'data-redemption-only="1"' in page.text
+    assert 'id="analysis-confirm"' in page.text
+    assert "Generate Analysis Report" in page.text
+    # NO report payload / viewing on the redemption-only surface.
+    assert "failed to connect to db" not in page.text
+    assert "Total lines" not in page.text
+    # And the redemption itself completes from that surface's action.
+    r = _deep_dive(p164_env, rid, csrf)
+    assert r.status_code == 200, r.text[:300]
+
+
+def test_r4_expired_source_with_live_entitlement_listed_redemption_only(p164_env):
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _seed_entitlement(p164_env, user_id, rid)
+    _r4_expire_source(p164_env, rid)
+    listing = p164_env.client.get("/reports")
+    assert listing.status_code == 200
+    assert "test.log" in listing.text
+    assert "Redemption only" in listing.text
+    assert 'data-entitlement="1"' in listing.text
+
+
+def test_r4_expired_source_without_entitlement_still_410_and_unlisted(p164_env):
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _r4_expire_source(p164_env, rid)
+    assert p164_env.client.get(f"/reports/{rid}").status_code == 410
+    listing = p164_env.client.get("/reports")
+    assert "test.log" not in listing.text
+
+
+def test_r4_expired_source_entitlement_past_deadline_still_410(p164_env):
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _seed_entitlement(p164_env, user_id, rid,
+                      deadline=datetime.now(timezone.utc) - timedelta(days=1))
+    _r4_expire_source(p164_env, rid, days=40)
+    assert p164_env.client.get(f"/reports/{rid}").status_code == 410
+    listing = p164_env.client.get("/reports")
+    assert "test.log" not in listing.text
+
+
+def test_r4_expired_source_redemption_page_is_owner_checked(p164_env):
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _seed_entitlement(p164_env, user_id, rid)
+    _r4_expire_source(p164_env, rid)
+    _make_user(p164_env)  # a second user is now logged in
+    assert p164_env.client.get(f"/reports/{rid}").status_code == 404
+
+
+# Fix 2: partial lost dispute amount ------------------------------------------
+
+def test_r4_partial_lost_dispute_persists_amount_and_reconciles_partial(p164_env):
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_r4_disp_open", purchase, etype="charge.dispute.created", amount=300))
+    _post_event(p164_env, _charge_event(
+        "evt_r4_disp_lost", purchase, etype="charge.dispute.closed",
+        amount=300, status="lost"))
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert getattr(p, "disputed_cents", None) == 300
+        assert db.query(models.Entitlement).one().status == "revoked"
+        day = p.completed_at.date()
+        session = {"id": p.stripe_session_id or "cs_test_1",
+                   "amount_total": 900, "payment_intent": "pi_test_1",
+                   "metadata": {"kind": "product", "purchase_id": str(p.id),
+                                "sku": "investigation_report"}}
+        charge = {"id": "ch_r4_partial_disp", "amount": 900,
+                  "amount_refunded": 0, "payment_intent": "pi_test_1",
+                  "metadata": {}, "disputed": True,
+                  "dispute": {"status": "lost", "amount": 300}}
+        result = PR.compute_reconciliation(db, day, [session], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["stripe_dispute_cents"] == 300
+    assert fam["ledger_dispute_cents"] == 300
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 600
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+# Fix 3: reconciliation readiness counts product prices ------------------------
+
+def test_r4_product_only_configuration_reconciles_not_skipped(p164_env, monkeypatch):
+    from app import payment_reconcile as PR
+    from app import stripe_billing as sb
+    monkeypatch.delenv("STRIPE_PRICE_STARTER", raising=False)
+    monkeypatch.delenv("STRIPE_PRICE_GROWTH", raising=False)
+    monkeypatch.delenv("STRIPE_PRICE_POWER", raising=False)
+    assert sb.product_price_id("investigation_report") == PRICE_ID
+    assert sb.checkout_configured() is True
+
+    def _fake_get(kind, day):
+        return []
+    day = datetime(2026, 2, 2, tzinfo=timezone.utc).date()
+    with p164_env.sessions() as db:
+        run = PR.reconcile_day(db, day, stripe_get=_fake_get)
+        assert run.status == "clean"  # NOT 'skipped'
+
+
+# Fix 4: manual-review race decided under the entitlement lock -----------------
+
+def _r4_driver_update_entitlement(p164_env, db, ent_id, status):
+    db.connection().exec_driver_sql(
+        "UPDATE entitlements SET status = ? WHERE id = ?",
+        (status, str(ent_id)))
+
+
+def test_r4_full_refund_flags_review_when_entitlement_redeemed_concurrently(p164_env):
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    with p164_env.sessions() as db:
+        ent = db.query(models.Entitlement).one()
+        ent_id = ent.id
+        assert ent.status == "available"
+        _r4_driver_update_entitlement(p164_env, db, ent_id, "redeemed")
+        assert ent.status == "available"  # stale premise (identity map)
+        p = db.get(models.ProductPurchase, purchase.id)
+        out = pb.apply_refund(db, p, stripe_event_id="evt_r4_ref_race",
+                              refunded_cents=900, charge_amount_cents=900)
+        assert out == "refunded"
+        db.commit()
+    with p164_env.sessions() as db:
+        assert db.get(models.ProductPurchase, purchase.id).needs_manual_review is True
+        assert db.get(models.Entitlement, ent_id).status == "redeemed"
+
+
+def test_r4_lost_dispute_flags_review_when_entitlement_redeemed_concurrently(p164_env):
+    from app import product_billing as pb
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    with p164_env.sessions() as db:
+        ent = db.query(models.Entitlement).one()
+        ent_id = ent.id
+        _r4_driver_update_entitlement(p164_env, db, ent_id, "redeemed")
+        assert ent.status == "available"  # stale premise (identity map)
+        p = db.get(models.ProductPurchase, purchase.id)
+        out = pb.apply_dispute(db, p, stripe_event_id="evt_r4_disp_race",
+                               dispute_status="lost", disputed_cents=900)
+        assert out == "dispute_lost_revoked"
+        db.commit()
+    with p164_env.sessions() as db:
+        assert db.get(models.ProductPurchase, purchase.id).needs_manual_review is True
+        assert db.get(models.Entitlement, ent_id).status == "redeemed"
+
+
+# Fix 5: cleanup protection sets in ONE snapshot --------------------------------
+
+def test_r4_cleanup_settlement_between_protection_reads_cannot_strand(p164_env):
+    # A settlement (pending -> completed + entitlement granted) that
+    # commits BETWEEN cleanup's two old protection reads was
+    # invisible to both and stranded the live entitlement's source.
+    # The wrapper session injects exactly that settlement at the
+    # protection-read boundary: before the single UNION read on the
+    # fixed tree, and after the entitlement-only first read on the
+    # pre-fix tree.
+    from app import credit_maintenance
+    from app import models
+
+    class _Captured:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return list(self._rows)
+
+        def __iter__(self):
+            return iter(self._rows)
+
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    pid = _seed_purchase(p164_env, user_id, rid, status="pending",
+                         session_id="cs_r4_pend")
+    _r4_expire_source(p164_env, rid)
+    with p164_env.sessions() as db:
+        manifest_before = db.get(models.Result, rid).storage_manifest
+
+    def _inject_settlement(real):
+        real.commit()  # release the capacity-scope write transaction
+        with p164_env.sessions() as db2:
+            p = db2.get(models.ProductPurchase, pid)
+            p.status = "completed"
+            p.completed_at = datetime.now(timezone.utc)
+            source = db2.get(models.Result, rid)
+            ent = models.Entitlement(
+                user_id=user_id, product_purchase_id=pid,
+                sku="investigation_report", source_result_id=rid,
+                status="available",
+                redemption_deadline=source.expires_at + timedelta(days=30))
+            db2.add(ent)
+            db2.commit()
+
+    class _RaceSession:
+        def __init__(self, real):
+            object.__setattr__(self, "_real", real)
+            object.__setattr__(self, "_injected", False)
+
+        def scalars(self, stmt, *args, **kwargs):
+            text = str(stmt)
+            if "entitlements" in text and not self._injected:
+                object.__setattr__(self, "_injected", True)
+                if "product_purchases" in text:
+                    _inject_settlement(self._real)
+                    return self._real.scalars(stmt, *args, **kwargs)
+                captured = self._real.scalars(stmt, *args, **kwargs).all()
+                _inject_settlement(self._real)
+                return _Captured(captured)
+            return self._real.scalars(stmt, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(object.__getattribute__(self, "_real"), name)
+
+    with p164_env.sessions() as db:
+        credit_maintenance.cleanup_results(_RaceSession(db))
+    with p164_env.sessions() as db:
+        src = db.get(models.Result, rid)
+        assert src.deleted_at is None
+        assert src.storage_manifest == manifest_before
+        assert db.query(models.Entitlement).one().status == "available"
+
+
+# Fix 6: cross-midnight reversal attribution -------------------------------------
+
+def test_r4_settlement_persists_charge_created_anchor_from_event(p164_env):
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    anchor = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+    ev = _product_completed_event("evt_r4_anchor", purchase)
+    ev["created"] = int(anchor.timestamp())
+    ev["data"]["object"]["created"] = int(anchor.timestamp())
+    r = _post_event(p164_env, ev)
+    assert r.json()["status"] == "processed"
+    from app import models
+    from app.credits import _as_aware
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert getattr(p, "stripe_charge_created_at", None) is not None
+        assert _as_aware(p.stripe_charge_created_at) == anchor
+
+
+def test_r4_reconciliation_buckets_product_by_charge_anchor_not_completed(p164_env):
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    ent_id = _seed_entitlement(p164_env, user_id, rid)
+    charge_day = datetime(2026, 1, 1, tzinfo=timezone.utc).date()
+    settle_day = datetime(2026, 1, 2, tzinfo=timezone.utc).date()
+    with p164_env.sessions() as db:
+        ent = db.get(models.Entitlement, ent_id)
+        pid = ent.product_purchase_id
+        p = db.get(models.ProductPurchase, pid)
+        p.stripe_session_id = "cs_r4_anchor"
+        p.completed_at = datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
+        p.stripe_charge_created_at = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+        p.refunded_cents = 300
+        p.refunded_at = datetime.now(timezone.utc)
+        db.commit()
+        session = {"id": "cs_r4_anchor", "amount_total": 900,
+                   "payment_intent": "pi_r4_anchor",
+                   "metadata": {"kind": "product", "purchase_id": str(pid),
+                                "sku": "investigation_report"}}
+        charge = {"id": "ch_r4_anchor", "amount": 900,
+                  "amount_refunded": 300, "payment_intent": "pi_r4_anchor",
+                  "metadata": {}, "disputed": False}
+        r1 = PR.compute_reconciliation(db, charge_day, [session], [charge])
+        fam1 = r1["per_family"]["product"]
+        assert fam1["ledger_gross_cents"] == 900
+        assert fam1["stripe_gross_cents"] == 900
+        assert fam1["ledger_refund_cents"] == 300
+        assert fam1["stripe_refund_cents"] == 300
+        assert fam1["stripe_net_cents"] == fam1["ledger_net_cents"] == 600
+        assert not any(d["kind"] == "family_total_mismatch"
+                       for d in r1["differences"])
+        r2 = PR.compute_reconciliation(db, settle_day, [], [])
+        fam2 = r2["per_family"]["product"]
+        assert fam2["ledger_gross_cents"] == 0
+        assert fam2["ledger_refund_cents"] == 0
+
+
+# Fix 7: redemption stranded when sales disabled ---------------------------------
+
+def test_r4_sales_disabled_entitlement_holder_report_page_offers_redemption(p164_env, monkeypatch):
+    monkeypatch.delenv("STRIPE_PRICE_INVESTIGATION_REPORT", raising=False)
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _seed_entitlement(p164_env, user_id, rid)
+    page = p164_env.client.get(f"/reports/{rid}")
+    assert page.status_code == 200
+    assert 'id="analysis-confirm"' in page.text
+    assert "You hold an unused entitlement" in page.text
+    assert "Coming soon" not in page.text
+
+
+def test_r4_sales_disabled_entitlement_holder_reports_list_offers_redemption(p164_env, monkeypatch):
+    monkeypatch.delenv("STRIPE_PRICE_INVESTIGATION_REPORT", raising=False)
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _seed_entitlement(p164_env, user_id, rid)
+    listing = p164_env.client.get("/reports")
+    assert listing.status_code == 200
+    assert "__productReady = false" in listing.text
+    assert 'data-entitlement="1"' in listing.text
+    assert "getAttribute('data-entitlement')" in listing.text
+    assert "You hold an unused entitlement" in listing.text

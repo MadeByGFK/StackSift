@@ -132,12 +132,20 @@
       <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
           {% if analysis_eligible %}
-          {% if product_ready is defined and not product_ready %}
+          {% if product_ready is defined and not product_ready and not (entitlement_available is defined and entitlement_available) %}
           {# Issue #164 (P2-3): fail-closed display state — no live
-             $9 buy action while the product Price env is unset. #}
+             $9 buy action while the product Price env is unset.
+             Remediation4 (fix 7): this gate applies only to NEW
+             purchases — a viewer holding an available entitlement
+             falls through to the Generate/Confirm action below,
+             because redemption needs no Price. #}
           <p id="analysis-msg" style="margin:0 0 12px">Investigation Report: <span class="pack-soon">Coming soon</span> — purchases are not available yet. Please check back later.</p>
           {% else %}
+          {% if entitlement_available is defined and entitlement_available %}
+          <p id="analysis-msg" style="margin:0 0 12px">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+          {% else %}
           <p id="analysis-msg" style="margin:0 0 12px">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Analysis Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
+          {% endif %}
           <div id="analysis-link-row" style="display:none;margin-bottom:12px">
             <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
           </div>
@@ -525,10 +533,14 @@
      point, confirm copy and POST route are unchanged. #}
   <div class="s1-premium-card" data-s1-premium-card>
     <h3>Investigation Report</h3>
-    {% if product_ready is defined and not product_ready %}
+    {% if product_ready is defined and not product_ready and not (entitlement_available is defined and entitlement_available) %}
     <p>Investigation Report: <span class="pack-soon">Coming soon</span> — purchases are not available yet. Please check back later.</p>
     {% else %}
+    {% if entitlement_available is defined and entitlement_available %}
+    <p>You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+    {% else %}
     <p>Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+    {% endif %}
     <button type="button" class="btn-small" id="premium-upsell-btn">Get the Analysis Report</button>
     {% endif %}
     <script>

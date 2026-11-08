@@ -1031,10 +1031,12 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
                     refunded_cents=int(stripe_obj.get("amount_refunded") or 0),
                     charge_amount_cents=int(stripe_obj.get("amount") or 0))
             elif event_type == "charge.dispute.created":
-                outcome = _pb.apply_dispute(db, purchase, stripe_event_id=event_id, dispute_status=None)
+                outcome = _pb.apply_dispute(db, purchase, stripe_event_id=event_id, dispute_status=None,
+                                            disputed_cents=stripe_obj.get("amount"))
             else:
                 outcome = _pb.apply_dispute(db, purchase, stripe_event_id=event_id,
-                                            dispute_status=stripe_obj.get("status"))
+                                            dispute_status=stripe_obj.get("status"),
+                                            disputed_cents=stripe_obj.get("amount"))
         except Exception:
             db.rollback()
             raise HTTPException(500, "transient settlement failure")
@@ -1112,6 +1114,13 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
                 mode=stripe_obj.get("mode"),
                 session_price_id=session_price_id,
                 livemode=event.get("livemode"),
+                # Remediation4 (fix 6): the completed session
+                # object's ``created`` is the Stripe charge/session
+                # creation anchor reconciliation keys on (the event
+                # object's own ``created`` is the fallback — both
+                # are carried on data already in hand here, no extra
+                # Stripe retrieval).
+                stripe_charge_created_at=stripe_obj.get("created") or event.get("created"),
             )
         except _pb.SettlementError as exc:
             webhook_event.outcome = "failed"
@@ -2020,6 +2029,18 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
         from app import stripe_billing as _sb_fresh
         data["product_ready"] = (
             _sb_fresh.product_price_id("investigation_report") is not None)
+        # Remediation4 (fix 7): same entitlement-aware flag as the
+        # saved-report view, so a fresh render does not strand a
+        # redemption when new sales are disabled.
+        data["entitlement_available"] = False
+        if _fresh_rid is not None:
+            from app.db import SessionLocal as _SL_fresh_ent
+            from app import product_billing as _pb_fresh
+            with _SL_fresh_ent() as _db_ent:
+                data["entitlement_available"] = \
+                    _pb_fresh.available_entitlement(
+                        _db_ent, user.id, _fresh_rid,
+                        "investigation_report") is not None
         _fresh_src = None
         if _fresh_rid is not None:
             from app.db import SessionLocal as _SL_fresh2
@@ -3203,10 +3224,23 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     # Issue #102: comparison reports (type "comparison") list alongside
     # analyses; PDF-only results stay excluded. Issue #106 Stage 2:
     # Analysis Reports (type "deep_dive") list as their own rows too.
+    # Remediation4 (fix 1): an EXPIRED source is still listed when it
+    # carries a live (available, in-window) entitlement — flagged
+    # redemption-only in the row build below — because otherwise the
+    # holder has no surface from which to redeem inside the F5
+    # window. All other expired sources stay excluded, as before.
+    from sqlalchemy import exists as _exists, or_ as _or
+    _live_ent_exists = _exists().where(
+        models.Entitlement.source_result_id == models.Result.id,
+        models.Entitlement.user_id == _user.id,
+        models.Entitlement.status == "available",
+        _or(models.Entitlement.redemption_deadline.is_(None),
+            models.Entitlement.redemption_deadline >= now),
+    )
     base_q = db.query(models.Result).filter(
         models.Result.user_id == _user.id,
         models.Result.type.in_(["analysis", "comparison", "deep_dive"]),
-        models.Result.expires_at > now,
+        _or(models.Result.expires_at > now, _live_ent_exists),
         models.Result.deleted_at.is_(None),
     )
     total = base_q.count()
@@ -3239,6 +3273,16 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
         from app.credits import _as_aware
         _sharing_rows = db.query(models.ReportSharing).filter(
             models.ReportSharing.result_id == r.id).all()
+        # Remediation4 (fixes 1+7): per-row entitlement state — an
+        # expired row present only via the entitlement EXISTS above
+        # is redemption-only, and ANY row (expired or not) holding an
+        # available entitlement must offer redemption even when new
+        # product sales are disabled (product_ready false).
+        from app import product_billing as _pb_for_list
+        _ent_for_row = _pb_for_list.available_entitlement(
+            db, _user.id, r.id, "investigation_report") \
+            if r.type == "analysis" else None
+        _row_expired = _as_aware(r.expires_at) <= now
         reports.append({
             "id": str(r.id),
             "filename": filename,
@@ -3284,6 +3328,13 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
                 _credits_for_list._as_aware(r.expires_at)
                 + timedelta(days=30)).strftime("%Y-%m-%d")
             if r.type == "analysis" else None,
+            # Remediation4 (fix 1): expired-but-redeemable rows are
+            # flagged so the template suppresses viewing-era actions
+            # (Export/Share/Extend would 410) and labels the row.
+            "redemption_only": bool(_row_expired and _ent_for_row is not None),
+            # Remediation4 (fix 7): entitlement-aware flag threaded
+            # into the row's Analysis button / shared modal JS.
+            "entitlement_available": _ent_for_row is not None,
         })
     from app import stripe_billing as _sb_for_list
     return templates.TemplateResponse(request, "reports.html", {
@@ -3355,6 +3406,51 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     if not result:
         return JSONResponse({"error": "Report not found"}, status_code=404)
     if credits_helpers._as_aware(result.expires_at) < datetime.now(timezone.utc):
+        # Remediation4 (fix 1): an expired source whose owner holds
+        # an available entitlement inside the F5 window gets a
+        # REDEMPTION-ONLY page — the Analysis generate action, with
+        # NO report payload or viewing — instead of a dead 410, so
+        # the entitlement is actually reachable from the browser.
+        # Every other expired case keeps the 410 exactly.
+        _redeem_ent = None
+        if result.type == "analysis":
+            from app import product_billing as _pb_expired
+            _redeem_ent = _pb_expired.available_entitlement(
+                db, _user.id, result.id, "investigation_report")
+        if _redeem_ent is not None:
+            try:
+                _exp_payload = credits_helpers.result_payload(
+                    result, user_id=_user.id,
+                    operation_id=result.operation_id,
+                    free_request_id=result.free_request_id,
+                    product_redemption_id=result.product_redemption_id,
+                    allow_expired=True)
+            except credits_helpers.AdmissionError:
+                return JSONResponse({"error": "Report has expired"}, status_code=410)
+            from app import deep_dive as _dd_expired
+            _eligible, _reason = _dd_expired.eligibility_state(_exp_payload)
+            _filename = "Unknown file"
+            try:
+                _filename = json.loads(result.storage_manifest).get(
+                    "filename") or "Unknown file"
+            except (ValueError, TypeError, AttributeError):
+                pass
+            from app import stripe_billing as _sb_expired
+            return templates.TemplateResponse(request, "redemption_only.html", {
+                "current_user": _user,
+                "csrf_token": _csrf,
+                "report_id": str(result.id),
+                "filename": _filename,
+                "redemption_only": True,
+                "entitlement_available": True,
+                "analysis_eligible": _eligible,
+                "analysis_reason": _reason,
+                "product_ready": (
+                    _sb_expired.product_price_id("investigation_report") is not None),
+                "redemption_deadline": (
+                    credits_helpers._as_aware(_redeem_ent.redemption_deadline).strftime("%Y-%m-%d")
+                    if _redeem_ent.redemption_deadline else None),
+            })
         return JSONResponse({"error": "Report has expired"}, status_code=410)
     try:
         data = credits_helpers.result_payload(
@@ -3477,6 +3573,13 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         from app import stripe_billing as _sb_view
         data["product_ready"] = (
             _sb_view.product_price_id("investigation_report") is not None)
+        # Remediation4 (fix 7): an available entitlement offers the
+        # Generate/Confirm redemption action even when product_ready
+        # is false — generation needs no Price; "Coming soon" gates
+        # only NEW purchases.
+        from app import product_billing as _pb_view
+        data["entitlement_available"] = _pb_view.available_entitlement(
+            db, _user.id, result.id, "investigation_report") is not None
         from datetime import timedelta as _td_deadline
         data["redemption_deadline"] = (
             credits_helpers._as_aware(result.expires_at)

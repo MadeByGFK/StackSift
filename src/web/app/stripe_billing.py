@@ -136,8 +136,17 @@ def packs_for_display() -> list[dict]:
 
 
 def checkout_configured() -> bool:
-    """True when at least one pack has a price ID configured."""
-    return any(p["ready"] for p in packs_for_display())
+    """True when at least one pack OR product has a price ID configured.
+
+    Remediation4: reconciliation's readiness gate uses this — a
+    product-only deployment (pack prices unset, the Investigation
+    Report price set) must be reconciled, not skipped, or product
+    money would never be checked. ``product_price_id`` is defined
+    below in this module; resolution happens at call time.
+    """
+    if any(p["ready"] for p in packs_for_display()):
+        return True
+    return any(product_price_id(sku) is not None for sku in PRODUCT_SKUS)
 
 
 def _secret_key() -> str:
