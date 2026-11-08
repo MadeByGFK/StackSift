@@ -721,18 +721,39 @@ def compute_reconciliation(
     product_ledger_session_ids = {p.stripe_session_id for p in product_purchases if p.stripe_session_id}
     # Remediation2 P2-C: the product ledger refund total is the sum
     # of PERSISTED refunded amounts (product_purchases.refunded_cents,
-    # migration 0018) for every purchase whose latest refund event
-    # landed this day — partial refunds included, at their partial
+    # migration 0018) — partial refunds included, at their partial
     # amount. Previously only status='refunded' rows counted, at
     # FULL amount, so a $3 partial on a $9 purchase left the ledger
     # net at 900 while the Stripe side netted 600: a permanent false
     # mismatch. Pre-0018 full-refund rows carry refunded_cents NULL
     # and fall back to their full amount_cents.
+    # Remediation3 (findings 3+5): BOTH product reversal totals are
+    # bucketed by completed_at — the settlement day, the ledger's
+    # anchor for the charge's creation day, which is exactly where
+    # the Stripe charge loop above attributes amount_refunded and
+    # dispute portions (it iterates charges CREATED this day). The
+    # previous reversed_at (processing-day) bucketing counted a
+    # refund processed days later on the processing day, where the
+    # Stripe side never counts it: false mismatches on both days.
+    # The legacy pack family is the house pattern for the Stripe
+    # anchor (charges fetched by creation day); product ledger gross
+    # already buckets by completed_at for the same reason.
+    # Membership is keyed on the DEDICATED reversal fields
+    # (refunded_cents / refunded_at / dispute_lost_at, migrations
+    # 0018+0019), never on reversal_kind/reversed_at alone: a later
+    # dispute (or refund) event overwrites that provenance, and the
+    # earlier deduction must survive the overwrite. Fallbacks keep
+    # pre-0019 rows countable: refunded_cents set by the 0018-era
+    # code, status='refunded' for pre-0018 full refunds, and
+    # reversal_kind='dispute_lost' for pre-0019 lost disputes.
+    from sqlalchemy import or_ as _or
     product_refunded = db.execute(
         select(M.ProductPurchase).where(
-            M.ProductPurchase.reversal_kind == "refund",
-            M.ProductPurchase.reversed_at >= start,
-            M.ProductPurchase.reversed_at < end,
+            M.ProductPurchase.completed_at >= start,
+            M.ProductPurchase.completed_at < end,
+            _or(M.ProductPurchase.refunded_at.isnot(None),
+                M.ProductPurchase.refunded_cents.isnot(None),
+                M.ProductPurchase.status == "refunded"),
         )
     ).scalars().all()
     product_ledger_refunds = sum(
@@ -743,16 +764,23 @@ def compute_reconciliation(
     # in the charge loop above via the PaymentIntent join (product_
     # stripe_refunds / product_stripe_disputes) — real charges do not
     # carry kind=product metadata on the charge object. The ledger
-    # side of a lost dispute: purchases whose reversal was a lost
-    # dispute reversed on this day.
+    # side of a lost dispute: purchases that EVER lost a dispute
+    # (dedicated dispute_lost_at, or the pre-0019 provenance
+    # fallback), bucketed by completed_at as above. The amount is
+    # capped at the unrefunded remainder, mirroring the Stripe
+    # side's per-charge cap, so a refunded-then-disputed (or
+    # disputed-then-refunded) purchase is never deducted twice.
     product_disputed = db.execute(
         select(M.ProductPurchase).where(
-            M.ProductPurchase.reversal_kind == "dispute_lost",
-            M.ProductPurchase.reversed_at >= start,
-            M.ProductPurchase.reversed_at < end,
+            M.ProductPurchase.completed_at >= start,
+            M.ProductPurchase.completed_at < end,
+            _or(M.ProductPurchase.dispute_lost_at.isnot(None),
+                M.ProductPurchase.reversal_kind == "dispute_lost"),
         )
     ).scalars().all()
-    product_ledger_disputes = sum(p.amount_cents or 0 for p in product_disputed)
+    product_ledger_disputes = sum(
+        max(0, (p.amount_cents or 0) - (p.refunded_cents or 0))
+        for p in product_disputed)
     for s in product_included:
         if s["id"] not in product_ledger_session_ids:
             differences.append({
