@@ -200,7 +200,7 @@
           {% if report.analysis_result_id %}
           <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Analysis</a>
           {% else %}
-          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-reason="{{ report.analysis_reason or '' }}">Analysis</button>
+          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-reason="{{ report.analysis_reason or '' }}" data-deadline="{{ report.redemption_deadline or '' }}">Analysis</button>
           {% endif %}
         {% endif %}
         {# Issue #106 Stage 2 / PR #139 F2: no Share for Analysis
@@ -272,6 +272,7 @@
   </div>
 </div>
 
+<script>window.__productReady = {{ 'false' if product_ready is defined and not product_ready else 'true' }};</script>
 <div id="analysis-modal" class="modal" style="display:none">
   <div class="modal-card">
     <p id="analysis-msg"></p>
@@ -713,9 +714,16 @@
       analysisCurrent = btn;
       document.getElementById('analysis-link-row').style.display = 'none';
       if (btn.getAttribute('data-eligible') === '1') {
-        analysisMsg.textContent = 'Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.';
-        analysisConfirm.style.display = '';
-        analysisConfirm.disabled = false;
+        if (window.__productReady === false) {
+          // Issue #164 (P2-3): fail-closed display state — no live
+          // $9 buy action while the product Price env is unset.
+          analysisMsg.textContent = 'Investigation Report: Coming soon — purchases are not available yet. Please check back later.';
+          analysisConfirm.style.display = 'none';
+        } else {
+          analysisMsg.textContent = 'Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.' + (btn.getAttribute('data-deadline') ? ' Redeem by ' + btn.getAttribute('data-deadline') + ' (the source report\u2019s expiry plus 30 days).' : '');
+          analysisConfirm.style.display = '';
+          analysisConfirm.disabled = false;
+        }
       } else {
         analysisMsg.textContent = btn.getAttribute('data-reason') || '';
         analysisConfirm.style.display = 'none';
@@ -754,13 +762,17 @@
           document.getElementById('analysis-link-row').style.display = 'block';
           analysisConfirm.style.display = 'none';
         } else if (d._httpStatus === 402 && d.purchase_url) {
-          analysisMsg.textContent = '';
-          analysisMsg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
-          var buy = document.createElement('a');
-          buy.href = d.purchase_url;
-          buy.textContent = 'Buy credits';
-          analysisMsg.appendChild(buy);
-          analysisConfirm.disabled = false;
+          // #164: no entitlement — start the $9 product checkout.
+          analysisMsg.textContent = d.error || 'Investigation Report costs $9.';
+          var cfd = new FormData();
+          cfd.append('csrf_token', '{{ csrf_token }}');
+          fetch(d.purchase_url, { method: 'POST', body: cfd, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (c) {
+              if (analysisCurrent !== originBtn) { return; }
+              if (c.checkout_url) { window.location = c.checkout_url; }
+              else { analysisMsg.textContent = c.error || 'Checkout is not available yet.'; analysisConfirm.disabled = false; }
+            }, function () { analysisConfirm.disabled = false; });
         } else {
           analysisMsg.textContent = d.error || 'Analysis Report generation failed.';
           analysisConfirm.disabled = false;

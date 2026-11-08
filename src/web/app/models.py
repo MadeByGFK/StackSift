@@ -303,6 +303,10 @@ class Result(Base):
     anonymous_owner_hash = Column(String(64), nullable=True)
     operation_id = Column(GUID(), ForeignKey("operations.id"), nullable=True, unique=True)
     free_request_id = Column(String(255), nullable=True, unique=True)
+    # Issue #164 Phase A (Amendment A2): dollar-path origin. A Result is
+    # born of exactly one of: a credit Operation, a free request, or a
+    # product entitlement redemption.
+    product_redemption_id = Column(GUID(), ForeignKey("entitlement_redemptions.id", use_alter=True, name="fk_results_product_redemption_id"), nullable=True, unique=True)
     type = Column(String(30), nullable=False)  # 'analysis' | 'pdf' | 'batch'
     # Analysis outcome severity at store time: 'ok' | 'warnings' | 'errors'.
     # NULL = stored before severity existed (renders as the neutral dot).
@@ -321,9 +325,13 @@ class Result(Base):
             "(user_id IS NOT NULL) <> (anonymous_owner_hash IS NOT NULL)",
             name="ck_result_exactly_one_owner",
         ),
-        # Exactly one origin: operation_id XOR free_request_id
+        # Exactly one origin of three (A2): operation XOR free_request
+        # XOR product_redemption.
         CheckConstraint(
-            "(operation_id IS NOT NULL) <> (free_request_id IS NOT NULL)",
+            "(CASE WHEN operation_id IS NOT NULL THEN 1 ELSE 0 END)"
+            " + (CASE WHEN free_request_id IS NOT NULL THEN 1 ELSE 0 END)"
+            " + (CASE WHEN product_redemption_id IS NOT NULL THEN 1 ELSE 0 END)"
+            " = 1",
             name="ck_result_exactly_one_origin",
         ),
     )
@@ -674,6 +682,11 @@ class StripeWebhookEvent(Base):
     stripe_event_id = Column(String(255), primary_key=True)
     event_type = Column(String(60), nullable=False)
     purchase_id = Column(GUID(), ForeignKey("credit_purchases.id"), nullable=True)
+    # Issue #164 Phase A (A3): product-family join. At most one of the
+    # two purchase FKs is ever set; zero stays valid for
+    # unknown/unsupported events.
+    product_purchase_id = Column(GUID(), ForeignKey("product_purchases.id", use_alter=True, name="fk_webhook_product_purchase_id"), nullable=True)
+    attempts = Column(Integer, nullable=False, default=1)
     outcome = Column(String(20), nullable=False)
     note = Column(String(255), nullable=True)
     received_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -682,6 +695,10 @@ class StripeWebhookEvent(Base):
         CheckConstraint(
             "outcome IN ('processed','duplicate','ignored','failed')",
             name="ck_webhook_event_outcome_valid",
+        ),
+        CheckConstraint(
+            "(purchase_id IS NULL) OR (product_purchase_id IS NULL)",
+            name="ck_webhook_event_at_most_one_purchase",
         ),
     )
 
@@ -729,6 +746,12 @@ class PaymentReconciliation(Base):
     #             ledger_refund_cents, stripe_net_cents,
     #             ledger_net_cents, diff_cents}
     per_pack = Column(JSON, nullable=True)
+    # Issue #164 Phase A (A8): family partition (pack | product |
+    # unknown) computed once at ingestion; schema_version 2 records
+    # carry per_family. Version 1 rows (pack-only era) reprocess
+    # compatibly: readers treat a missing per_family as pack-only.
+    schema_version = Column(Integer, nullable=False, default=1)
+    per_family = Column(JSON, nullable=True)
     # List of {kind, detail...} for every record that does not pair up.
     differences = Column(JSON, nullable=True)
     alert_sent = Column(Boolean, nullable=False, default=False)
@@ -854,4 +877,155 @@ class ReportAction(Base):
     __table_args__ = (
         UniqueConstraint("owner_user_id", "result_id", "action_kind",
                          "idempotency_key", name="uq_report_action_identity"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #164 Phase A: per-product dollar purchases + entitlements.
+#
+# Generic engine proven on the Investigation Report ($9). Legacy credit
+# tables are untouched by this phase. Settlement grants an Entitlement
+# and nothing else — no credits, no ledger rows, no consents, ever.
+# Redemption is a durable EntitlementRedemption record (A1), mirroring
+# the credit Operation reserve/complete/release discipline: worker
+# identity, lease generation, executor-stop fencing on recovery.
+# ---------------------------------------------------------------------------
+
+
+class ProductPurchase(Base):
+    """One per-product purchase attempt (mirror of CreditPurchase).
+
+    Created 'pending' BEFORE the Stripe session exists. The webhook
+    transitions pending -> completed exactly once and creates the
+    single Entitlement. Refund/dispute reversals (A5/F3) record
+    provenance on reversal_* without rewriting payment history.
+    """
+
+    __tablename__ = "product_purchases"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    sku = Column(String(40), nullable=False)
+    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=False, index=True)
+    stripe_session_id = Column(String(255), unique=True, nullable=True)
+    stripe_payment_intent_id = Column(String(255), nullable=True)
+    # Checkout-time snapshots (A4): settlement asserts the event equals
+    # ALL of these — amount, currency, and the Stripe Price ID.
+    amount_cents = Column(Integer, nullable=True)
+    currency = Column(String(10), nullable=True)
+    stripe_price_id = Column(String(255), nullable=True)
+    pricing_version = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    # 'pending' | 'completed' | 'failed' | 'refunded' | 'disputed'
+    stripe_event_id = Column(String(255), nullable=True)
+    reversal_event_id = Column(String(255), nullable=True)
+    reversal_kind = Column(String(20), nullable=True)
+    # 'refund' | 'dispute_open' | 'dispute_lost' | 'dispute_won'
+    reversed_at = Column(DateTime(timezone=True), nullable=True)
+    needs_manual_review = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','completed','failed','refunded','disputed')",
+            name="ck_product_purchase_status_valid",
+        ),
+        CheckConstraint(
+            "(status != 'completed') OR (amount_cents IS NOT NULL AND amount_cents > 0)",
+            name="ck_product_purchase_completed_has_amount",
+        ),
+        # P2-1 (A7/F1): at most ONE pending purchase per
+        # (buyer, source, sku) — the DB-level backstop for the
+        # SELECT-then-act reuse in create_pending_product_purchase.
+        Index("ix_product_purchases_pending_unique",
+              "user_id", "source_result_id", "sku", unique=True,
+              postgresql_where="status = 'pending'",
+              sqlite_where=sa.text("status = 'pending'")),
+    )
+
+
+class Entitlement(Base):
+    """The buyer's right to redeem one product for one source report.
+
+    Status set (A1): available | reserved | redeemed | revoked |
+    refund_eligible (F5 terminal state after the redemption window
+    lapses). 'reserved' is a projection of a live EntitlementRedemption
+    row — it is only ever written in the same transaction that inserts
+    that row. `version` is the CAS counter every transition fences on.
+    """
+
+    __tablename__ = "entitlements"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    product_purchase_id = Column(GUID(), ForeignKey("product_purchases.id"),
+                                 nullable=False, unique=True)
+    sku = Column(String(40), nullable=False)
+    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="available")
+    version = Column(Integer, nullable=False, default=0)
+    # F5: source Result expiry + 30 days, fixed at settlement.
+    redemption_deadline = Column(DateTime(timezone=True), nullable=True)
+    redeemed_result_id = Column(GUID(), ForeignKey("results.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    redeemed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('available','reserved','redeemed','revoked','refund_eligible')",
+            name="ck_entitlement_status_valid",
+        ),
+        # P2-1 (F1): at most ONE live (available|reserved) entitlement
+        # per (buyer, source, sku) — the DB-level guarantee behind the
+        # duplicate-purchase block, closing the SELECT-then-act race.
+        Index("ix_entitlements_live_unique",
+              "user_id", "source_result_id", "sku", unique=True,
+              postgresql_where="status IN ('available', 'reserved')",
+              sqlite_where=sa.text("status IN ('available', 'reserved')")),
+    )
+
+
+class EntitlementRedemption(Base):
+    """Durable redemption record (A1) — the dollar path's Operation.
+
+    status: reserved | completed | released | stopped. A 'stopped' row
+    is a crashed reservation whose executor-stop evidence has not yet
+    arrived: the entitlement stays out of circulation (still projected
+    'reserved') until the retry-after-stopped path releases it.
+    """
+
+    __tablename__ = "entitlement_redemptions"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    entitlement_id = Column(GUID(), ForeignKey("entitlements.id", ondelete="CASCADE"),
+                            nullable=False, index=True)
+    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    worker_id = Column(String(255), nullable=False)
+    lease_generation = Column(Integer, nullable=False, default=1)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String(20), nullable=False, default="reserved")
+    failure_code = Column(String(50), nullable=True)
+    result_id = Column(GUID(), ForeignKey("results.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('reserved','completed','released','stopped')",
+            name="ck_redemption_status_valid",
+        ),
+        # P3-9 disposition (recorded, not silent): A1's text says
+        # entitlement_id "unique while non-terminal", but the partial
+        # index covers status='reserved' only. That is functionally
+        # equivalent here: a 'stopped' row is released (retry path)
+        # before any re-reserve can be attempted, and the entitlement
+        # stays projected 'reserved' while stopped, so no second live
+        # reservation can be inserted through any code path.
+        Index("ix_redemption_entitlement_live", "entitlement_id", unique=True,
+              postgresql_where="status = 'reserved'",
+              sqlite_where=sa.text("status = 'reserved'")),
     )

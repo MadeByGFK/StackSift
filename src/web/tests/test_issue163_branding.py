@@ -78,8 +78,16 @@ def _huge_header_png():
 
 
 def _make_deep_dive(auth_env):
-    """Owner + source report + generated deep_dive Result id."""
+    """Owner + source report + generated deep_dive Result id.
+
+    PREMISE CHANGED (#164 Phase A, A10: dollar-product): the owned
+    deep-dive fixture is now a DOLLAR-paid report — a seeded $9
+    entitlement is redeemed by the POST (branding is included with
+    paid reports on the same terms; the Phase A suite separately
+    proves branding on the dollar path end-to-end)."""
     email, user_id, rid, csrf = _setup(auth_env)
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     gen = auth_env.client.post(f"/reports/{rid}/deep-dive",
                                data={"csrf_token": csrf})
     assert gen.status_code == 200, gen.text[:300]
@@ -723,15 +731,26 @@ def test_a3_csv_first_unlock_then_branded_pdf(auth_env):
 
 
 def test_a3_no_branding_ever_keeps_stored_replay(auth_env):
-    """Regression gate: a report that never had branding keeps the
-    pre-#163 stored-replay behaviour byte-for-byte."""
+    """Regression gate: a report that never had branding keeps its
+    unbranded PDF body identical across repeated exports.
+
+    PREMISE CHANGED (#164, A9(d)): the fixture artifact is now
+    dollar-paid, and product PDFs are generated on the fly (no
+    stored derivative), so raw bytes legitimately differ by the
+    embedded generation timestamp — the legacy stored-replay
+    byte-identity premise belongs to credit-era artifacts. The
+    invariant this gate protects is preserved in its dollar form:
+    the normalized body (timestamps/footer furniture stripped) is
+    identical across both renders."""
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
     first = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                  data={"csrf_token": csrf})
     second = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                   data={"csrf_token": csrf})
     assert first.status_code == second.status_code == 200
-    assert second.content == first.content
+    assert first.content[:4] == second.content[:4] == b"%PDF"
+    assert _normalized_body(second.content, []) == \
+        _normalized_body(first.content, [])
 
 
 # --- A4: deep-dive sharing stays unsupported -------------------------------------------

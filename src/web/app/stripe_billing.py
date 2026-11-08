@@ -281,6 +281,7 @@ def create_checkout_session(
         "success_url": success_url,
         "cancel_url": cancel_url,
         "client_reference_id": str(user_id),
+        "metadata[kind]": "pack",
         "metadata[purchase_id]": str(purchase_id),
         "metadata[user_id]": str(user_id),
         "metadata[pack_id]": pack_id,
@@ -289,6 +290,7 @@ def create_checkout_session(
     }
     # Issue #72: join keys on the payment intent so refund/dispute charges
     # (which carry PI metadata, not session metadata) attribute to a pack.
+    data["payment_intent_data[metadata][kind]"] = "pack"
     data["payment_intent_data[metadata][purchase_id]"] = str(purchase_id)
     data["payment_intent_data[metadata][pack_id]"] = pack_id
     data["payment_intent_data[metadata][pricing_version]"] = str(
@@ -311,6 +313,165 @@ def create_checkout_session(
         # stays generic; the detail is for the server logs only.
         detail = _stripe_error_detail(resp)
         logger.error("Stripe checkout returned HTTP %s (%s)", resp.status_code, detail)
+        raise CheckoutError("Stripe request failed")
+    body = resp.json()
+    url = body.get("url")
+    session_id = body.get("id")
+    if not url or not session_id:
+        raise CheckoutError("Stripe returned an incomplete checkout session")
+    return url, session_id
+
+
+# ---------------------------------------------------------------------------
+# Issue #164 Phase A: per-product dollar catalog (parallel to PACKS).
+# Amount informational; the Stripe Price is authoritative and settlement
+# asserts the completed amount equals the checkout-time snapshot (A4).
+# Currency is pinned to USD for Phase A products.
+# ---------------------------------------------------------------------------
+
+PRODUCT_SKUS: dict[str, dict] = {
+    "investigation_report": {
+        "name": "Investigation Report",
+        "amount_cents": 900,
+        "currency": "usd",
+        "price_label": "$9",
+        "price_env": "STRIPE_PRICE_INVESTIGATION_REPORT",
+    },
+}
+
+# Pay-now promise (F2), pinned verbatim for every dollar-path surface.
+PAY_NOW_PROMISE = (
+    "Payment is captured at checkout. If generation fails, your purchase "
+    "is never consumed — the entitlement stays available and you can "
+    "retry. A purchase that can never be redeemed is refundable on "
+    "request via disputes@goodfolkdigital.com."
+)
+
+
+def get_product_sku(sku: str) -> dict | None:
+    return PRODUCT_SKUS.get(sku)
+
+
+def product_price_id(sku: str) -> str | None:
+    entry = PRODUCT_SKUS.get(sku)
+    if entry is None:
+        return None
+    return os.environ.get(entry["price_env"]) or None
+
+
+def products_for_display() -> list[dict]:
+    out = []
+    for sku, entry in PRODUCT_SKUS.items():
+        out.append({
+            "sku": sku, "name": entry["name"],
+            "price_label": entry["price_label"],
+            "amount_cents": entry["amount_cents"],
+            "currency": entry["currency"],
+            "ready": product_price_id(sku) is not None,
+        })
+    return out
+
+
+def fetch_session_line_item_price_id(session_id: str) -> str | None:
+    """Retrieve a Checkout Session's first line-item Price ID from the
+    Stripe API (P1-1 remediation).
+
+    A real ``checkout.session.completed`` webhook event carries NEITHER
+    ``line_items`` nor a price id on the session object — Stripe's own
+    fulfilment guidance is to retrieve them from the API. Settlement
+    therefore calls this (GET /checkout/sessions/{id}/line_items)
+    instead of reading the event payload. Returns None when the session
+    has no line items; raises CheckoutError on transport/API failure
+    so the webhook can answer non-2xx and let Stripe redeliver.
+    """
+    if not session_id:
+        raise CheckoutError("missing session id for line-item retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/checkout/sessions/{session_id}/line_items",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe line-items request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe line-items request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe line-items returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe line-items request failed")
+    body = resp.json()
+    data = body.get("data") or []
+    if not data or not isinstance(data[0], dict):
+        return None
+    price = data[0].get("price")
+    if isinstance(price, dict):
+        return price.get("id")
+    if isinstance(price, str):
+        return price
+    return None
+
+
+def create_product_checkout_session(
+    *,
+    user_id,
+    sku: str,
+    purchase_id,
+    success_url: str,
+    cancel_url: str,
+) -> tuple[str, str]:
+    """Create a Stripe Checkout Session for a product purchase (A7).
+
+    Idempotency key is bound to the ONE local purchase row
+    (``checkout:product:{purchase_id}``), never to a minute, so a retry
+    can never bind to a different purchase/source. Metadata carries
+    ``kind=product`` (A3) on both the session and the PaymentIntent.
+    F4: immediate payment methods only (card) — no delayed/async
+    settlement methods are offered in Phase A.
+    """
+    entry = PRODUCT_SKUS.get(sku)
+    if entry is None:
+        raise CheckoutError(f"unknown product sku: {sku}")
+    price_id = product_price_id(sku)
+    if not price_id:
+        raise CheckoutNotConfigured(f"price not configured for product {sku}")
+    key = _secret_key()
+    idempotency_key = f"checkout:product:{purchase_id}"
+    data = {
+        "mode": "payment",
+        "payment_method_types[0]": "card",
+        "line_items[0][price]": price_id,
+        "line_items[0][quantity]": "1",
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "client_reference_id": str(user_id),
+        "metadata[kind]": "product",
+        "metadata[purchase_id]": str(purchase_id),
+        "metadata[user_id]": str(user_id),
+        "metadata[sku]": sku,
+        "metadata[pricing_version]": str(credits_helpers.PRICING_VERSION),
+        "payment_intent_data[metadata][kind]": "product",
+        "payment_intent_data[metadata][purchase_id]": str(purchase_id),
+        "payment_intent_data[metadata][user_id]": str(user_id),
+        "payment_intent_data[metadata][sku]": sku,
+        "payment_intent_data[metadata][pricing_version]": str(
+            credits_helpers.PRICING_VERSION),
+    }
+    try:
+        resp = httpx.post(
+            f"{STRIPE_API_BASE}/checkout/sessions",
+            data=data,
+            auth=(key, ""),
+            headers={"Idempotency-Key": idempotency_key},
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe product checkout request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe product checkout returned HTTP %s (%s)", resp.status_code, detail)
         raise CheckoutError("Stripe request failed")
     body = resp.json()
     url = body.get("url")

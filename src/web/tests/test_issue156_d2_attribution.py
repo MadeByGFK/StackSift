@@ -702,18 +702,27 @@ def test_premium_intent_analysis_report_success_and_402(route_env):
     from test_structured_export_e2e import (
         _drain_signup, _session_csrf, _setup)
 
-    # Success path: exactly the ruled 3-credit charge changes.
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): the
+    # success path redeems a $9 entitlement — premium_intent still
+    # fires exactly once at attempt entry and NO credit state moves
+    # (the event is observe-only; the dollar charge is not a credit
+    # charge). The blocked path is now "no entitlement" (402 to the
+    # product checkout), independent of the credit balance.
+    from product_seed import seed_entitlement_for_source
     _, user_id, rid, csrf = _setup(route_env)
     before = _balance(route_env, user_id)
+    seed_entitlement_for_source(route_env.sessions, rid)
     resp = route_env.client.post(
         f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
     assert resp.status_code == 200, resp.text[:300]
-    assert _balance(route_env, user_id) == before - 3
+    assert _balance(route_env, user_id) == before  # no credit movement
     rows = _events_from_sessions(
         route_env, funnel.PREMIUM_INTENT, user_id=user_id)
     assert len(rows) == 1 and rows[0].meta["kind"] == "analysis_report"
 
-    # Blocked (402) path on a second eligible report with 0 balance.
+    # Blocked (402) path on a second eligible report: no entitlement
+    # held (the drained 0 balance is incidental — credits no longer
+    # gate this route at any balance).
     _, user2, rid2, csrf2 = _setup(route_env, extra_credits=0)
     _drain_signup(route_env, user2, 10)
     assert _balance(route_env, user2) == 0

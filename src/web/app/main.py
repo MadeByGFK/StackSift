@@ -400,6 +400,10 @@ async def credits(request: Request):
     from app import stripe_billing
 
     packs = stripe_billing.packs_for_display()
+    # Issue #164 (P2-3): the product card's fail-closed display state
+    # comes from products_for_display() — when the product Price env
+    # is unset the card renders "Coming soon", not a live $9 action.
+    products = stripe_billing.products_for_display()
     status = request.query_params.get("checkout", "")
     # ISSUE-71: the credits page shows the ledger-derived balance (never a
     # display-only number) so the post-purchase balance is visible without
@@ -429,6 +433,7 @@ async def credits(request: Request):
             "current_user": _user,
             "csrf_token": _csrf,
             "packs": packs,
+            "products": products,
             "checkout_ready": any(p["ready"] for p in packs),
             "checkout_status": status if status in ("success", "cancelled") else "",
             "balance_summary": balance_summary,
@@ -603,6 +608,218 @@ async def credits_checkout(
 # HMAC is the authentication; unsigned or mis-signed deliveries are answered
 # 400 before any database row is touched. Stripe retries non-2xx, so every
 # handler path below is idempotent.
+@app.post("/reports/{result_id}/investigation-checkout")
+async def investigation_checkout(
+    request: Request,
+    result_id: str,
+    csrf_token: str = Form(...),
+    db=Depends(get_db),
+):
+    """Issue #164 Phase A (A7): product checkout for the Investigation
+    Report, on the Report surface. Creates/reuses the pending product
+    purchase FIRST; the Stripe idempotency key binds to that one row.
+    Success/cancel URLs never grant or redeem — webhook settlement only.
+    """
+    import hmac
+    import os as _os
+    import uuid as _uuid
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+    from app import auth as auth_helpers
+    from app import stripe_billing
+    from app import credits as credits_helpers
+    from app import product_billing as pb
+    from app import models
+    from app import deep_dive as dd
+    from datetime import datetime, timezone, timedelta
+
+    # P3-6: fail-closed parity with the pack checkout route — the
+    # previous dead `pass` here claimed a gate that did not exist.
+    if not _os.environ.get("DATABASE_URL"):
+        raise HTTPException(503, "Investigation Report purchases are unavailable right now.")
+    _user, _ = _get_current_user_optional(request)
+    if not _user:
+        return JSONResponse({"error": "Log in or sign up to buy the Investigation Report."}, status_code=401)
+    session = auth_helpers.get_session_from_cookie(db, request)
+    expected = session.csrf_token if session else None
+    if not expected or not isinstance(csrf_token, str) or not hmac.compare_digest(csrf_token, expected):
+        raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
+    from app import d2_attribution as _d2
+    _d2.emit_premium_intent(request, _user.id, "checkout_start")
+    ip = _client_ip(request)
+    if _use_shared_limiter():
+        try:
+            rl_db = _db_session()
+            try:
+                checkout_limiter.admit(rl_db, f"c:{ip}")
+            finally:
+                rl_db.close()
+        except (BurstLimited, HourlyLimited):
+            raise HTTPException(429, "Too many attempts. Please try again later.")
+        except Exception:
+            raise HTTPException(503, "Rate limiting is temporarily unavailable. Please try again shortly.")
+    else:
+        auth_helpers.check_rate_limit("checkout", ip)
+
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+    source = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == _user.id,
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not source:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    # A6(1): checkout requires the same eligibility gates as redemption.
+    if source.type != "analysis":
+        return JSONResponse({"error": "Analysis Reports are not available for this report type"}, status_code=422)
+    if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
+        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    try:
+        payload = credits_helpers.result_payload(
+            source, user_id=_user.id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+            product_redemption_id=source.product_redemption_id,
+        )
+    except credits_helpers.AdmissionError:
+        return JSONResponse({"error": "Report data corrupted"}, status_code=500)
+    try:
+        dd.check_eligibility(payload)
+    except dd.UnsupportedReportKind:
+        return JSONResponse({"error": "Analysis Reports are not available for this report type"}, status_code=422)
+    except dd.InsufficientEvidence as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+    sku = "investigation_report"
+    # F1: a live entitlement blocks a second checkout entirely.
+    existing_ent = pb.live_entitlement(db, _user.id, rid, sku)
+    if existing_ent is not None:
+        db.rollback()
+        return JSONResponse({
+            "error": "You already hold an entitlement for this report's Investigation Report.",
+            "existing_entitlement_id": str(existing_ent.id),
+            "entitlement_status": existing_ent.status,
+            "redemption_deadline": existing_ent.redemption_deadline.isoformat() if existing_ent.redemption_deadline else None,
+        }, status_code=409)
+
+    origin = str(request.base_url).rstrip("/")
+    success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/reports/{rid}?checkout=success"
+    cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/reports/{rid}?checkout=cancelled"
+    try:
+        stripe_billing._secret_key()
+        if stripe_billing.product_price_id(sku) is None:
+            raise stripe_billing.CheckoutNotConfigured(f"price not configured for product {sku}")
+        purchase, reused = pb.create_pending_product_purchase(db, _user.id, sku, rid)
+        db.commit()
+        if reused:
+            # Session-retrieval retry (A7/P2-1): reuse the pending row
+            # and re-create/retrieve the session under THIS row's
+            # idempotency key — Stripe returns the original session
+            # for the same key+params, including the timeout case
+            # where the local row never recorded a session id. Backfill
+            # the session id (and price snapshot) before returning.
+            try:
+                checkout_url, session_id = stripe_billing.create_product_checkout_session(
+                    user_id=_user.id, sku=sku, purchase_id=purchase.id,
+                    success_url=success_url, cancel_url=cancel_url)
+            except Exception:
+                db.rollback()
+                raise
+            if not purchase.stripe_session_id:
+                purchase.stripe_session_id = session_id
+            if not purchase.stripe_price_id:
+                purchase.stripe_price_id = stripe_billing.product_price_id(sku)
+            db.commit()
+            return JSONResponse({
+                "checkout_url": checkout_url, "purchase_id": str(purchase.id),
+                "redemption_deadline": (credits_helpers._as_aware(source.expires_at) + timedelta(days=30)).isoformat(),
+                "promise": stripe_billing.PAY_NOW_PROMISE,
+            })
+        try:
+            checkout_url, session_id = stripe_billing.create_product_checkout_session(
+                user_id=_user.id, sku=sku, purchase_id=purchase.id,
+                success_url=success_url, cancel_url=cancel_url)
+        except Exception:
+            db.rollback()
+            raise
+        purchase.stripe_session_id = session_id
+        purchase.stripe_price_id = stripe_billing.product_price_id(sku)
+        db.commit()
+    except pb.DuplicateEntitlement as dup:
+        db.rollback()
+        return JSONResponse({
+            "error": "You already hold an entitlement for this report's Investigation Report.",
+            "existing_entitlement_id": str(dup.entitlement.id),
+            "entitlement_status": dup.entitlement.status,
+        }, status_code=409)
+    except stripe_billing.CheckoutNotConfigured:
+        db.rollback()
+        return JSONResponse({"error": "Investigation Report purchases are not available yet. Please try again later."}, status_code=503)
+    except stripe_billing.CheckoutError:
+        raise HTTPException(503, "Investigation Report purchases are temporarily unavailable. Please try again shortly.")
+    from app import funnel as funnel_helpers
+    funnel_helpers.emit_standalone(funnel_helpers.PURCHASE_START, user_id=_user.id,
+                                   meta={"sku": sku, "kind": "product"})
+    return JSONResponse({
+        "checkout_url": checkout_url, "purchase_id": str(purchase.id),
+        "redemption_deadline": (credits_helpers._as_aware(source.expires_at) + timedelta(days=30)).isoformat(),
+        "promise": stripe_billing.PAY_NOW_PROMISE,
+    })
+
+
+@app.get("/reports/{result_id}/investigation-status")
+async def investigation_status(request: Request, result_id: str, db=Depends(get_db)):
+    """Issue #164 Phase A (A7/P3-2): purchase-status polling for the
+    checkout return page. Read-only, owner-checked; grants nothing —
+    settlement is webhook-only. The report page polls this after
+    ?checkout=success until the entitlement lands (or tries run out).
+    """
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse
+    from app import product_billing as pb
+    from app import models
+    _user, _ = _get_current_user_optional(request)
+    if not _user:
+        return JSONResponse({"error": "Login required"}, status_code=401)
+    try:
+        rid = _uuid.UUID(result_id)
+    except ValueError:
+        return JSONResponse({"error": "Invalid report ID"}, status_code=400)
+    source = db.query(models.Result).filter(
+        models.Result.id == rid,
+        models.Result.user_id == _user.id,
+        models.Result.deleted_at.is_(None),
+    ).first()
+    if not source:
+        return JSONResponse({"error": "Report not found"}, status_code=404)
+    ent = pb.live_entitlement(db, _user.id, rid, "investigation_report")
+    if ent is not None:
+        return JSONResponse({
+            "entitlement_status": ent.status,
+            "redemption_deadline": ent.redemption_deadline.isoformat() if ent.redemption_deadline else None,
+        })
+    purchase = db.query(models.ProductPurchase).filter(
+        models.ProductPurchase.user_id == _user.id,
+        models.ProductPurchase.source_result_id == rid,
+        models.ProductPurchase.sku == "investigation_report",
+    ).order_by(models.ProductPurchase.created_at.desc()).first()
+    return JSONResponse({
+        "entitlement_status": None,
+        "purchase_status": purchase.status if purchase else None,
+    })
+
+
+# ISSUE-69 + #164 (A3): Stripe webhook — family dispatch by kind.
+# Server-to-server: no user session and no CSRF token. The Stripe-Signature
+# HMAC is the authentication; unsigned or mis-signed deliveries are answered
+# 400 before any database row is touched. Stripe retries non-2xx, so every
+# handler path below is idempotent. Dispatch order (A3): signature verify
+# -> event-PK insert (exactly once) -> kind classification -> family lookup.
+# Absent kind is deterministically PACK; a present kind that contradicts
+# the resolved family, or an unknown kind, fails closed with no fallback.
 @app.post("/credits/webhook")
 async def credits_webhook(request: Request, db=Depends(get_db)):
     import json as _json
@@ -611,6 +828,7 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
     from sqlalchemy.exc import IntegrityError
     from app import stripe_billing, models as _models
     from app import credits as credits_helpers
+    from app import product_billing as _pb
 
     log = logging.getLogger(__name__)
     try:
@@ -633,9 +851,6 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
     if not event_id or not isinstance(event_id, str):
         raise HTTPException(400, "Invalid webhook payload.")
 
-    # Idempotency gate: the PK on stripe_event_id makes redelivery collide
-    # here, before any side effect. Roll back the failed insert and answer
-    # 200 so Stripe stops retrying a delivery we already handled.
     webhook_event = _models.StripeWebhookEvent(
         stripe_event_id=event_id, event_type=event_type, outcome="ignored")
     db.add(webhook_event)
@@ -643,8 +858,134 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
         db.flush()
     except IntegrityError:
         db.rollback()
+        # P3-1 disposition: the A3(5) 'transient:' supersede branch
+        # that previously sat here was dead code — no path ever wrote
+        # a 'transient:' note. It is REMOVED. Effective transient
+        # behaviour is the mechanism the handlers actually use:
+        # settlement exceptions roll back (the event row is never
+        # committed) and return HTTP 500, so Stripe redelivery enters
+        # through a fresh event row. Any COMMITTED row is a true
+        # duplicate and grants nothing twice.
         log.info("webhook %s: redelivered event; granting nothing", event_id)
         return JSONResponse({"status": "duplicate"})
+
+    stripe_obj = event.get("data", {}).get("object", {}) or {}
+    obj_metadata = stripe_obj.get("metadata", {}) or {}
+    kind = obj_metadata.get("kind")
+    if kind is not None and kind not in ("pack", "product"):
+        webhook_event.outcome = "failed"
+        webhook_event.note = f"unknown kind {kind!r}"
+        db.commit()
+        return JSONResponse({"status": "failed"})
+
+    def _find_pack_purchase():
+        purchase = None
+        purchase_ref = obj_metadata.get("purchase_id")
+        if purchase_ref:
+            try:
+                purchase = db.get(_models.CreditPurchase, purchase_ref)
+            except Exception:
+                log.warning("webhook %s: malformed metadata purchase_id %r", event_id, purchase_ref)
+                purchase = None
+        if purchase is None and stripe_obj.get("id"):
+            from sqlalchemy import select as _select
+            purchase = db.execute(
+                _select(_models.CreditPurchase).where(
+                    _models.CreditPurchase.stripe_session_id == stripe_obj["id"])
+            ).scalar_one_or_none()
+        return purchase
+
+    def _find_product_purchase():
+        purchase = None
+        purchase_ref = obj_metadata.get("purchase_id")
+        if purchase_ref:
+            try:
+                purchase = db.get(_models.ProductPurchase, purchase_ref)
+            except Exception:
+                log.warning("webhook %s: malformed metadata purchase_id %r", event_id, purchase_ref)
+                purchase = None
+        if purchase is None and stripe_obj.get("id"):
+            from sqlalchemy import select as _select
+            purchase = db.execute(
+                _select(_models.ProductPurchase).where(
+                    _models.ProductPurchase.stripe_session_id == stripe_obj["id"])
+            ).scalar_one_or_none()
+        if purchase is None and stripe_obj.get("payment_intent"):
+            from sqlalchemy import select as _select
+            purchase = db.execute(
+                _select(_models.ProductPurchase).where(
+                    _models.ProductPurchase.stripe_payment_intent_id == stripe_obj["payment_intent"])
+            ).scalar_one_or_none()
+        return purchase
+
+    def _find_product_by_charge():
+        # Refund/dispute join (A5): charge -> PI metadata purchase_id +
+        # kind=product, else the purchase row's snapshotted PI id.
+        purchase = None
+        purchase_ref = obj_metadata.get("purchase_id")
+        if purchase_ref:
+            try:
+                purchase = db.get(_models.ProductPurchase, purchase_ref)
+            except Exception:
+                purchase = None
+        if purchase is None:
+            pi = stripe_obj.get("payment_intent")
+            if isinstance(pi, dict):
+                pi = pi.get("id")
+            if pi:
+                from sqlalchemy import select as _select
+                purchase = db.execute(
+                    _select(_models.ProductPurchase).where(
+                        _models.ProductPurchase.stripe_payment_intent_id == pi)
+                ).scalar_one_or_none()
+        return purchase
+
+    # F4: async success is NOT a grant route in Phase A.
+    if event_type == "checkout.session.async_payment_succeeded":
+        webhook_event.outcome = "ignored"
+        webhook_event.note = "async success grants nothing in Phase A (F4)"
+        db.commit()
+        return JSONResponse({"status": "ignored"})
+
+    # A5: refund / dispute machinery for the product family. Charges
+    # without a resolvable product join are ignored here (pack charges
+    # keep their existing reconciliation-only handling).
+    if event_type in ("charge.refunded", "charge.dispute.created", "charge.dispute.closed"):
+        if kind == "pack":
+            webhook_event.outcome = "ignored"
+            webhook_event.note = "pack reversal handled by reconciliation"
+            db.commit()
+            return JSONResponse({"status": "ignored"})
+        purchase = _find_product_by_charge()
+        if purchase is None:
+            webhook_event.outcome = "ignored"
+            webhook_event.note = "unknown purchase"
+            db.commit()
+            return JSONResponse({"status": "ignored"})
+        if kind is not None and kind != "product":
+            webhook_event.outcome = "failed"
+            webhook_event.note = "kind contradicts product purchase"
+            db.commit()
+            return JSONResponse({"status": "failed"})
+        webhook_event.product_purchase_id = purchase.id
+        try:
+            if event_type == "charge.refunded":
+                outcome = _pb.apply_refund(
+                    db, purchase, stripe_event_id=event_id,
+                    refunded_cents=int(stripe_obj.get("amount_refunded") or 0),
+                    charge_amount_cents=int(stripe_obj.get("amount") or 0))
+            elif event_type == "charge.dispute.created":
+                outcome = _pb.apply_dispute(db, purchase, stripe_event_id=event_id, dispute_status=None)
+            else:
+                outcome = _pb.apply_dispute(db, purchase, stripe_event_id=event_id,
+                                            dispute_status=stripe_obj.get("status"))
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "transient settlement failure")
+        webhook_event.outcome = "processed"
+        webhook_event.note = outcome[:250]
+        db.commit()
+        return JSONResponse({"status": "processed"})
 
     if event_type != "checkout.session.completed" and event_type not in (
         "checkout.session.expired",
@@ -655,42 +996,89 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
         log.info("webhook %s: ignoring event type %s", event_id, event_type)
         return JSONResponse({"status": "ignored"})
 
-    stripe_obj = event.get("data", {}).get("object", {}) or {}
-    obj_metadata = stripe_obj.get("metadata", {}) or {}
+    # Family classification for session/PI events: kind=product routes
+    # to the product family ONLY; kind absent or 'pack' routes to pack
+    # ONLY (legacy). A kind that contradicts the resolved family fails
+    # closed — no cross-family fallback, ever (A3).
+    if kind == "product":
+        purchase = _find_product_purchase()
+        if purchase is None:
+            # The id may resolve in the pack family — that is a
+            # contradiction, not an unknown purchase.
+            if _find_pack_purchase() is not None:
+                webhook_event.outcome = "failed"
+                webhook_event.note = "kind=product contradicts pack purchase"
+                db.commit()
+                return JSONResponse({"status": "failed"})
+            webhook_event.outcome = "ignored"
+            webhook_event.note = "unknown purchase"
+            db.commit()
+            return JSONResponse({"status": "ignored"})
+        webhook_event.product_purchase_id = purchase.id
+        if event_type in ("checkout.session.expired", "checkout.session.async_payment_failed"):
+            reason = ("checkout session expired" if event_type == "checkout.session.expired"
+                      else "async payment failed")
+            transitioned = _pb.fail_product_purchase(db, purchase, reason=reason, stripe_event_id=event_id)
+            webhook_event.outcome = "processed"
+            webhook_event.note = f"purchase {reason}" + ("" if transitioned else " (already terminal)")
+            db.commit()
+            return JSONResponse({"status": "processed"})
+        if event_type == "payment_intent.payment_failed":
+            webhook_event.outcome = "processed"
+            webhook_event.note = "card declined; purchase left pending for in-session retry"
+            db.commit()
+            return JSONResponse({"status": "processed"})
+        # checkout.session.completed — strict product settlement (A4/F4).
+        # P1-1: a real checkout.session.completed event carries
+        # NEITHER line_items nor a price id on the session object.
+        # Retrieve the line items from the Stripe API (test-mode key
+        # pattern via stripe_billing) and take the Price ID from the
+        # retrieval — never from the event payload. A retrieval
+        # failure is transient: roll back (the event row is not
+        # committed) and answer 500 so Stripe redelivers.
+        try:
+            session_price_id = stripe_billing.fetch_session_line_item_price_id(
+                stripe_obj.get("id") or "")
+        except stripe_billing.CheckoutError:
+            db.rollback()
+            raise HTTPException(500, "transient settlement failure")
+        try:
+            outcome = _pb.settle_product_purchase(
+                db, purchase,
+                stripe_event_id=event_id,
+                stripe_session_id=stripe_obj.get("id") or "",
+                event_metadata=obj_metadata,
+                amount_cents=stripe_obj.get("amount_total"),
+                currency=stripe_obj.get("currency"),
+                payment_intent_id=stripe_obj.get("payment_intent"),
+                payment_status=stripe_obj.get("payment_status"),
+                session_status=stripe_obj.get("status"),
+                mode=stripe_obj.get("mode"),
+                session_price_id=session_price_id,
+                livemode=event.get("livemode"),
+            )
+        except _pb.SettlementError as exc:
+            webhook_event.outcome = "failed"
+            webhook_event.note = str(exc)[:250]
+            db.commit()
+            return JSONResponse({"status": "failed"})
+        except Exception:
+            db.rollback()
+            raise HTTPException(500, "transient settlement failure")
+        webhook_event.outcome = outcome
+        db.commit()
+        return JSONResponse({"status": outcome})
 
-    def _find_purchase():
-        purchase = None
-        purchase_ref = obj_metadata.get("purchase_id")
-        if purchase_ref:
-            try:
-                purchase = db.get(_models.CreditPurchase, purchase_ref)
-            except Exception:
-                # Malformed purchase_id in verified metadata: data corruption,
-                # not an attack — treat as unknown, never 500 (Stripe retries
-                # non-2xx into a loop).
-                log.warning("webhook %s: malformed metadata purchase_id %r",
-                            event_id, purchase_ref)
-                purchase = None
-        if purchase is None and stripe_obj.get("id"):
-            # Fallback join for sessions created before metadata[purchase_id]
-            # existed; the session id is backfilled onto the purchase at
-            # settlement.
-            from sqlalchemy import select as _select
-            purchase = db.execute(
-                _select(_models.CreditPurchase).where(
-                    _models.CreditPurchase.stripe_session_id == stripe_obj["id"])
-            ).scalar_one_or_none()
-        return purchase
-
-    # ISSUE-70: terminal failure signals. An expired session (or a failed
-    # async payment method) can never complete, so the pending purchase is
-    # failed outright — no credits, no ledger grant, nothing stuck pending.
-    # A failed card payment is NOT terminal: inside a Checkout session the
-    # customer sees Stripe's decline message and can retry with another card,
-    # so the purchase stays pending and a later completion still settles.
+    # Pack family (kind absent = legacy, or kind=pack).
+    purchase = _find_pack_purchase()
+    if purchase is None and kind == "pack":
+        if _find_product_purchase() is not None:
+            webhook_event.outcome = "failed"
+            webhook_event.note = "kind=pack contradicts product purchase"
+            db.commit()
+            return JSONResponse({"status": "failed"})
     if event_type in ("checkout.session.expired",
                       "checkout.session.async_payment_failed"):
-        purchase = _find_purchase()
         if purchase is None:
             webhook_event.outcome = "ignored"
             webhook_event.note = "unknown purchase"
@@ -709,7 +1097,6 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
         return JSONResponse({"status": "processed"})
 
     if event_type == "payment_intent.payment_failed":
-        purchase = _find_purchase()
         if purchase is None:
             webhook_event.outcome = "ignored"
             webhook_event.note = "unknown purchase"
@@ -718,10 +1105,6 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
                         event_id, stripe_obj.get("id"))
             return JSONResponse({"status": "ignored"})
         webhook_event.purchase_id = purchase.id
-        # Declined card: grant nothing. The purchase deliberately stays
-        # pending — the customer retries inside the still-open Checkout
-        # session; only expiry (above) or the stale-pending cleanup may
-        # terminally fail it.
         webhook_event.outcome = "processed"
         webhook_event.note = "card declined; purchase left pending for in-session retry"
         db.commit()
@@ -731,7 +1114,6 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
 
     session_obj = stripe_obj
     metadata = obj_metadata
-    purchase = _find_purchase()
     if purchase is None:
         webhook_event.outcome = "ignored"
         webhook_event.note = "unknown purchase"
@@ -760,6 +1142,7 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
     webhook_event.outcome = outcome
     db.commit()
     return JSONResponse({"status": outcome})
+
 
 @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy(request: Request):
@@ -1575,6 +1958,25 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
                     _db, user.id, _fresh_rid)
             data["analysis_result_id"] = (
                 str(_done_fresh) if _done_fresh else None)
+        # Issue #164 (P2-3/P3-3): same product display state as the
+        # saved-report page — "Coming soon" when the Price env is
+        # unset, and the F5 redemption deadline for this report.
+        from app import stripe_billing as _sb_fresh
+        data["product_ready"] = (
+            _sb_fresh.product_price_id("investigation_report") is not None)
+        _fresh_src = None
+        if _fresh_rid is not None:
+            from app.db import SessionLocal as _SL_fresh2
+            from app import models as _models_fresh
+            with _SL_fresh2() as _db2:
+                _fresh_src = _db2.get(_models_fresh.Result, _fresh_rid)
+                if _fresh_src is not None:
+                    _db2.expunge(_fresh_src)
+        if _fresh_src is not None and _fresh_src.expires_at is not None:
+            from datetime import timedelta as _td_fresh
+            data["redemption_deadline"] = (
+                _credits_fresh._as_aware(_fresh_src.expires_at)
+                + _td_fresh(days=30)).strftime("%Y-%m-%d")
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
@@ -2737,7 +3139,7 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
     _user = session.user
     _csrf = session.csrf_token
     from app import models
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
     per_page = 20
     page = max(1, page)
@@ -2805,7 +3207,7 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             "share_rotate_key": uuid_module.uuid4().hex,
             "share_revoke_key": uuid_module.uuid4().hex,
             "export_unlocked": _credits_for_list.is_export_unlocked(
-                db, _user.id, r.id),
+                db, _user.id, r.id) or _credits_for_list.is_product_paid_result(db, r),
             "share_active": any(
                 row.token_hash and row.revoked_at is None
                 for row in _sharing_rows),
@@ -2819,7 +3221,15 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             "analysis_eligible": _analysis_eligible,
             "analysis_reason": _analysis_reason,
             "analysis_result_id": _analysis_result_id,
+            # Issue #164 (P3-3/F5): the redemption deadline for a
+            # purchase from this row = source expiry + 30 days,
+            # shown in the purchase modal before purchase.
+            "redemption_deadline": (
+                _credits_for_list._as_aware(r.expires_at)
+                + timedelta(days=30)).strftime("%Y-%m-%d")
+            if r.type == "analysis" else None,
         })
+    from app import stripe_billing as _sb_for_list
     return templates.TemplateResponse(request, "reports.html", {
         "reports": reports,
         "current_user": _user,
@@ -2827,6 +3237,9 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
         "page": page,
         "total_pages": total_pages,
         "total": total,
+        # Issue #164 (P2-3): product fail-closed display state for the
+        # Analysis purchase modal ("Coming soon" when Price unset).
+        "product_ready": _sb_for_list.product_price_id("investigation_report") is not None,
     })
 
 
@@ -2909,7 +3322,7 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         except _dd_view.AnalysisError:
             return JSONResponse({"error": "Report data corrupted"}, status_code=500)
         data["export_unlocked"] = credits_helpers.is_export_unlocked(
-            db, _user.id, result.id)
+            db, _user.id, result.id) or credits_helpers.is_product_paid_result(db, result)
         # Issue #163: branded header band + branding form state for
         # THIS report only (per-report, never per-account).
         from app import branding as _branding_view
@@ -2982,7 +3395,7 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         # Issue #129: the report page's Export confirm copy reflects
         # the per-report unlock state (2 credits once, then free).
         data["export_unlocked"] = credits_helpers.is_export_unlocked(
-            db, _user.id, result.id)
+            db, _user.id, result.id) or credits_helpers.is_product_paid_result(db, result)
         # Issue #106 Stage 2: Analysis action state (founder placement
         # amendment: report page is Export / Analysis / Share). Legacy
         # reports explain unavailability before any charge; a completed
@@ -3000,6 +3413,20 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
         # artifact's generator version differs from the current one,
         # the source page offers the purchase popup again (stating it
         # is a new purchase) instead of only linking the old artifact.
+        # Issue #164 (P2-3/P3-2/P3-3): product display state for the
+        # purchase surfaces on this page — "Coming soon" fail-closed
+        # state when the Price env is unset, the F5 redemption
+        # deadline (source expiry + 30 days) shown before purchase,
+        # and the checkout-return polling flag (A7).
+        from app import stripe_billing as _sb_view
+        data["product_ready"] = (
+            _sb_view.product_price_id("investigation_report") is not None)
+        from datetime import timedelta as _td_deadline
+        data["redemption_deadline"] = (
+            credits_helpers._as_aware(result.expires_at)
+            + _td_deadline(days=30)).strftime("%Y-%m-%d")
+        data["checkout_poll"] = (
+            request.query_params.get("checkout") == "success")
         data["analysis_prior_exists"] = False
         if _done_id is not None:
             _prior_row = db.get(models.Result, _done_id)
@@ -3199,6 +3626,10 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     # format fences this request so two formats cannot both charge.
     _unlocked, _in_progress = credits_helpers.export_unlock_state(
         db, user.id, rid)
+    # Issue #164 (A9(c)): a dollar-paid report's exports are free,
+    # decided from the Result origin BEFORE any consent/admission.
+    if credits_helpers.is_product_paid_result(db, result):
+        _unlocked = True
     if _in_progress:
         db.rollback()
         return JSONResponse(
@@ -3526,6 +3957,8 @@ async def report_export_structured(request: Request, result_id: str, export_form
     # discovery makes this check authoritative on PostgreSQL.
     _unlocked, _any_in_progress = credits_helpers.export_unlock_state(
         db, user.id, rid)
+    if credits_helpers.is_product_paid_result(db, source):
+        _unlocked = True  # #164: free exports for the dollar-paid report
     if _any_in_progress:
         db.rollback()
         return JSONResponse(
@@ -3742,12 +4175,23 @@ async def structured_export_download(request: Request, export_id: str, db=Depend
 
 @app.post("/reports/{result_id}/deep-dive")
 async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db)):
-    """Generate the paid Analysis Report for a completed owned report."""
+    """Generate the Investigation Report for a completed owned report.
+
+    Issue #164 Phase A: NEW purchases are dollar-only ($9). Payment was
+    captured at checkout (F2); this route redeems an available
+    entitlement under the A1 reserve/complete/release discipline. A
+    generation failure NEVER consumes the purchase. Canonical replay
+    (either origin) is free and consumes nothing. With no entitlement
+    the response is 402 directing to the product checkout — never a
+    credit charge. Legacy credit-purchased artifacts keep their
+    existing replay terms untouched.
+    """
     import uuid as _uuid
     from fastapi.responses import JSONResponse
     from sqlalchemy import select as _select
     from app import auth as auth_helpers
     from app import credits as credits_helpers
+    from app import product_billing as pb
     from app import models
     from app import deep_dive as dd
     from datetime import datetime, timezone
@@ -3772,24 +4216,37 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
     ).first()
     if not source:
         return JSONResponse({"error": "Report not found"}, status_code=404)
-    # An Analysis Report cannot be generated from another Analysis
-    # Report, a comparison or a batch (spec: reject before reservation).
     if source.type != "analysis":
         return JSONResponse(
             {"error": "Analysis Reports are not available for this report type"},
             status_code=422)
-    if credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc):
-        return JSONResponse({"error": "Report has expired"}, status_code=410)
+    source_expired = credits_helpers._as_aware(source.expires_at) <= datetime.now(timezone.utc)
+    # F5: an available entitlement whose window is still open redeems
+    # against an expired source (cleanup preserved its prerequisites);
+    # every other caller keeps the pre-money 410 gate, including POST
+    # replay against an expired source (A6).
+    _window_ent = None
+    if source_expired:
+        _window_ent = pb.live_entitlement(db, user.id, rid, "investigation_report")
+        # P3-3 / F5 boundary: redemption AT the deadline proceeds
+        # ("at or before the deadline"); refuse only strictly past
+        # it — matching reserve_redemption's `deadline < now` lapse.
+        if _window_ent is None or _window_ent.status != "available" or (
+            _window_ent.redemption_deadline is not None
+            and credits_helpers._as_aware(_window_ent.redemption_deadline) < datetime.now(timezone.utc)
+        ):
+            return JSONResponse({"error": "Report has expired"}, status_code=410)
     try:
         payload = credits_helpers.result_payload(
             source, user_id=user.id,
             operation_id=source.operation_id,
             free_request_id=source.free_request_id,
+            product_redemption_id=source.product_redemption_id,
+            allow_expired=source_expired,
         )
     except credits_helpers.AdmissionError:
         return JSONResponse({"error": "Report data corrupted"}, status_code=500)
 
-    # Kind + evidence gates BEFORE any reservation or charge.
     try:
         dd.check_eligibility(payload)
     except dd.UnsupportedReportKind:
@@ -3799,22 +4256,14 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
     except dd.InsufficientEvidence as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
-    # Issue #156: premium intent at attempt entry — auth, CSRF, source
-    # and eligibility gates have passed; before any reservation or
-    # outcome (including the insufficient-balance 402 below).
-    # Observe-only: best-effort, standalone (the 402 paths roll the
-    # request transaction back).
     from app import d2_attribution as _d2
     _d2.emit_premium_intent(request, user.id, "analysis_report")
 
-    cost = credits_helpers.COST_DEEP_DIVE
     request_hash = dd.analysis_request_hash(source, payload)
-    base_key = f"analysis-{rid}-v1"
 
-    # Serialize discovery + admission under the global:paid lock (the
-    # first scope admit_paid_operation locks), held through the
-    # admission commit — the structured-export pattern (PR #125 F1).
     credits_helpers.lock_global_paid_scope(db)
+    # In-flight fence across BOTH origins: a reserved legacy operation
+    # or a reserved product redemption for this source 409s.
     attempts = credits_helpers.analysis_operations(db, user.id, rid)
     if any(op.status == "reserved" for op in attempts):
         db.rollback()
@@ -3822,6 +4271,25 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
             {"error": "Analysis Report generation already in progress. "
                       "Please wait and try again."},
             status_code=409)
+    live_reds = db.execute(
+        _select(models.EntitlementRedemption).join(
+            models.Entitlement, models.Entitlement.id == models.EntitlementRedemption.entitlement_id,
+        ).where(
+            models.Entitlement.user_id == user.id,
+            models.EntitlementRedemption.source_result_id == rid,
+            models.EntitlementRedemption.status == "reserved",
+        )
+    ).scalars().all()
+    if live_reds:
+        db.rollback()
+        return JSONResponse(
+            {"error": "Analysis Report generation already in progress. "
+                      "Please wait and try again."},
+            status_code=409)
+
+    # Canonical replay BEFORE any entitlement is consumed (A2/A6):
+    # legacy credit completions first (unchanged code path semantics),
+    # then product completions.
     completed = [op for op in attempts
                  if op.status == "completed" and op.result_id
                  and op.request_hash == request_hash]
@@ -3846,7 +4314,38 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
                 "status": "completed",
                 "analysis_result_id": str(artifact.id),
                 "report_url": f"/reports/{artifact.id}",
-                "cost": cost,
+                "cost": credits_helpers.COST_DEEP_DIVE,
+                "replayed": True,
+            })
+        db.rollback()
+        return JSONResponse(
+            {"error": "Previously generated Analysis Report is no longer available."},
+            status_code=410)
+    done_reds = [r for r in credits_helpers.product_analysis_completions(db, user.id, rid)
+                 if r.request_hash == request_hash]
+    if done_reds:
+        latest_red = max(done_reds, key=lambda r: (r.created_at, str(r.id)))
+        artifact = db.get(models.Result, latest_red.result_id)
+        if artifact is not None:
+            try:
+                manifest = credits_helpers.result_payload(
+                    artifact, user_id=user.id,
+                    product_redemption_id=latest_red.id)
+                dd.validate_artifact(
+                    manifest, expected_source_id=rid,
+                    expected_source_integrity_digest=source.integrity_digest)
+            except Exception:
+                db.rollback()
+                return JSONResponse(
+                    {"error": "Previously generated Analysis Report is "
+                              "no longer available."},
+                    status_code=410)
+            db.rollback()
+            return JSONResponse({
+                "status": "completed",
+                "analysis_result_id": str(artifact.id),
+                "report_url": f"/reports/{artifact.id}",
+                "price_cents": 900,
                 "replayed": True,
             })
         db.rollback()
@@ -3854,50 +4353,30 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
             {"error": "Previously generated Analysis Report is no longer available."},
             status_code=410)
 
-    # A completed attempt under a DIFFERENT canonical identity (e.g. a
-    # generator-version bump) never auto-charges on view, but this
-    # explicit Confirm POST is the new purchase the spec requires: it
-    # gets a fresh retry identity instead of replaying.
-    has_prior = any(
-        op.status in ("failed", "expired") for op in attempts) or any(
-        op.status == "completed" for op in attempts)
-    idempotency_key = (
-        f"{base_key}-retry-{_uuid.uuid4().hex[:8]}" if has_prior else base_key)
-
-    if credits_helpers.get_eligible_credits(db, user.id) < cost:
+    # Dollar redemption (A1): reserve under the lock, generate outside
+    # the admission transaction, settle store+complete in one commit.
+    entitlement = pb.live_entitlement(db, user.id, rid, "investigation_report")
+    if entitlement is None or entitlement.status != "available":
         db.rollback()
         return JSONResponse(
-            {"error": f"Insufficient credits. Analysis Report costs "
-                      f"{cost} credits.",
-             "purchase_url": "/credits"},
+            {"error": "Investigation Report costs $9. Payment is captured at checkout; "
+                      "if generation fails your purchase is never consumed and you can retry.",
+             "checkout_url": f"/reports/{rid}/investigation-checkout",
+             "purchase_url": f"/reports/{rid}/investigation-checkout",
+             "price_cents": 900},
             status_code=402)
-
-    consent = credits_helpers.create_consent(
-        db, user_id=user.id, operation_type="deep_dive",
-        input_hash=request_hash, max_cost=cost,
-    )
-    db.flush()
     worker_id = f"deep-dive-{_uuid.uuid4().hex[:8]}"
     try:
-        op = credits_helpers.admit_paid_operation(
-            db, user_id=user.id, operation_type="deep_dive",
-            idempotency_key=idempotency_key, request_hash=request_hash,
-            cost=cost, consent_id=consent.id, worker_id=worker_id,
-        )
-        if op.worker_id != worker_id or op.status != "reserved":
-            db.rollback()
-            return JSONResponse(
-                {"error": "Analysis Report generation already in progress. "
-                          "Please wait and try again."},
-                status_code=409)
+        redemption = pb.reserve_redemption(
+            db, entitlement, request_hash=request_hash, worker_id=worker_id)
         db.commit()
-    except credits_helpers.InsufficientCredits:
-        db.rollback()
+    except pb.DeadlineLapsed:
+        db.commit()  # the refund_eligible transition is the record
         return JSONResponse(
-            {"error": f"Insufficient credits. Analysis Report costs "
-                      f"{cost} credits.",
-             "purchase_url": "/credits"},
-            status_code=402)
+            {"error": "The redemption window for this purchase has lapsed. "
+                      "It is refund-eligible: contact disputes@goodfolkdigital.com.",
+             "refund_eligible": True},
+            status_code=410)
     except credits_helpers.AdmissionError as e:
         db.rollback()
         return JSONResponse({"error": str(e)}, status_code=409)
@@ -3909,13 +4388,11 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
                 "Analysis Report failed (%s)", failure_code,
                 exc_info=(type(exc), exc, exc.__traceback__))
         try:
-            credits_helpers.release_operation(
-                db, op.id, worker_id, str(failure_code)[:50])
+            pb.release_redemption(db, redemption.id, worker_id, str(failure_code)[:50])
             db.commit()
         except Exception:
             db.rollback()
 
-    # Generation runs on the validated snapshot only (no re-parse).
     try:
         artifact_data = dd.build_deep_dive(
             payload, source_result_id=rid,
@@ -3926,13 +4403,13 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
             {"error": "Analysis Report generation failed"}, status_code=500)
 
     try:
-        artifact = credits_helpers.store_result(
-            db, user.id, op.id, artifact_data, result_type="deep_dive",
+        artifact = credits_helpers.store_product_result(
+            db, user.id, redemption.id, artifact_data, result_type="deep_dive",
             severity=source.severity if source.severity is not None
-            else "__default__")
-        credits_helpers.complete_operation(
-            db, op.id, worker_id, result_id=artifact.id,
-            lease_generation=op.lease_generation)
+            else "__default__", retention_days=90)
+        pb.complete_redemption(
+            db, redemption.id, worker_id, result_id=artifact.id,
+            lease_generation=redemption.lease_generation)
         db.commit()
     except Exception as e:
         db.rollback()
@@ -3944,7 +4421,7 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
         "status": "completed",
         "analysis_result_id": str(artifact.id),
         "report_url": f"/reports/{artifact.id}",
-        "cost": cost,
+        "price_cents": 900,
     })
 
 

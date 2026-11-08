@@ -18,6 +18,12 @@ from app import credits as C
 
 
 def _generate_analysis(auth_env, rid, csrf):
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): generation
+    # redeems a seeded $9 entitlement; the artifact's exports are
+    # then INCLUDED (free), superseding the 2-credit unlock premise
+    # this module was written against for credit-era artifacts.
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     r = auth_env.client.post(
         f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
     assert r.status_code == 200, r.text[:300]
@@ -25,36 +31,42 @@ def _generate_analysis(auth_env, rid, csrf):
 
 
 def test_analysis_pdf_first_unlocks_csv_and_json(auth_env):
+    # PREMISE CHANGED (#164): for a dollar-paid report every format
+    # is included in the $9 price — first PDF, then CSV and JSON all
+    # succeed with ZERO credit movement (no 2-credit unlock exists
+    # on this path anymore).
     _, user_id, rid, csrf = _setup(auth_env)
     analysis_id = _generate_analysis(auth_env, rid, csrf)
     before = _balance(auth_env, user_id)
     pdf = auth_env.client.post(
         f"/reports/{analysis_id}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 2
+    assert _balance(auth_env, user_id) == before
     csv_r = auth_env.client.post(
         f"/reports/{analysis_id}/exports/csv", data={"csrf_token": csrf})
     assert csv_r.status_code == 200, csv_r.text[:300]
     json_r = auth_env.client.post(
         f"/reports/{analysis_id}/exports/json", data={"csrf_token": csrf})
     assert json_r.status_code == 200, json_r.text[:300]
-    assert _balance(auth_env, user_id) == before - 2  # one unlock total
+    assert _balance(auth_env, user_id) == before  # all formats included
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
 
 
 def test_analysis_csv_first_unlocks_pdf(auth_env):
+    # PREMISE CHANGED (#164): CSV first, PDF second — both free for
+    # a dollar-paid report, in either order.
     _, user_id, rid, csrf = _setup(auth_env)
     analysis_id = _generate_analysis(auth_env, rid, csrf)
     before = _balance(auth_env, user_id)
     csv_r = auth_env.client.post(
         f"/reports/{analysis_id}/exports/csv", data={"csrf_token": csrf})
     assert csv_r.status_code == 200
-    assert _balance(auth_env, user_id) == before - 2
+    assert _balance(auth_env, user_id) == before
     pdf = auth_env.client.post(
         f"/reports/{analysis_id}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 2
+    assert _balance(auth_env, user_id) == before
 
 
 def test_analysis_csv_projection_shape(auth_env):

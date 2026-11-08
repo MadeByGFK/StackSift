@@ -117,6 +117,8 @@ def is_export_unlocked(db, source_result) -> bool:
     PDF export purchased for the share-link PDF rule — the unlock may
     have been bought with a CSV or JSON first generation, in which
     case no PDF operation exists at all."""
+    if getattr(source_result, "product_redemption_id", None) is not None:
+        return True  # #164: exports are free for the dollar-paid report
     return credits.is_export_unlocked(
         db, source_result.user_id, source_result.id)
 

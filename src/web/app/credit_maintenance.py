@@ -84,7 +84,16 @@ def recover_free_requests(db, *, executor_stopped=None):
 def cleanup_results(db):
     # Same capacity-first order as settlement; retain identities, remove payloads.
     C._ensure_capacity_scope(db, 'global:paid', C.DEFAULT_GLOBAL_CONCURRENT_LIMIT)
-    rows = db.scalars(select(M.Result).where(M.Result.expires_at <= C._utcnow(), M.Result.deleted_at.is_(None)))
+    # Issue #164 (F5): while an entitlement's redemption window is open,
+    # cleanup must NOT destroy that source's redemption prerequisites
+    # (its manifest/evidence). This preserves redeemability only; the
+    # source's own viewing retention is unchanged (views still 410).
+    _protected_sources = set(db.scalars(select(M.Entitlement.source_result_id).where(
+        M.Entitlement.status.in_(('available', 'reserved')),
+        M.Entitlement.redemption_deadline.isnot(None),
+        M.Entitlement.redemption_deadline >= C._utcnow())).all())
+    rows = [r for r in db.scalars(select(M.Result).where(M.Result.expires_at <= C._utcnow(), M.Result.deleted_at.is_(None)))
+            if r.id not in _protected_sources]
     expired_ids = []
     for result in rows:
         result.storage_manifest = '{}'
@@ -219,6 +228,10 @@ def run_once(*, reconcile=False):
         _run_job(db, "cleanup_results", cleanup_results)
         # Issue #70: abandoned checkouts must not sit pending forever.
         _run_job(db, "expire_stale_pending_purchases", C.expire_stale_pending_purchases)
+        from app import product_billing as _pb
+        _run_job(db, "recover_expired_redemptions", _pb.recover_expired_redemptions)
+        _run_job(db, "expire_stale_pending_product_purchases", _pb.expire_stale_pending_product_purchases)
+        _run_job(db, "lapse_expired_entitlements", _pb.lapse_expired_entitlements)
         if reconcile:
             _run_job(db, "reconcile_accounts", _reconcile_all_accounts)
         _run_job(db, "payment_reconciliation", _run_payment_reconciliation)
