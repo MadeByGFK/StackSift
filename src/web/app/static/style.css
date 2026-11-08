@@ -249,6 +249,33 @@ table.issues tr:last-child td { border-bottom: none; }
    so the page needs no inline styles under its CSP. Dynamic chart
    dimensions are NOT here — they arrive in the page's nonced style
    block as generated ss-dyn-* rules. */
+/* ---- Issue #170 S1 (Report surface design alignment) ----
+   Every rule in this block is scoped to the Report surface via the
+   .s1- prefix (A7): style.css is shared by 20 templates, and no S1
+   rule may restyle a nonported surface (pricing/auth/compare/batch/
+   shared/sample chrome beyond the report templates that opt in).
+   Values reuse the live tokens only — no new severity colors, no new
+   token enters pdf_export.resolve_tokens (Decisions 2 and 3). */
+.s1-section-head { display: flex; align-items: baseline; gap: 10px; margin: 30px 0 6px; }
+.s1-section-head .section-title { margin: 0; }
+.s1-section-num { font-family: var(--font-code); color: var(--accent); font-size: 13px; font-weight: 700; letter-spacing: .5px; }
+.s1-section-sub { color: var(--muted); font-weight: 400; font-size: 14px; }
+.s1-stat-note { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.s1-evidence-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 14px 0; }
+@media (max-width: 640px) { .s1-evidence-grid { grid-template-columns: 1fr; } }
+.s1-evidence-group { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+.s1-evidence-group h4 { margin: 0 0 4px; font-size: 14px; }
+.s1-evidence-caption { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+.s1-evidence-item { font-size: 13px; margin: 6px 0; word-break: break-word; }
+.s1-evidence-more { color: var(--muted); font-size: 12px; font-style: italic; margin-top: 8px; }
+.s1-notice-row { display: flex; gap: 10px; align-items: flex-start; }
+.s1-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; color: var(--muted); white-space: nowrap; }
+.s1-premium-card { border: 1px solid var(--accent); background: var(--panel); border-radius: var(--radius); padding: 18px; margin: 20px 0; }
+.s1-premium-card h3 { margin: 0 0 6px; font-size: 17px; }
+.s1-premium-card p { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+.s1-timeline-peak { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+.s1-report-foot { color: var(--muted); font-size: 12px; font-family: var(--font-code); margin-top: 10px; word-break: break-all; }
+
 .ss-muted-normal { color: var(--muted); font-weight: 400; }
 .ss-subtitle-note { color: var(--muted); font-weight: 400; font-size: 14px; }
 .ss-mt10 { margin-top: 10px; }

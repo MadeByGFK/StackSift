@@ -47,7 +47,7 @@
       {% endif %}
     </div>
     <div>
-      <span class="badge {{ health.color }}">{{ health.label }}</span>
+      <span class="badge {{ health.color }}" data-health-label="{{ health.label }}" data-health-color="{{ health.color }}">{{ health.label }}</span>
     </div>
     {% if current_user and report_id and not is_demo %}
     {# Issue #129 + founder UI amendments (2026-11-03): the report page
@@ -457,12 +457,45 @@
   </div>
   {% endif %}
 
+  {# Issue #170 S1 (Decision 13): tile notes are computed from the
+     displayed integers only, with zero-total guards; the file-size
+     note is omitted by rule — no render path carries an upload size. #}
   <div class="stats">
     <div class="stat"><div class="num">{{ results.total_lines }}</div><div class="lbl">Total lines</div></div>
-    <div class="stat"><div class="num">{{ results.parsed_lines }}</div><div class="lbl">Parsed</div></div>
-    <div class="stat"><div class="num">{{ results.malformed_lines }}</div><div class="lbl">Malformed</div></div>
-    <div class="stat"><div class="num">{{ sorted_issues|length }}</div><div class="lbl">Unique issues</div></div>
+    <div class="stat"><div class="num">{{ results.parsed_lines }}</div><div class="lbl">Parsed</div>{% if results.total_lines %}<div class="s1-stat-note">{{ "%.2f"|format(results.parsed_lines / results.total_lines * 100) }}% of total</div>{% endif %}</div>
+    <div class="stat"><div class="num">{{ results.malformed_lines }}</div><div class="lbl">Malformed</div>{% if results.total_lines %}<div class="s1-stat-note">{{ "%.2f"|format(results.malformed_lines / results.total_lines * 100) }}% could not be parsed</div>{% endif %}</div>
+    <div class="stat"><div class="num">{{ sorted_issues|length }}</div><div class="lbl">Unique issues</div>{% set occ_total = sorted_issues|map(attribute='1.count')|sum %}{% if occ_total %}<div class="s1-stat-note">{{ occ_total }} total occurrences</div>{% endif %}</div>
   </div>
+
+  {% if current_user and report_id and analysis_eligible and not analysis_result_id and not analysis_prior_exists and not is_demo %}
+  {# Issue #170 S1 (Decision 6 as amended by A5; PR #171 Codex P2-2):
+     the premium upsell card renders ONLY for an owned, standard,
+     analysis-eligible source report with no Brief and no
+     already-purchased derived artifact — including an
+     older-generator prior purchase (analysis_prior_exists, whose
+     disclosed upgrade path stays in the Actions modal) — never on
+     anonymous/demo/sample/legacy-paid surfaces.
+     Interim credit-era copy + the existing Analysis purchase flow
+     (the Actions-menu modal) only; no dollar copy pre-#164A. The
+     button forwards to the existing #analysis-btn so the charge
+     point, confirm copy and POST route are unchanged. #}
+  <div class="s1-premium-card" data-s1-premium-card>
+    <h3>Investigation Report</h3>
+    <p>Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.</p>
+    <button type="button" class="btn-small" id="premium-upsell-btn">Get the Analysis Report</button>
+    <script>
+    (function () {
+      var cardBtn = document.getElementById('premium-upsell-btn');
+      if (cardBtn) {
+        cardBtn.addEventListener('click', function () {
+          var btn = document.getElementById('analysis-btn');
+          if (btn) { btn.click(); }
+        });
+      }
+    })();
+    </script>
+  </div>
+  {% endif %}
 
   {% if diagnostic_issue %}
   <div class="callout">
@@ -483,13 +516,80 @@
   </div>
   {% endif %}
 
+  {# Issue #170 S1 §01 Incident (Decision 7 as amended by A1/A3):
+     renders the pipeline's own supporting_evidence tiers from
+     incident_section. Group membership is assigned by
+     build_supporting_evidence predicates (shares-infrastructure /
+     contributor signal / temporal alignment) — the captions below
+     state exactly those predicates and nothing stronger. The
+     'none' branch carries NO supporting_evidence key: guard for
+     missing/None and render its message verbatim with no grid. #}
+  <div class="s1-section-head"><span class="s1-section-num">01</span><h3 class="section-title">Incident</h3></div>
+  {% if incident_section and incident_section.type == 'none' %}
+  <div class="card" data-s1-incident-none><p>{{ incident_section.message }}</p></div>
+  {% elif incident_section %}
+  {% if incident_section.headline %}<p style="font-weight:700">{{ incident_section.headline }}</p>{% endif %}
+  {% if incident_section.investigate_first %}<p>Investigate first: {{ incident_section.investigate_first }}</p>{% endif %}
+  {% if incident_section.starting_point %}<p style="color:var(--muted)">Starting point: {{ incident_section.starting_point }}</p>{% endif %}
+  {% if incident_section.timing_note %}<p style="color:var(--muted)"><em>{{ incident_section.timing_note }}</em></p>{% endif %}
+  {% set se = incident_section.supporting_evidence if incident_section.supporting_evidence is defined and incident_section.supporting_evidence else {} %}
+  <div class="s1-evidence-grid">
+    <div class="s1-evidence-group" data-s1-group="observed">
+      <h4>Observed</h4>
+      <p class="s1-evidence-caption">Shares infrastructure with the lead issue.</p>
+      {% for item in se.get('observed', []) %}<div class="s1-evidence-item"><span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
+      {% if se.get('observed_total', 0) > se.get('observed', [])|length %}<div class="s1-evidence-more">{{ se.get('observed_total', 0) - se.get('observed', [])|length }} more not shown</div>{% endif %}
+    </div>
+    <div class="s1-evidence-group" data-s1-group="correlated">
+      <h4>Correlated</h4>
+      <p class="s1-evidence-caption">Aligned with the degradation window, or persistent across the observation window; no shared cause is established.</p>
+      {% for item in se.get('correlated', []) %}<div class="s1-evidence-item"><span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
+      {% if se.get('correlated_total', 0) > se.get('correlated', [])|length %}<div class="s1-evidence-more">{{ se.get('correlated_total', 0) - se.get('correlated', [])|length }} more not shown</div>{% endif %}
+    </div>
+    <div class="s1-evidence-group" data-s1-group="hypothesized">
+      <h4>Hypothesized</h4>
+      <p class="s1-evidence-caption">Shares infrastructure with the lead issue and shows a possible contributor signal — unproven.</p>
+      {% for item in se.get('hypothesized', []) %}<div class="s1-evidence-item"><span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
+      {% if se.get('hypothesized_total', 0) > se.get('hypothesized', [])|length %}<div class="s1-evidence-more">{{ se.get('hypothesized_total', 0) - se.get('hypothesized', [])|length }} more not shown</div>{% endif %}
+    </div>
+  </div>
+  {% if incident_section.other_candidates %}
+  <div class="card">
+    <h4 style="margin:0 0 6px">Other candidates</h4>
+    {% for cand in incident_section.other_candidates %}<div class="s1-evidence-item"><span class="pill {{ cand.level }}">{{ cand.level }}</span> {{ cand.template }} <span style="color:var(--muted)">× {{ cand.count }}</span></div>{% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if notable_events %}
+  <div class="s1-section-head"><span class="s1-section-num">02</span><h3 class="section-title">Notable events</h3></div>
+  <div class="card" style="padding:0 20px">
+    <table class="issues">
+      <thead><tr><th>Severity</th><th>Message</th><th style="text-align:right">Count</th></tr></thead>
+      <tbody>
+      {% for event in notable_events %}
+        <tr>
+          <td><span class="pill {{ event.level }}">{{ event.level }}</span></td>
+          <td>{{ event.template }}</td>
+          <td style="text-align:right;color:var(--muted)">× {{ event.count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   {% if timeline and timeline|length > 1 %}
-  <h3 class="section-title">Incident timeline <span style="color:var(--muted);font-weight:400;font-size:14px">— warnings + errors per 5 min</span></h3>
+  <div class="s1-section-head"><span class="s1-section-num">03</span><h3 class="section-title">Incident timeline <span class="s1-section-sub">— warnings + errors per 5 min</span></h3></div>
   {% if first_seen and last_seen %}
   <div class="meta" style="margin-bottom:8px">First event: {{ first_seen }} · Last event: {{ last_seen }}</div>
   {% endif %}
+  {# Issue #170 S1 (A-audit positive): stacked heights derive from the
+     warn/error/critical counters, NOT bucket.total (which counts ALL
+     timestamped events, including INFO). #}
   <div class="card">
-    {% set tmax = timeline|map(attribute='total')|max %}
+    {% set ns = namespace(tmax=0, peak_label='') %}{% for b in timeline %}{% set s = b.warn + b.error + b.critical %}{% if s > ns.tmax %}{% set ns.tmax = s %}{% set ns.peak_label = b.label %}{% endif %}{% endfor %}{% set tmax = ns.tmax %}
+    {% if tmax > 0 %}<p class="s1-timeline-peak" data-s1-peak>Peak: {{ tmax }} warnings + errors at {{ ns.peak_label }}</p>{% endif %}
     <div class="timeline">
       {% for b in timeline %}
       {% set issues = b.warn + b.error + b.critical %}
@@ -536,37 +636,47 @@
   </div>
   {% endif %}
 
-  <h3 class="section-title">Issues <span style="color:var(--muted);font-weight:400;font-size:14px">— sorted by severity, then frequency</span></h3>
+  <div class="s1-section-head"><span class="s1-section-num">04</span><h3 class="section-title">All issues <span class="s1-section-sub">— sorted by severity, then frequency</span></h3></div>
   {% if sorted_issues %}
   <div class="card" style="padding:0 20px">
     <table class="issues">
-      <thead><tr><th>Severity</th><th>Message</th><th style="text-align:right">Count</th></tr></thead>
+      <thead><tr><th>Severity</th><th>Message</th><th>Source</th><th style="text-align:right">Count</th></tr></thead>
       <tbody>
       {% for issue, data in sorted_issues %}
         <tr>
           <td><span class="pill {{ data.level }}">{{ data.level }}</span></td>
           <td>{{ issue }}</td>
+          <td style="color:var(--muted)">{{ data.services[0] if data.services is defined and data.services else '' }}</td>
           <td style="text-align:right;color:var(--muted)">× {{ data.count }}</td>
         </tr>
       {% endfor %}
       </tbody>
+      <tfoot><tr><td colspan="3" style="text-align:right;color:var(--muted);padding:10px 12px">Total occurrences</td><td style="text-align:right;color:var(--muted);padding:10px 12px">× {{ sorted_issues|map(attribute='1.count')|sum }}</td></tr></tfoot>
     </table>
   </div>
   {% else %}
   <div class="card"><p>No warnings, errors, or critical entries found. Quiet logs — enjoy it.</p></div>
   {% endif %}
 
+  {# Issue #170 S1 §05 Analysis notices (Decision 9 as amended by A6):
+     the remake's notice LAYOUT only — every string below is the live
+     ruled copy, byte-identical to the base tree. The complexity
+     notice above the stats row is likewise unmoved in text. #}
+  <div class="s1-section-head"><span class="s1-section-num">05</span><h3 class="section-title">Analysis notices</h3></div>
+
   {% if results.malformed_lines > 0 %}
-  <div class="notice">
-    ⚠️ <strong>{{ results.malformed_lines }}</strong> line{{ "s" if results.malformed_lines != 1 }} couldn't be parsed and {{ "was" if results.malformed_lines == 1 else "were" }} excluded.
-    <br><small>StackSift reads lines shaped like <code>2026-10-10 09:15:22 ERROR something broke</code> or JSON-lines with level/message fields. Multiline stack traces count here too — each continuation line is one malformed line.</small>
+  <div class="notice s1-notice-row">
+    <span class="s1-tag">Parsing</span>
+    <span>⚠️ <strong>{{ results.malformed_lines }}</strong> line{{ "s" if results.malformed_lines != 1 }} couldn't be parsed and {{ "was" if results.malformed_lines == 1 else "were" }} excluded.
+    <br><small>StackSift reads lines shaped like <code>2026-10-10 09:15:22 ERROR something broke</code> or JSON-lines with level/message fields. Multiline stack traces count here too — each continuation line is one malformed line.</small></span>
   </div>
   {% endif %}
 
   {% if adapted %}
-  <div class="notice">
-    ℹ️ Your file was detected as <strong>JSON-lines</strong> and converted automatically.
-    <br><small>DEBUG/TRACE entries are folded into INFO for now — native multi-format parsing is on the roadmap.</small>
+  <div class="notice s1-notice-row">
+    <span class="s1-tag">Format</span>
+    <span>ℹ️ Your file was detected as <strong>JSON-lines</strong> and converted automatically.
+    <br><small>DEBUG/TRACE entries are folded into INFO for now — native multi-format parsing is on the roadmap.</small></span>
   </div>
   {% endif %}
 
@@ -574,7 +684,11 @@
     <a href="/"><button type="button" class="btn-primary">Analyze another file</button></a>
   </div>
 
-  <p class="privacy">Uploads may be spooled to disk before redaction. Temporary files are cleaned up during normal processing. Redaction may miss sensitive data; review this report before sharing.</p>
+  <div class="notice s1-notice-row">
+    <span class="s1-tag">Privacy</span>
+    <p class="privacy" style="margin:0;text-align:left">Uploads may be spooled to disk before redaction. Temporary files are cleaned up during normal processing. Redaction may miss sensitive data; review this report before sharing.</p>
+  </div>
+  {% if report_id %}<div class="s1-report-foot" data-s1-report-foot>Report {{ report_id }}</div>{% endif %}
 
   <footer>
     StackSift · a Goodfolk Digital project · <a href="https://github.com/MadeByGFK/StackSift">CLI on GitHub</a>
