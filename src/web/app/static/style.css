@@ -283,3 +283,19 @@ table.issues tr:last-child td { border-bottom: none; }
 .ss-card-pad-x { padding: 0 20px; }
 .ss-text-right { text-align: right; }
 .ss-count-cell { text-align: right; color: var(--muted); }
+
+/* ---- Issue #170 S4 (Settings surface design alignment) ----
+   Every rule in this block is scoped to the Settings surface: all
+   selectors carry the .s4- prefix, and .s4-group / .s4-settings exist
+   only in settings.html (A7). No shared selector, token, or :root
+   value is touched, so pricing/auth/compare/batch/shared/sample
+   surfaces cannot be restyled by these rules. Values reuse the live
+   tokens only (navy/gold house system, Decisions 2 and 3); the
+   Settings cards themselves keep their template-local styles, here
+   gaining only the numbered-group composition of the remake. */
+.s4-group { margin: 0 0 10px; }
+.s4-section-head { display: flex; align-items: baseline; gap: 10px; margin: 26px 0 10px; }
+.s4-group:first-child .s4-section-head { margin-top: 0; }
+.s4-section-num { font-family: var(--font-code); color: var(--accent); font-size: 13px; font-weight: 700; letter-spacing: .5px; }
+.s4-section-label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+.s4-group .btn-small:hover { border-color: var(--accent); }
