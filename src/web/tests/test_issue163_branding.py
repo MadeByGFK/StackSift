@@ -23,6 +23,7 @@ from PIL import Image
 from test_account_migrations import migrated_engine  # noqa: F401
 from test_issue159_sample import cold_cache, sample_client  # noqa: F401
 from test_issue162_brief import _pdf_text, _sample_artifact
+from pdf_content import pdf_content_signature
 from test_issue160_designed_reports import extract_pdf_text
 from test_phase2b_reports_pdf import _login, _signup_and_verify
 from test_structured_export_e2e import _custom_result, _session_csrf, _setup
@@ -695,13 +696,26 @@ def test_clear_retains_cleared_state_row_and_unbrands(auth_env):
 
 def test_a3_pdf_first_set_then_clear(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    # PDF-first: first export stores a PDF; second serves the replay.
+    # PDF-first: first export, then a second POST before any
+    # branding exists (the "replay" leg — under #164 it is a fresh
+    # on-the-fly generation of the same content, per #174 below).
     first = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                  data={"csrf_token": csrf})
     assert first.status_code == 200
     replay = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                   data={"csrf_token": csrf})
-    assert replay.content == first.content  # stored replay, byte-exact
+    # Issue #174: the "stored replay, byte-exact" premise is stale
+    # under #164 — a dollar-paid deep-dive's PDFs are generated on
+    # the fly on every POST (no stored derivative; the same premise
+    # correction test_a3_no_branding_ever_keeps_stored_replay already
+    # records), and fpdf2 embeds a per-generation /CreationDate +
+    # trailer /ID, so raw bytes differ whenever the generations
+    # cross a one-second boundary. The replay intent is asserted at
+    # content level: identical extracted text (generation furniture
+    # stripped), page count, per-page footer and document title —
+    # see pdf_content.pdf_content_signature.
+    assert pdf_content_signature(replay.content) == \
+        pdf_content_signature(first.content)
     assert "Acme Consulting" not in _pdf_text(replay.content)
     # Set branding -> next PDF is freshly generated WITH branding.
     _post_branding(auth_env, dd_id, csrf,
