@@ -41,6 +41,8 @@ from test_phase2b_paid_e2e import paid_env, _signup_verify_login, _http_balance 
 from test_report_sharing import _anon_client, _make_report, _payload, _token_from
 from test_structured_export_e2e import _grant
 
+from pdf_content import pdf_content_signature
+
 from app import auth, credits as C, main, models as M
 from app.service import render_text_report
 
@@ -184,7 +186,18 @@ def test_each_link_serves_only_its_format_with_exact_content(paid_env):
     pdf_r = anon.get(f"/s/{tokens['pdf']}")
     assert pdf_r.status_code == 200
     assert "application/pdf" in pdf_r.headers["content-type"]
-    assert pdf_r.content == owner_pdf.content
+    # Issue #174: the owner export and the share serve are two
+    # independent on-the-fly generations of the same report, and
+    # fpdf2 embeds a per-generation /CreationDate + trailer /ID, so
+    # raw bytes differ whenever the generations cross a one-second
+    # boundary (the PostgreSQL-leg flake). The exact-content intent
+    # is asserted at content level: identical extracted text
+    # (generation furniture stripped), page count, per-page footer
+    # and document title — see pdf_content.pdf_content_signature.
+    # The CSV/JSON legs above stay byte-exact: those serializers are
+    # deterministic and embed no timestamp or trailer ID.
+    assert pdf_content_signature(pdf_r.content) == \
+        pdf_content_signature(owner_pdf.content)
 
     # ONLY its format: the txt link does not serve the PDF subroute,
     # and no link serves another format's content type.
