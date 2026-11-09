@@ -712,8 +712,9 @@ def test_a3_pdf_first_set_then_clear(auth_env):
     # trailer /ID, so raw bytes differ whenever the generations
     # cross a one-second boundary. The replay intent is asserted at
     # content level: identical extracted text (generation furniture
-    # stripped), page count, per-page footer and document title —
-    # see pdf_content.pdf_content_signature.
+    # stripped), page count, per-page footer, document title and
+    # non-text rendering skeleton — see
+    # pdf_content.pdf_content_signature.
     assert pdf_content_signature(replay.content) == \
         pdf_content_signature(first.content)
     assert "Acme Consulting" not in _pdf_text(replay.content)

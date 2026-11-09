@@ -23,41 +23,58 @@ Tests must compare generated PDFs at the content level instead.
   footer per page, so signature equality preserves it for both
   sides);
 - the extracted text, whitespace-normalized, with generation and
-  pagination furniture stripped: the footer lines and their
-  page-number chunks, the ``Generated:`` timestamp line, and
-  ``(continued)`` page-break labels (the same furniture set the
-  #163 suite's ``_normalized_body`` oracle strips, for the same
-  reasons). Every other line — including the ``File:`` header line
-  and all body content — is compared exactly.
+  pagination furniture stripped — narrowly, in furniture form only
+  (Codex P2 on PR #175, remediated): the footer lines and their
+  page-number chunks; the header timestamp, matched as the exact
+  ``Generated: YYYY-MM-DD HH:MM UTC`` string the generator emits
+  (pdf_export formats it with that strftime) and normalized in
+  place, never a whole-line drop — a body line that merely
+  contains ``Generated:`` is content and stays; and ``(continued)``
+  page-break labels, which the generator emits either as a line of
+  their own or as a suffix on the repeated block label — only
+  those two positions are stripped, the word anywhere else in a
+  line is content and stays;
+- a rendered-content skeleton (Codex P2 on PR #175, remediated):
+  for each page content stream, the stream with every ``BT``..``ET``
+  text block elided (text is compared via the extracted text above,
+  and the header timestamp lives inside a text block), hashed —
+  this keeps the drawing and color operators that carry branding
+  (the accent header rule, text colors) in the comparison; plus a
+  hash of each embedded image's stream data (the branding logo).
+  Font and CMap streams are excluded: font subsets legitimately
+  vary with the glyphs a generation happens to use. Verified
+  empirically: two generations of one report 1.2s apart have
+  identical skeletons, while an accent-only change and a
+  logo-only change each change the skeleton.
 
-No new dependency: text extraction reuses the stdlib ToUnicode-aware
-extractor the #160 suite already maintains
-(``test_issue160_designed_reports.extract_pdf_text``); fpdf2 embeds
-subset TTFs whose content streams carry glyph IDs, so naive string
-search over the raw bytes cannot substitute for it.
+No new dependency: stream parsing and text extraction reuse the
+stdlib helpers the #160 suite already maintains
+(``test_issue160_designed_reports``); fpdf2 embeds subset TTFs whose
+content streams carry glyph IDs, so naive string search over the
+raw bytes cannot substitute for extraction.
 """
 
+import hashlib
 import re
 
 from app.pdf_export import FOOTER_TEXT
-from test_issue160_designed_reports import extract_pdf_text
+from test_issue160_designed_reports import _streams_by_obj, extract_pdf_text
 
 _PAGE_RE = re.compile(rb"/Type\s*/Page[^s]")
 _TITLE_RE = re.compile(rb"/Title \(([^)]*)\)")
+# The header timestamp in its exact generated form (pdf_export:
+# strftime("%Y-%m-%d %H:%M UTC")). Anything else after "Generated:"
+# is report content, not furniture.
+_GENERATED_TS_RE = re.compile(r"Generated: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC")
+_CONTINUED_SUFFIX = " (continued)"
+_TEXT_BLOCK_RE = re.compile(rb"BT.*?ET", re.DOTALL)
 
 
 def _page_count(pdf_bytes):
     return len(_PAGE_RE.findall(pdf_bytes))
 
 
-def pdf_content_signature(pdf_bytes):
-    """Content-level signature of a generated PDF (see module docstring).
-
-    Two generations of the same report content have equal signatures
-    however far apart they were generated; any change to the rendered
-    content (body text, header branding/title lines, page count,
-    footer coverage, document title) changes the signature."""
-    text = extract_pdf_text(pdf_bytes)
+def _normalized_text(text):
     kept = []
     prev_was_footer = False
     for line in text.splitlines():
@@ -69,21 +86,55 @@ def pdf_content_signature(pdf_bytes):
             prev_was_footer = False
             continue
         prev_was_footer = False
-        if "Generated:" in line:
+        line = _GENERATED_TS_RE.sub("Generated: <timestamp>", line)
+        stripped = line.strip()
+        if stripped == "(continued)":
+            # Bare page-break label line: furniture.
             continue
-        # Pagination furniture: a block split across a page break
-        # resumes under a "(continued)" label; where the break falls
-        # is furniture, not body content (same ruling as #163's
-        # _normalized_body oracle).
-        if "(continued)" in line:
-            continue
+        if stripped.endswith(_CONTINUED_SUFFIX):
+            # Repeated block label: only the suffix is furniture;
+            # the label text itself is compared.
+            line = stripped[: -len(_CONTINUED_SUFFIX)]
         kept.append(line)
-    normalized = re.sub(r"\s+", " ", " ".join(kept)).strip()
+    return re.sub(r"\s+", " ", " ".join(kept)).strip()
+
+
+def _render_skeleton(pdf_bytes):
+    """Deterministic hashes of the non-text rendering, in object
+    order: page content streams with text blocks elided (drawing /
+    color operators — the accent rule and text colors — remain),
+    and embedded image stream data (the branding logo)."""
+    parts = []
+    streams = _streams_by_obj(pdf_bytes)
+    for num in sorted(streams):
+        dict_part, stream = streams[num]
+        if stream is None:
+            continue
+        if b"/Subtype /Image" in dict_part:
+            parts.append(("image", hashlib.sha256(stream).hexdigest()))
+        elif b"BT" in stream:
+            skeleton = _TEXT_BLOCK_RE.sub(b"BT <text> ET", stream)
+            parts.append(("content", hashlib.sha256(skeleton).hexdigest()))
+        # Font-file and CMap streams are not rendered content and
+        # their subsets vary with glyph usage: excluded.
+    return tuple(parts)
+
+
+def pdf_content_signature(pdf_bytes):
+    """Content-level signature of a generated PDF (see module docstring).
+
+    Two generations of the same report content have equal signatures
+    however far apart they were generated; any change to the rendered
+    content (body text, header branding/title lines, branding accent
+    or logo, page count, footer coverage, document title) changes
+    the signature."""
+    text = extract_pdf_text(pdf_bytes)
     title = _TITLE_RE.search(pdf_bytes)
     return (
         pdf_bytes[:8],
         title.group(1).decode("latin-1") if title else None,
         _page_count(pdf_bytes),
         text.count(FOOTER_TEXT),
-        normalized,
+        _normalized_text(text),
+        _render_skeleton(pdf_bytes),
     )

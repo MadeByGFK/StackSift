@@ -192,8 +192,9 @@ def test_each_link_serves_only_its_format_with_exact_content(paid_env):
     # raw bytes differ whenever the generations cross a one-second
     # boundary (the PostgreSQL-leg flake). The exact-content intent
     # is asserted at content level: identical extracted text
-    # (generation furniture stripped), page count, per-page footer
-    # and document title — see pdf_content.pdf_content_signature.
+    # (generation furniture stripped), page count, per-page footer,
+    # document title and non-text rendering skeleton — see
+    # pdf_content.pdf_content_signature.
     # The CSV/JSON legs above stay byte-exact: those serializers are
     # deterministic and embed no timestamp or trailer ID.
     assert pdf_content_signature(pdf_r.content) == \
