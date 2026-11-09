@@ -805,35 +805,100 @@ def analysis_operations(db: Session, user_id, source_result_id):
     ]
 
 
+def product_analysis_completions(db: Session, user_id, source_result_id):
+    """Completed product-redemption Analysis Reports for a source (A2)."""
+    rows = db.execute(
+        select(models.EntitlementRedemption).join(
+            models.Entitlement,
+            models.Entitlement.id == models.EntitlementRedemption.entitlement_id,
+        ).where(
+            models.Entitlement.user_id == user_id,
+            models.EntitlementRedemption.source_result_id == source_result_id,
+            models.EntitlementRedemption.status == "completed",
+            models.EntitlementRedemption.result_id.isnot(None),
+        )
+    ).scalars().all()
+    return rows
+
+
 def completed_analysis_result_id(db: Session, user_id, source_result_id):
     """The derived Analysis Report Result id for a source, or None.
 
-    F4 (PR #139 remediation): only return the id when the derived
-    Result is still available — it exists, is not deleted, and is
-    not expired. The derived report keeps its own 7-day life even
-    when the source is retention-extended, so an expired/deleted
-    derived report must not be linked (report_view would 410);
-    returning None restores the source's normal Analysis action.
-    Expiry/deletion semantics match reports_list/report_view:
-    ``expires_at > now`` and ``deleted_at is None``.
+    Origin-aware union (A2): legacy credit Operations and product
+    entitlement redemptions are discovered together; the existing
+    availability rules (exists, not deleted, not expired; latest wins
+    by creation) apply identically per origin. Canonical replay
+    consults this union before any entitlement is consumed.
     """
+    candidates: list[tuple] = []  # (created_at, id_str, result_id)
     completed = [
         op for op in analysis_operations(db, user_id, source_result_id)
         if op.status == "completed" and op.result_id
     ]
-    if not completed:
+    for op in completed:
+        candidates.append((op.created_at, str(op.result_id), op.result_id))
+    for red in product_analysis_completions(db, user_id, source_result_id):
+        candidates.append((red.created_at, str(red.result_id), red.result_id))
+    if not candidates:
         return None
-    latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
-    derived = db.get(models.Result, latest.result_id)
-    if derived is None:
+    candidates.sort(key=lambda c: (c[0] or _utcnow(), c[1]))
+    # Legacy rule preserved: the LATEST completion wins; if its
+    # artifact is gone/expired there is no link (None), exactly as the
+    # single-origin implementation behaved.
+    result_id = candidates[-1][2]
+    derived = db.get(models.Result, result_id)
+    if derived is None or derived.deleted_at is not None:
         return None
-    if derived.deleted_at is not None:
+    if derived.expires_at is None or _as_aware(derived.expires_at) <= _utcnow():
         return None
-    if derived.expires_at is None:
-        return None
-    if _as_aware(derived.expires_at) <= _utcnow():
-        return None
-    return latest.result_id
+    return result_id
+
+
+def is_product_paid_result(db: Session, result) -> bool:
+    """True when a Result's origin is a product redemption (#164).
+
+    Trusted provenance only (A9(c)): the origin FK on the Result row,
+    never the type or manifest labels.
+    """
+    return result is not None and getattr(result, "product_redemption_id", None) is not None
+
+
+def export_is_free(db: Session, user_id, result) -> bool:
+    """Exports are FREE for a dollar-paid report (Decision 8 / A9(c)).
+
+    Decided from the A2 Result origin before any consent/admission is
+    created on the export routes.
+    """
+    return is_product_paid_result(db, result)
+
+
+def store_product_result(db, user_id, redemption_id, data, *, result_type="deep_dive",
+                         severity="__default__", retention_days=90):
+    """Store a Result born of a product redemption (A2/A7).
+
+    Parallel to store_result: locks/CAS the redemption row like
+    _lock_operation locks an Operation, requires it still RESERVED and
+    its entitlement not revoked (revocation CAS wins — A5), and takes
+    retention as a parameter (90 days for Phase A Investigation
+    Reports). No Operation, Consent, or ledger row is ever created.
+    """
+    from app import product_billing as _pb
+    redemption, entitlement = _pb.lock_redemption(db, redemption_id)
+    if redemption.status != "reserved":
+        raise AdmissionError("redemption is no longer reserved")
+    if entitlement.status == "revoked":
+        raise AdmissionError("entitlement revoked")
+    raw = json.dumps({k: v for k, v in data.items() if k not in ("current_user", "csrf_token")}, default=str)
+    now = _utcnow()
+    if severity == "__default__":
+        severity = outcome_severity(data)
+    result = models.Result(user_id=user_id, product_redemption_id=redemption_id,
+        type=result_type, severity=severity,
+        storage_manifest=raw, integrity_digest=hash_input(raw.encode()), byte_count=len(raw.encode()),
+        ready_at=now, expires_at=now + timedelta(days=retention_days))
+    db.add(result)
+    db.flush()
+    return result
 
 
 def lock_share_rate_bucket(db: Session, owner: str):
@@ -955,10 +1020,22 @@ def _lock_operation(db, operation_id):
     return op, account, {g.id: g for g in grants}
 
 
-def result_payload(result, *, user_id, operation_id=None, free_request_id=None, allow_expired=False):
-    """Validate identity and integrity before publication or replay."""
+_PRODUCT_ORIGIN_UNSET = object()
+
+
+def result_payload(result, *, user_id, operation_id=None, free_request_id=None, product_redemption_id=_PRODUCT_ORIGIN_UNSET, allow_expired=False):
+    """Validate identity and integrity before publication or replay.
+
+    Issue #164 (A2): callers that know the expected product origin pass
+    product_redemption_id explicitly and it is enforced. Legacy callers
+    (written before the third origin existed) omit it; their operation /
+    free-request checks are unchanged.
+    """
     if (result is None or result.user_id != user_id or result.operation_id != operation_id
-            or result.free_request_id != free_request_id or not result.ready_at or result.deleted_at):
+            or result.free_request_id != free_request_id
+            or (product_redemption_id is not _PRODUCT_ORIGIN_UNSET
+                and getattr(result, "product_redemption_id", None) != product_redemption_id)
+            or not result.ready_at or result.deleted_at):
         raise AdmissionError("result unavailable")
     if not allow_expired and _as_aware(result.expires_at) <= _utcnow():
         raise AdmissionError("result expired")

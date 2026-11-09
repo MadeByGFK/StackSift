@@ -385,8 +385,11 @@ def test_credits_faq_sample_link_exactly_one_and_pricing_redirect(
     entry = body[anchor:body.index("<h3", anchor + 1)]
     assert 'href="/sample-report"' in entry
     assert "See a sample Investigation Report" in entry
-    assert "3 credits per run" in entry
-    assert "$9" not in entry
+    # PREMISE CHANGED (#164): the FAQ entry states the ruled dollar
+    # price — "$9 per report" — not the retired credit price.
+    assert "3 credits per run" not in entry
+    assert "$9" in entry
+    assert "It costs $9 per report" in entry
     redir = sample_client.get("/pricing", follow_redirects=False)
     assert redir.status_code == 301
     assert redir.headers["location"] == "/credits"
@@ -501,6 +504,10 @@ def test_owned_deep_dive_page_and_pdf_untouched(auth_env, cold_cache):
     """Regression gate: owned Analysis Report rendering keeps its
     controls/scripts and its PDF carries no SAMPLE label."""
     _email, _user_id, rid, csrf = _setup(auth_env)
+    # PREMISE CHANGED (#164): generation redeems a seeded $9
+    # entitlement (dollar-paid owned report; rendering untouched).
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     gen = auth_env.client.post(f"/reports/{rid}/deep-dive",
                                data={"csrf_token": csrf})
     assert gen.status_code == 200, gen.text[:300]

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift — redeem your Investigation Report</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% endif %}
+    </nav>
+  </header>
+
+  {# Remediation4 (fix 1): REDEMPTION-ONLY surface. This page is
+     rendered for an expired source whose owner holds an available
+     entitlement inside the F5 window. It deliberately carries NO
+     report payload, findings, or viewing content — only the
+     entitlement state and the Analysis generate action, which the
+     deep-dive route already admits for exactly this case. #}
+  <section class="report-head" data-redemption-only="1">
+    <h2>{{ filename }}</h2>
+    <p>This report has expired and can no longer be viewed. Your
+    Investigation Report purchase for it is still redeemable{% if redemption_deadline %} until {{ redemption_deadline }} (the source report's expiry plus 30 days){% endif %}.</p>
+
+    <div id="analysis-modal" style="display:block">
+      {% if analysis_eligible %}
+      <p id="analysis-msg" style="margin:0 0 12px">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment.</p>
+      <div id="analysis-link-row" style="display:none;margin-bottom:12px">
+        <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
+      </div>
+      <button type="button" class="btn-small" id="analysis-confirm">Generate Analysis Report</button>
+      {% else %}
+      <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if analysis_eligible %}
+  <script>
+  (function () {
+    var confirmBtn = document.getElementById('analysis-confirm');
+    if (!confirmBtn) return;
+    confirmBtn.addEventListener('click', function () {
+      confirmBtn.disabled = true;
+      var fd = new FormData();
+      fd.append('csrf_token', '{{ csrf_token }}');
+      fetch('/reports/{{ report_id }}/deep-dive', { method: 'POST', body: fd, credentials: 'same-origin' })
+        .then(function (r) {
+          return r.json().then(function (d) { d = d || {}; d._httpStatus = r.status; return d; },
+            function () { return { _httpStatus: r.status }; });
+        })
+        .then(function (d) {
+          var msg = document.getElementById('analysis-msg');
+          if (d.report_url) {
+            msg.textContent = 'Analysis Report ready.';
+            var row = document.getElementById('analysis-link-row');
+            var link = document.getElementById('analysis-view');
+            link.href = d.report_url;
+            row.style.display = 'block';
+            confirmBtn.style.display = 'none';
+          } else {
+            msg.textContent = d.error || 'Analysis Report generation failed.';
+            confirmBtn.disabled = false;
+          }
+        }, function () {
+          document.getElementById('analysis-msg').textContent = 'Analysis Report generation failed.';
+          confirmBtn.disabled = false;
+        });
+    });
+  })();
+  </script>
+  {% endif %}
+</div>
+</body>
+</html>

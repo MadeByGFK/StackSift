@@ -597,6 +597,15 @@ def test_max_fixture_timing_and_storage_delta():
 # --- route-level helpers -------------------------------------------------------------
 
 def _generate(auth_env, rid, csrf):
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): route
+    # generation redeems a seeded $9 entitlement (no credit charge).
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
+    return auth_env.client.post(
+        f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
+
+
+def _generate_raw(auth_env, rid, csrf):
     return auth_env.client.post(
         f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
 
@@ -696,7 +705,12 @@ def test_route_json_export_has_brief_csv_has_none(auth_env):
         b"template,level,count,services,first_seen,last_seen")
 
 
-def test_route_version_bump_old_view_free_then_confirm_new_purchase(auth_env):
+def test_route_version_bump_old_view_free_then_confirm_new_purchase(
+        auth_env, monkeypatch):
+    # #164: the prior-purchase disclosure copy renders on the
+    # price-configured surface (fail-closed "Coming soon" otherwise).
+    monkeypatch.setenv("STRIPE_PRICE_INVESTIGATION_REPORT",
+                       "price_test_investigation")
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200
@@ -709,6 +723,9 @@ def test_route_version_bump_old_view_free_then_confirm_new_purchase(auth_env):
     # A genuine pre-#162 completion also carries the OLD canonical
     # identity: its operation's request_hash was computed with the
     # old GENERATOR_VERSION, so it cannot match the current hash.
+    # PREMISE CHANGED (#164): the completion is now a product
+    # redemption, so its redemption row's hash is zeroed the same way
+    # (the legacy Operation loop is kept for completeness).
     from app import models
     db = auth_env.sessions()
     try:
@@ -716,6 +733,9 @@ def test_route_version_bump_old_view_free_then_confirm_new_purchase(auth_env):
                 models.Operation.type == "deep_dive").all():
             if str(op.result_id) == old_id:
                 op.request_hash = "0" * 64
+        for red in db.query(models.EntitlementRedemption).all():
+            if str(red.result_id) == old_id:
+                red.request_hash = "0" * 64
         db.commit()
     finally:
         db.close()
@@ -730,13 +750,16 @@ def test_route_version_bump_old_view_free_then_confirm_new_purchase(auth_env):
     # stating the new purchase (A1/P2-6 UX disposition).
     source_page = auth_env.client.get(f"/reports/{rid}")
     assert source_page.status_code == 200
-    assert "Generating a new Analysis Report is a new" in source_page.text
+    assert "Generating a new Investigation Report is a new $9 purchase" \
+        in source_page.text
     assert 'id="analysis-btn"' in source_page.text
 
     confirm = _generate(auth_env, rid, csrf)
     assert confirm.status_code == 200, confirm.text[:300]
     assert confirm.json()["analysis_result_id"] != old_id
-    assert _balance(auth_env, user_id) == before - 3  # exactly one new debit
+    # PREMISE CHANGED (#164): the new purchase is a second $9
+    # entitlement redemption — the credit balance never moves.
+    assert _balance(auth_env, user_id) == before
     new_manifest = _artifact_manifest(
         auth_env, confirm.json()["analysis_result_id"])
     assert new_manifest["brief"]["lead"] is not None
@@ -748,7 +771,7 @@ def test_route_version_bump_old_view_free_then_confirm_new_purchase(auth_env):
     assert again.json()["analysis_result_id"] == \
         confirm.json()["analysis_result_id"]
     assert again.json()["replayed"] is True
-    assert _balance(auth_env, user_id) == before - 3
+    assert _balance(auth_env, user_id) == before
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
 
@@ -778,26 +801,43 @@ def test_route_brief_failure_reverses_and_prior_artifact_untouched(
 
 
 def test_route_post_brief_persistence_failure_reverses(auth_env, monkeypatch):
+    # PREMISE CHANGED (#164): the dollar path stores via
+    # store_product_result, not the credit store_result. A storage
+    # failure releases the entitlement back to available (F2) — the
+    # redemption row is 'released' with no result, no artifact is
+    # published, and no credit state moves.
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
-    real_store = C.store_result
+    real_store = C.store_product_result
 
-    def _boom(db, user, op_id, data, **kwargs):
+    def _boom(db, user, redemption_id, data, **kwargs):
         if kwargs.get("result_type") == "deep_dive":
             raise RuntimeError("store boom")
-        return real_store(db, user, op_id, data, **kwargs)
-    monkeypatch.setattr(C, "store_result", _boom)
+        return real_store(db, user, redemption_id, data, **kwargs)
+    monkeypatch.setattr(C, "store_product_result", _boom)
     r = _generate(auth_env, rid, csrf)
     assert r.status_code == 500
     assert _balance(auth_env, user_id) == before
-    ops = _ops(auth_env, user_id, "deep_dive")
-    assert len(ops) == 1 and ops[0].status == "failed"
-    assert ops[0].result_id is None  # no partial artifact
+    assert _ops(auth_env, user_id, "deep_dive") == []
+    from app import models
     with auth_env.sessions() as db:
+        reds = db.query(models.EntitlementRedemption).all()
+        assert len(reds) == 1 and reds[0].status == "released"
+        assert reds[0].result_id is None  # no partial artifact
+        ents = db.query(models.Entitlement).all()
+        assert len(ents) == 1 and ents[0].status == "available"
+        assert db.query(models.Result).filter(
+            models.Result.type == "deep_dive").count() == 0
         assert C.verify_account_invariants(db, user_id) == []
 
 
 def test_route_old_artifact_unlock_and_new_artifact_unlock(auth_env):
+    # PREMISE CHANGED (#164 Phase A, A9(c)): BOTH artifacts here are
+    # dollar-paid, so their exports are INCLUDED — no per-artifact
+    # 2-credit unlock exists on this path. The per-artifact
+    # independence survives as: each artifact's exports work on its
+    # own terms, the old (brief-less) PDF still has no Brief, and the
+    # new artifact's PDF carries it.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     old_id = gen.json()["analysis_result_id"]
@@ -806,14 +846,14 @@ def test_route_old_artifact_unlock_and_new_artifact_unlock(auth_env):
     pdf = auth_env.client.post(
         f"/reports/{old_id}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 2  # its own unlock
+    assert _balance(auth_env, user_id) == before  # included, not unlocked
     assert "Investigation Brief" not in _pdf_text(pdf.content)
     csv_r = auth_env.client.post(
         f"/reports/{old_id}/exports/csv", data={"csrf_token": csrf})
     assert csv_r.status_code == 200
-    assert _balance(auth_env, user_id) == before - 2  # replay free
+    assert _balance(auth_env, user_id) == before  # replay free
 
-    # New brief-bearing artifact: its own unlock, PDF carries brief.
+    # New brief-bearing artifact: exports included, PDF carries brief.
     rid2 = _custom_result(auth_env, user_id, _eligible_payload())
     csrf2 = _session_csrf(auth_env)
     gen2 = _generate(auth_env, rid2, csrf2)
@@ -823,12 +863,12 @@ def test_route_old_artifact_unlock_and_new_artifact_unlock(auth_env):
     pdf2 = auth_env.client.post(
         f"/reports/{new_id}/pdf", data={"csrf_token": csrf2})
     assert pdf2.status_code == 200
-    assert _balance(auth_env, user_id) == before2 - 2
+    assert _balance(auth_env, user_id) == before2  # included
     assert "Investigation Brief" in _pdf_text(pdf2.content)
     pdf3 = auth_env.client.post(
         f"/reports/{new_id}/pdf", data={"csrf_token": csrf2})
     assert pdf3.status_code == 200
-    assert _balance(auth_env, user_id) == before2 - 2  # unlocked replay free
+    assert _balance(auth_env, user_id) == before2  # replay free
 
 
 def test_route_failed_first_export_charges_zero_unlock_intact(
@@ -850,7 +890,10 @@ def test_route_failed_first_export_charges_zero_unlock_intact(
     ok = auth_env.client.post(
         f"/reports/{analysis_id}/pdf", data={"csrf_token": csrf})
     assert ok.status_code == 200 and ok.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 2  # charged once, on success
+    # PREMISE CHANGED (#164): the dollar-paid artifact's export is
+    # included — failure charged zero and the successful retry is
+    # free; the balance never moves on this path.
+    assert _balance(auth_env, user_id) == before
 
 
 def test_route_deep_dive_share_and_extend_stay_unsupported(auth_env):
@@ -906,6 +949,9 @@ def test_route_source_vs_derived_expiry_are_separate(auth_env):
         db.close()
     csrf2 = _session_csrf(auth_env)
     before = _balance(auth_env, user_id)
-    r = _generate(auth_env, rid2, csrf2)
+    # No entitlement is held for rid2, so the expired source 410s.
+    # (An entitlement held with an open F5 window would redeem
+    # instead — that premise is the Phase A suite's, not this one.)
+    r = _generate_raw(auth_env, rid2, csrf2)
     assert r.status_code == 410
     assert _balance(auth_env, user_id) == before

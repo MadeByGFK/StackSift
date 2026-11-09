@@ -36,6 +36,40 @@
   <p class="sample-report-cta"><a href="/sample-report">See what the paid Investigation Report looks like →</a></p>
   {% endif %}
 
+  {% if checkout_poll is defined and checkout_poll and report_id %}
+  {# Issue #164 (A7/P3-2): return-page polling. The success URL grants
+     nothing; this polls the read-only status endpoint until the
+     webhook settlement lands the entitlement, then tells the buyer
+     it is ready to generate — no manual re-attempt guessing. #}
+  <div class="checkout-banner" id="checkout-poll-banner" role="status">Payment received — confirming your Investigation Report purchase…</div>
+  <script>
+  (function () {
+    var banner = document.getElementById("checkout-poll-banner");
+    if (!banner) return;
+    var tries = 0, max = 24;  /* ~60s at 2.5s intervals */
+    function tick() {
+      tries++;
+      fetch("/reports/{{ report_id }}/investigation-status", {credentials: "same-origin", headers: {"Accept": "application/json"}})
+        .then(function (r) { if (!r.ok) throw new Error("status unavailable"); return r.json(); })
+        .then(function (d) {
+          if (d.entitlement_status === "available" || d.entitlement_status === "reserved") {
+            banner.textContent = "Payment complete — your Investigation Report is ready to generate. Use Analysis on this report.";
+            return;
+          }
+          if (d.purchase_status === "failed" || d.purchase_status === "refunded") {
+            banner.textContent = "That purchase did not complete — no entitlement was granted. You can try again from Analysis on this report.";
+            return;
+          }
+          if (tries < max) setTimeout(tick, 2500);
+          else banner.textContent = "Still confirming your purchase — refresh this page in a moment.";
+        })
+        .catch(function () { if (tries < max) setTimeout(tick, 2500); });
+    }
+    setTimeout(tick, 2500);
+  })();
+  </script>
+  {% endif %}
+
   <section class="report-head">
     <h2>{{ filename }}</h2>
     <div class="meta">
@@ -98,11 +132,25 @@
       <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
           {% if analysis_eligible %}
-          <p id="analysis-msg" style="margin:0 0 12px">Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.{% if analysis_prior_exists %} A previous Analysis Report exists for this report. Generating a new Analysis Report is a new {{ analysis_report_cost }}-credit purchase.{% endif %}</p>
+          {% if product_ready is defined and not product_ready and not (entitlement_available is defined and entitlement_available) %}
+          {# Issue #164 (P2-3): fail-closed display state — no live
+             $9 buy action while the product Price env is unset.
+             Remediation4 (fix 7): this gate applies only to NEW
+             purchases — a viewer holding an available entitlement
+             falls through to the Generate/Confirm action below,
+             because redemption needs no Price. #}
+          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report: <span class="pack-soon">Coming soon</span> — purchases are not available yet. Please check back later.</p>
+          {% else %}
+          {% if entitlement_available is defined and entitlement_available %}
+          <p id="analysis-msg" style="margin:0 0 12px">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+          {% else %}
+          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Analysis Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
+          {% endif %}
           <div id="analysis-link-row" style="display:none;margin-bottom:12px">
             <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
           </div>
           <button type="button" class="btn-small" id="analysis-confirm">Generate Analysis Report</button>
+          {% endif %}
           {% else %}
           <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
           {% endif %}
@@ -427,13 +475,17 @@
                     row.style.display = 'block';
                     analysisConfirm.style.display = 'none';
                   } else if (d._httpStatus === 402 && d.purchase_url) {
-                    msg.innerHTML = '';
-                    msg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
-                    var buy = document.createElement('a');
-                    buy.href = d.purchase_url;
-                    buy.textContent = 'Buy credits';
-                    msg.appendChild(buy);
-                    analysisConfirm.disabled = false;
+                    // #164: no entitlement — start the $9 product
+                    // checkout and send the buyer to Stripe.
+                    msg.textContent = d.error || 'Investigation Report costs $9.';
+                    var cfd = new FormData();
+                    cfd.append('csrf_token', '{{ csrf_token }}');
+                    fetch(d.purchase_url, { method: 'POST', body: cfd, credentials: 'same-origin' })
+                      .then(function (r) { return r.json(); })
+                      .then(function (c) {
+                        if (c.checkout_url) { window.location = c.checkout_url; }
+                        else { msg.textContent = c.error || 'Checkout is not available yet.'; analysisConfirm.disabled = false; }
+                      }, function () { analysisConfirm.disabled = false; });
                   } else {
                     msg.textContent = d.error || 'Analysis Report generation failed.';
                     analysisConfirm.disabled = false;
@@ -481,8 +533,16 @@
      point, confirm copy and POST route are unchanged. #}
   <div class="s1-premium-card" data-s1-premium-card>
     <h3>Investigation Report</h3>
-    <p>Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.</p>
+    {% if product_ready is defined and not product_ready and not (entitlement_available is defined and entitlement_available) %}
+    <p>Investigation Report: <span class="pack-soon">Coming soon</span> — purchases are not available yet. Please check back later.</p>
+    {% else %}
+    {% if entitlement_available is defined and entitlement_available %}
+    <p>You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+    {% else %}
+    <p>Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+    {% endif %}
     <button type="button" class="btn-small" id="premium-upsell-btn">Get the Analysis Report</button>
+    {% endif %}
     <script>
     (function () {
       var cardBtn = document.getElementById('premium-upsell-btn');

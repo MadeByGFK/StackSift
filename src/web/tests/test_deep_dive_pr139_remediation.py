@@ -134,6 +134,10 @@ def test_f1_control_pool_exhausted_no_connections_keeps_pool_explanation():
 # --- F2 + F4: My Reports rows / derived-result availability ------------------
 
 def _generate(auth_env, rid, csrf):
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): generation
+    # redeems a seeded $9 entitlement (no credit charge).
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     return auth_env.client.post(
         f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
 
@@ -377,7 +381,9 @@ _SETUP_JS = (
     "analysisBtns.push(btnB);\n"
 )
 
-_COST_MSG = "Analysis Report costs 3 credits"
+# PREMISE CHANGED (#164): the My Reports Analysis modal copy is the
+# dollar copy now (the JS sets it when a row's popup opens).
+_COST_MSG = "Investigation Report costs $9"
 
 
 def _run_analysis_scenario(scenario):

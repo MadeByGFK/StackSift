@@ -167,12 +167,14 @@
              Analyzed; source rows (analysis/comparison/batch) keep
              "Analyzed". #}
           <span>{% if report.type == 'deep_dive' %}Created{% else %}Analyzed{% endif %} {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
+          {% if report.redemption_only %}<span class="redemption-only-label">Redemption only — this report has expired; your Investigation Report entitlement can still be redeemed.</span><span class="sep">·</span>{% endif %}
           <span data-retention-expiry-date>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
           <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}" data-retention-expiry-pill>Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
         </div>
       </div>
       <div class="actions">
         <a href="/reports/{{ report.id }}" class="btn btn-ghost">View</a>
+        {% if not report.redemption_only %}
         <span class="menu-wrap">
           <button type="button" class="btn btn-primary export-toggle" data-menu="menu-{{ report.id }}" aria-haspopup="true" aria-expanded="false">Export</button>
           <span class="menu" id="menu-{{ report.id }}" style="display:none">
@@ -192,6 +194,7 @@
             {% endif %}
           </span>
         </span>
+        {% endif %}
         {# Issue #106 Stage 2 + founder amendment: row order is
            View / Export / Analysis / Share / Extend. Analysis opens
            the shared popup below; an existing Analysis Report links
@@ -200,7 +203,7 @@
           {% if report.analysis_result_id %}
           <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Analysis</a>
           {% else %}
-          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-reason="{{ report.analysis_reason or '' }}">Analysis</button>
+          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-entitlement="{{ '1' if report.entitlement_available else '' }}" data-reason="{{ report.analysis_reason or '' }}" data-deadline="{{ report.redemption_deadline or '' }}">Analysis</button>
           {% endif %}
         {% endif %}
         {# Issue #106 Stage 2 / PR #139 F2: no Share for Analysis
@@ -209,14 +212,14 @@
            a Share button on a deep_dive row always 404s (dead
            button). Mirrors the Extend suppression below; the
            server-side 404 rejection is retained. #}
-        {% if report.type != 'deep_dive' %}
+        {% if report.type != 'deep_dive' and not report.redemption_only %}
         <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
         {% endif %}
         {# Issue #106 Stage 2: no Extend for Analysis Report rows —
            the retention route admits only analysis/comparison
            sources, so an Extend form on a deep_dive row would POST
            to a 404 (dead button). Normal reports keep Extend. #}
-        {% if report.type != 'deep_dive' %}
+        {% if report.type != 'deep_dive' and not report.redemption_only %}
         <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" data-retention-form style="display:inline;margin:0">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
@@ -272,6 +275,7 @@
   </div>
 </div>
 
+<script>window.__productReady = {{ 'false' if product_ready is defined and not product_ready else 'true' }};</script>
 <div id="analysis-modal" class="modal" style="display:none">
   <div class="modal-card">
     <p id="analysis-msg"></p>
@@ -713,9 +717,25 @@
       analysisCurrent = btn;
       document.getElementById('analysis-link-row').style.display = 'none';
       if (btn.getAttribute('data-eligible') === '1') {
-        analysisMsg.textContent = 'Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.';
-        analysisConfirm.style.display = '';
-        analysisConfirm.disabled = false;
+        // Remediation4 (fix 7): the entitlement check comes FIRST —
+        // a holder of an available entitlement redeems even when
+        // product sales are disabled (generation needs no Price);
+        // the Coming soon gate below applies only to NEW purchases.
+        var hasEntitlement = btn.getAttribute('data-entitlement') === '1';
+        if (window.__productReady === false && !hasEntitlement) {
+          // Issue #164 (P2-3): fail-closed display state — no live
+          // $9 buy action while the product Price env is unset.
+          analysisMsg.textContent = 'Investigation Report: Coming soon — purchases are not available yet. Please check back later.';
+          analysisConfirm.style.display = 'none';
+        } else if (hasEntitlement) {
+          analysisMsg.textContent = 'You hold an unused entitlement for this report\u2019s Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.' + (btn.getAttribute('data-deadline') ? ' Redeem by ' + btn.getAttribute('data-deadline') + ' (the source report\u2019s expiry plus 30 days).' : '');
+          analysisConfirm.style.display = '';
+          analysisConfirm.disabled = false;
+        } else {
+          analysisMsg.textContent = 'Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.' + (btn.getAttribute('data-deadline') ? ' Redeem by ' + btn.getAttribute('data-deadline') + ' (the source report\u2019s expiry plus 30 days).' : '');
+          analysisConfirm.style.display = '';
+          analysisConfirm.disabled = false;
+        }
       } else {
         analysisMsg.textContent = btn.getAttribute('data-reason') || '';
         analysisConfirm.style.display = 'none';
@@ -754,13 +774,17 @@
           document.getElementById('analysis-link-row').style.display = 'block';
           analysisConfirm.style.display = 'none';
         } else if (d._httpStatus === 402 && d.purchase_url) {
-          analysisMsg.textContent = '';
-          analysisMsg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
-          var buy = document.createElement('a');
-          buy.href = d.purchase_url;
-          buy.textContent = 'Buy credits';
-          analysisMsg.appendChild(buy);
-          analysisConfirm.disabled = false;
+          // #164: no entitlement — start the $9 product checkout.
+          analysisMsg.textContent = d.error || 'Investigation Report costs $9.';
+          var cfd = new FormData();
+          cfd.append('csrf_token', '{{ csrf_token }}');
+          fetch(d.purchase_url, { method: 'POST', body: cfd, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (c) {
+              if (analysisCurrent !== originBtn) { return; }
+              if (c.checkout_url) { window.location = c.checkout_url; }
+              else { analysisMsg.textContent = c.error || 'Checkout is not available yet.'; analysisConfirm.disabled = false; }
+            }, function () { analysisConfirm.disabled = false; });
         } else {
           analysisMsg.textContent = d.error || 'Analysis Report generation failed.';
           analysisConfirm.disabled = false;

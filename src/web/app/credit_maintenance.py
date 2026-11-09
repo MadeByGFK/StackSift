@@ -42,6 +42,20 @@ def _run_job(db, name, fn):
     log = logging.getLogger(__name__)
     try:
         result = fn(db)
+        # Remediation2 P2-D: explicit committed boundary per job.
+        # Jobs share one session and several only flush; without a
+        # commit here, a later job's unconditional rollback (the
+        # recovery jobs roll back after candidate selection;
+        # _reconcile_all_accounts rolls back on entry) silently
+        # discarded an earlier job's flushed-but-uncommitted work —
+        # e.g. expire_stale_pending_purchases' expiry was thrown away
+        # by recover_expired_redemptions, and the product expire /
+        # lapse jobs' work by reconciliation. Jobs that commit
+        # internally are unaffected (a second commit is a no-op);
+        # read-only jobs commit nothing. A commit failure is a job
+        # failure (the except path rolls back and counts it).
+        if db is not None:
+            db.commit()
     except Exception:
         if db is not None:
             try:
@@ -83,8 +97,46 @@ def recover_free_requests(db, *, executor_stopped=None):
 
 def cleanup_results(db):
     # Same capacity-first order as settlement; retain identities, remove payloads.
+    # Lock ordering: the global:paid capacity scope is taken FIRST
+    # (above, before any Result row is touched), exactly as on the
+    # settlement paths — cleanup never takes a Result/entitlement
+    # lock before this scope, so it cannot invert settlement's order.
     C._ensure_capacity_scope(db, 'global:paid', C.DEFAULT_GLOBAL_CONCURRENT_LIMIT)
-    rows = db.scalars(select(M.Result).where(M.Result.expires_at <= C._utcnow(), M.Result.deleted_at.is_(None)))
+    # Issue #164 (F5): while an entitlement's redemption window is open,
+    # cleanup must NOT destroy that source's redemption prerequisites
+    # (its manifest/evidence). This preserves redeemability only; the
+    # source's own viewing retention is unchanged (views still 410).
+    # Remediation2 P1-D: a source with a PENDING product purchase is
+    # protected on the same terms — its session can still settle
+    # (pending purchases retire only when conclusively expired, P1-B),
+    # and settlement grants an entitlement whose redemption reads
+    # exactly the prerequisites cleanup would destroy. Once the
+    # purchase is terminal (failed/refunded/completed — a completed
+    # one protects via its entitlement above), protection ends.
+    # Remediation4 (fix 5, P1): BOTH protection sets are read in ONE
+    # UNION statement — one statement, one snapshot. The previous
+    # two-statement read had a stranding race: a settlement that
+    # committed between the entitlement read and the pending read
+    # (pending -> completed + entitlement granted) was invisible to
+    # BOTH reads (entitlement not yet there for the first, purchase
+    # no longer pending for the second), so cleanup deleted a live
+    # entitlement's source. A single statement cannot split that
+    # commit: the settlement is either entirely before the snapshot
+    # (entitlement row protects) or entirely after it (the still-
+    # pending purchase protects, and settlement's own admission lock
+    # ordering keeps the grant consistent with that read).
+    from sqlalchemy import union as _union
+    _protected_stmt = _union(
+        select(M.Entitlement.source_result_id).where(
+            M.Entitlement.status.in_(('available', 'reserved')),
+            M.Entitlement.redemption_deadline.isnot(None),
+            M.Entitlement.redemption_deadline >= C._utcnow()),
+        select(M.ProductPurchase.source_result_id).where(
+            M.ProductPurchase.status == 'pending'),
+    )
+    _protected_sources = set(db.scalars(_protected_stmt).all())
+    rows = [r for r in db.scalars(select(M.Result).where(M.Result.expires_at <= C._utcnow(), M.Result.deleted_at.is_(None)))
+            if r.id not in _protected_sources]
     expired_ids = []
     for result in rows:
         result.storage_manifest = '{}'
@@ -219,6 +271,10 @@ def run_once(*, reconcile=False):
         _run_job(db, "cleanup_results", cleanup_results)
         # Issue #70: abandoned checkouts must not sit pending forever.
         _run_job(db, "expire_stale_pending_purchases", C.expire_stale_pending_purchases)
+        from app import product_billing as _pb
+        _run_job(db, "recover_expired_redemptions", _pb.recover_expired_redemptions)
+        _run_job(db, "expire_stale_pending_product_purchases", _pb.expire_stale_pending_product_purchases)
+        _run_job(db, "lapse_expired_entitlements", _pb.lapse_expired_entitlements)
         if reconcile:
             _run_job(db, "reconcile_accounts", _reconcile_all_accounts)
         _run_job(db, "payment_reconciliation", _run_payment_reconciliation)

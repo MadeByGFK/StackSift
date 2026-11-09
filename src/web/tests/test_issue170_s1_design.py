@@ -350,9 +350,13 @@ def test_s1_stats_notes_computed_and_no_file_size():
 def test_s1_premium_card_only_for_owned_eligible_standard():
     html = _owned()
     assert "data-s1-premium-card" in html
-    assert "Analysis Report costs 3 credits." in html
+    # PREMISE CHANGED (#164 Phase A): the card carries the ruled
+    # dollar copy (the #170 brief's "no dollar copy pre-#164A"
+    # interim premise is superseded by the Phase A build itself).
+    assert "Investigation Report costs $9" in html
+    assert "Analysis Report costs 3 credits." not in html
     assert 'id="premium-upsell-btn"' in html
-    assert "$9" not in html and "50 MB" not in html
+    assert "50 MB" not in html
     # Already purchased -> the card never re-offers.
     assert "data-s1-premium-card" not in _owned(
         analysis_result_id="derived-1")
