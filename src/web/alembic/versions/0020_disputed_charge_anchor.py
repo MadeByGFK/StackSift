@@ -21,7 +21,7 @@ keep NULL and fall back to ``completed_at``.
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0020_product_disputed_and_charge_anchor"
+revision = "0020_disputed_charge_anchor"
 down_revision = "0019_product_reversal_fields"
 branch_labels = None
 depends_on = None

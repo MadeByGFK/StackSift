@@ -1032,11 +1032,13 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
                     charge_amount_cents=int(stripe_obj.get("amount") or 0))
             elif event_type == "charge.dispute.created":
                 outcome = _pb.apply_dispute(db, purchase, stripe_event_id=event_id, dispute_status=None,
-                                            disputed_cents=stripe_obj.get("amount"))
+                                            disputed_cents=stripe_obj.get("amount"),
+                                            dispute_id=stripe_obj.get("id"))
             else:
                 outcome = _pb.apply_dispute(db, purchase, stripe_event_id=event_id,
                                             dispute_status=stripe_obj.get("status"),
-                                            disputed_cents=stripe_obj.get("amount"))
+                                            disputed_cents=stripe_obj.get("amount"),
+                                            dispute_id=stripe_obj.get("id"))
         except Exception:
             db.rollback()
             raise HTTPException(500, "transient settlement failure")

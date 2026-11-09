@@ -291,7 +291,100 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
             models.ProductPurchase.id == purchase.id).with_for_update()
         .execution_options(populate_existing=True)
     ).scalar_one()
+    def _fail(note: str):
+        logger.error("product webhook %s: purchase %s failed: %s",
+                     stripe_event_id, purchase.id, note)
+        locked.status = "failed"
+        locked.stripe_event_id = stripe_event_id
+        db.flush()
+        raise SettlementError(note)
+
+    def _validation_error():
+        """The A4 strict-facts checks as a pure predicate: the
+        failure note, or None when every fact checks out. Factored
+        out of the grant path (remediation5 fix 2) so a purchase
+        terminally reversed BEFORE completion can run the SAME
+        validation before its payment facts are recorded for
+        reconciliation — facts must never be recorded from an event
+        settlement itself would have rejected."""
+        if payment_status != "paid" or session_status != "complete" or mode != "payment":
+            return "session is not a completed paid payment session"
+        if livemode is not None:
+            import os
+            key = os.environ.get("STRIPE_SECRET_KEY", "")
+            if key.startswith(("sk_test_", "rk_test_")) and livemode:
+                return "live-mode event against test-mode keys"
+            if key.startswith(("sk_live_", "rk_live_")) and not livemode:
+                return "test-mode event against live-mode keys"
+        if event_metadata.get("kind") != "product":
+            return "metadata kind is not product"
+        if event_metadata.get("sku") != locked.sku:
+            return "metadata sku does not match purchase"
+        if str(event_metadata.get("user_id", "")) != str(locked.user_id):
+            return "metadata user_id does not match purchase"
+        try:
+            meta_pid = uuid.UUID(str(event_metadata.get("purchase_id", "")))
+        except (ValueError, TypeError):
+            meta_pid = None
+        if meta_pid != locked.id:
+            return "metadata purchase_id does not match purchase"
+        try:
+            meta_version = int(event_metadata.get("pricing_version", -1))
+        except (TypeError, ValueError):
+            meta_version = -1
+        if meta_version != locked.pricing_version:
+            return "pricing_version does not match purchase snapshot"
+        if not isinstance(amount_cents, int) or amount_cents != locked.amount_cents:
+            return "amount_total does not match purchase snapshot"
+        if currency != locked.currency:
+            return "currency does not match catalog currency"
+        # A4(e) is unconditional (P3-4): the retrieved session Price ID
+        # must equal the checkout-time snapshot. A missing snapshot is a
+        # defence-in-depth failure too, not a skip — route-created rows
+        # always snapshot a price (creation fails closed otherwise), so a
+        # null snapshot means a manually seeded / corrupt row.
+        if session_price_id != locked.stripe_price_id:
+            return "session price id does not match purchase snapshot"
+        if locked.stripe_payment_intent_id and payment_intent_id != locked.stripe_payment_intent_id:
+            return "payment intent does not match purchase"
+        if locked.stripe_session_id and locked.stripe_session_id != stripe_session_id:
+            return "event session id does not match purchase session id"
+        return None
+
+    def _record_reversed_payment_facts():
+        """Remediation5 (fix 2): a purchase terminally reversed
+        BEFORE checkout.session.completed (full refund -> 'refunded',
+        lost dispute -> 'disputed') never recorded completed_at or
+        the charge anchor, so compute_reconciliation excluded it
+        permanently while Stripe included its paid session — the
+        payment AND the reversal were both invisible on the ledger
+        side, and the session surfaced as a false
+        stripe_session_without_purchase. When the completion event
+        arrives for such a purchase, validate it exactly as
+        settlement validates session facts and, only on success,
+        record the payment facts (completed_at and/or the
+        charge-creation anchor) WITHOUT granting an entitlement,
+        changing the terminal status, or resurrecting the purchase,
+        so reconciliation accounts for both sides. NULL-guarded:
+        redelivery is idempotent and a settled purchase's recorded
+        facts never move."""
+        note = _validation_error()
+        if note is not None:
+            logger.warning("product webhook %s: purchase %s already "
+                           "%s; completion facts NOT recorded (%s)",
+                           stripe_event_id, purchase.id, locked.status,
+                           note)
+            return
+        if locked.completed_at is None:
+            locked.completed_at = _utcnow()
+        _anchor = _coerce_stripe_timestamp(stripe_charge_created_at)
+        if _anchor is not None and locked.stripe_charge_created_at is None:
+            locked.stripe_charge_created_at = _anchor
+        db.flush()
+
     if locked.status != "pending":
+        if locked.status in ("refunded", "disputed"):
+            _record_reversed_payment_facts()
         logger.info("product webhook %s: purchase %s already %s",
                     stripe_event_id, purchase.id, locked.status)
         return "duplicate"
@@ -301,65 +394,22 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
         # purchase pending): a recorded lost dispute is terminal —
         # settlement must never grant. Repair the row to the same
         # terminal 'disputed' state apply_dispute now writes.
+        # Remediation5 (fix 2): the row is terminally reversed from
+        # this point, so its validated payment facts are recorded
+        # for reconciliation exactly as for a 'disputed' row above.
         locked.status = "disputed"
+        _record_reversed_payment_facts()
         db.flush()
         logger.info("product webhook %s: purchase %s has a lost "
                     "dispute; settlement refused", stripe_event_id,
                     purchase.id)
         return "duplicate"
 
-    def _fail(note: str):
-        logger.error("product webhook %s: purchase %s failed: %s",
-                     stripe_event_id, purchase.id, note)
-        locked.status = "failed"
-        locked.stripe_event_id = stripe_event_id
-        db.flush()
-        raise SettlementError(note)
-
-    if payment_status != "paid" or session_status != "complete" or mode != "payment":
-        _fail("session is not a completed paid payment session")
-    if livemode is not None:
-        import os
-        key = os.environ.get("STRIPE_SECRET_KEY", "")
-        if key.startswith(("sk_test_", "rk_test_")) and livemode:
-            _fail("live-mode event against test-mode keys")
-        if key.startswith(("sk_live_", "rk_live_")) and not livemode:
-            _fail("test-mode event against live-mode keys")
-    if event_metadata.get("kind") != "product":
-        _fail("metadata kind is not product")
-    if event_metadata.get("sku") != locked.sku:
-        _fail("metadata sku does not match purchase")
-    if str(event_metadata.get("user_id", "")) != str(locked.user_id):
-        _fail("metadata user_id does not match purchase")
-    try:
-        meta_pid = uuid.UUID(str(event_metadata.get("purchase_id", "")))
-    except (ValueError, TypeError):
-        meta_pid = None
-    if meta_pid != locked.id:
-        _fail("metadata purchase_id does not match purchase")
-    try:
-        meta_version = int(event_metadata.get("pricing_version", -1))
-    except (TypeError, ValueError):
-        meta_version = -1
-    if meta_version != locked.pricing_version:
-        _fail("pricing_version does not match purchase snapshot")
-    if not isinstance(amount_cents, int) or amount_cents != locked.amount_cents:
-        _fail("amount_total does not match purchase snapshot")
-    if currency != locked.currency:
-        _fail("currency does not match catalog currency")
-    # A4(e) is unconditional (P3-4): the retrieved session Price ID
-    # must equal the checkout-time snapshot. A missing snapshot is a
-    # defence-in-depth failure too, not a skip — route-created rows
-    # always snapshot a price (creation fails closed otherwise), so a
-    # null snapshot means a manually seeded / corrupt row.
-    if session_price_id != locked.stripe_price_id:
-        _fail("session price id does not match purchase snapshot")
-    if locked.stripe_payment_intent_id and payment_intent_id != locked.stripe_payment_intent_id:
-        _fail("payment intent does not match purchase")
+    _error = _validation_error()
+    if _error is not None:
+        _fail(_error)
     if not locked.stripe_session_id:
         locked.stripe_session_id = stripe_session_id
-    elif locked.stripe_session_id != stripe_session_id:
-        _fail("event session id does not match purchase session id")
 
     locked.status = "completed"
     locked.amount_cents = amount_cents
@@ -559,15 +609,82 @@ def apply_refund(db: Session, purchase, *, stripe_event_id: str,
     return "refunded"
 
 
+def _record_product_dispute(db: Session, locked_purchase, *,
+                              dispute_id, dispute_status,
+                              disputed_cents) -> None:
+    """Upsert the per-dispute record (remediation5 fix 1).
+
+    Keyed by the Stripe dispute ID (unique), so created/closed
+    events and webhook redeliveries of the SAME dispute update one
+    row — never double-counted — and a won dispute can never erase
+    an earlier lost dispute's amount, which lives on its own row.
+    Amount: the dispute's own amount, replaced when an event
+    carries one (a fact about that dispute, equal on redelivery).
+    Status: closed events carry the final status and overwrite;
+    a created event (``dispute_status=None``) marks the record
+    'open' but never downgrades a recorded terminal outcome —
+    an out-of-order or redelivered created event must not
+    resurrect a lost/won dispute into the open bucket.
+    """
+    if not isinstance(dispute_id, str) or not dispute_id:
+        return
+    record = db.execute(
+        select(models.ProductPurchaseDispute).where(
+            models.ProductPurchaseDispute.stripe_dispute_id == dispute_id)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if record is None:
+        record = models.ProductPurchaseDispute(
+            product_purchase_id=locked_purchase.id,
+            stripe_dispute_id=dispute_id)
+        try:
+            # Savepoint before the insert (the create_pending P2-A
+            # pattern): a concurrent delivery of the same dispute
+            # tripping the unique constraint must not abort the
+            # outer transaction — re-read the winner instead.
+            with db.begin_nested():
+                db.add(record)
+                db.flush()
+        except Exception:
+            record = db.execute(
+                select(models.ProductPurchaseDispute).where(
+                    models.ProductPurchaseDispute.stripe_dispute_id == dispute_id)
+            ).scalar_one_or_none()
+            if record is None:
+                raise
+    if disputed_cents is not None:
+        try:
+            record.amount_cents = int(disputed_cents)
+        except (TypeError, ValueError):
+            logger.warning("product purchase %s: unusable disputed "
+                           "amount %r for dispute %s; not persisted",
+                           locked_purchase.id, disputed_cents, dispute_id)
+    if dispute_status is None:
+        if record.status not in ("lost", "won"):
+            record.status = "open"
+    else:
+        record.status = str(dispute_status)
+    record.updated_at = _utcnow()
+    db.flush()
+
+
 def apply_dispute(db: Session, purchase, *, stripe_event_id: str,
                   dispute_status: str | None,
-                  disputed_cents: int | None = None) -> str:
+                  disputed_cents: int | None = None,
+                  dispute_id: str | None = None) -> str:
     """Record charge.dispute.created|closed (A5/F3).
 
     Open: purchase disputed + provenance, entitlement untouched (the
     dispute is not final). Closed/lost: full-revocation semantics.
     Closed/won: recorded + founder-manual flag; NEVER auto-restores a
     revoked entitlement (F3).
+
+    Remediation5 (fix 1): when the event carries the Stripe dispute
+    ID, amount + outcome are ALSO persisted per dispute
+    (``_record_product_dispute``) — the purchase row's
+    ``disputed_cents`` below remains latest-event provenance, but
+    reconciliation aggregates the per-dispute records, so several
+    disputes on one charge are never collapsed into the last one.
     """
     # Remediation3 P1: populate_existing for the same stale-instance
     # hazard as settle/apply_refund (the status transitions below
@@ -594,6 +711,11 @@ def apply_dispute(db: Session, purchase, *, stripe_event_id: str,
             logger.warning("product purchase %s: unusable disputed "
                            "amount %r; not persisted", locked.id,
                            disputed_cents)
+    # Remediation5 (fix 1): the per-dispute record is the
+    # reconciliation source of truth (see _record_product_dispute).
+    _record_product_dispute(db, locked, dispute_id=dispute_id,
+                            dispute_status=dispute_status,
+                            disputed_cents=disputed_cents)
     if dispute_status is None:  # dispute.created
         if locked.status == "completed":
             locked.status = "disputed"

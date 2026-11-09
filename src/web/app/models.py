@@ -948,6 +948,11 @@ class ProductPurchase(Base):
     # the Stripe side's per-charge cap instead of always deducting
     # the full unrefunded remainder. NULL on rows whose dispute
     # events predate the field (full-remainder fallback there).
+    # Remediation5 (fix 1): this column holds only the LATEST event's
+    # amount — per-dispute amounts/outcomes live in
+    # ProductPurchaseDispute (migration 0021) and are what
+    # reconciliation aggregates when records exist; this column
+    # remains latest-event provenance + the no-records fallback.
     disputed_cents = Column(Integer, nullable=True)
     # Remediation4 (migration 0020): the Stripe charge creation
     # timestamp, persisted at settlement from the completed session
@@ -979,6 +984,42 @@ class ProductPurchase(Base):
               postgresql_where="status = 'pending'",
               sqlite_where=sa.text("status = 'pending'")),
     )
+
+
+class ProductPurchaseDispute(Base):
+    """One Stripe dispute against a product purchase (migration 0021).
+
+    Remediation5 (issue #164 Phase A, PR #172): a charge can carry
+    SEVERAL disputes, but the purchase row's ``disputed_cents`` holds
+    only the LATEST event's amount — two lost disputes of 600¢ and
+    300¢ left ``disputed_cents=300``, and a later WON dispute could
+    overwrite an earlier LOST dispute's amount entirely. Disputes
+    are therefore persisted per dispute ID: amount + latest known
+    status, upserted idempotently across created/closed events and
+    webhook redeliveries of the same dispute (the Stripe dispute ID
+    is unique). Reconciliation's ledger side sums the amounts of
+    the disputes whose status is 'lost', under the same
+    unrefunded-remainder cap the Stripe side applies — mirroring
+    ``payment_reconcile._aggregate_disputes``. A 'won' outcome on
+    one dispute never touches another dispute's row. The purchase
+    row's ``disputed_cents`` remains as latest-event provenance and
+    as the fallback for rows whose disputes predate this table.
+    """
+
+    __tablename__ = "product_purchase_disputes"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    product_purchase_id = Column(GUID(), ForeignKey("product_purchases.id", ondelete="CASCADE"),
+                                 nullable=False, index=True)
+    stripe_dispute_id = Column(String(255), nullable=False, unique=True)
+    amount_cents = Column(Integer, nullable=True)
+    # Latest known Stripe dispute status ('lost' | 'won' | Stripe's
+    # open statuses), or 'open' for a dispute.created event, which
+    # carries no final status. No check constraint: the status set
+    # is Stripe-controlled and wider than the purchase status set.
+    status = Column(String(40), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class Entitlement(Base):

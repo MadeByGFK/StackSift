@@ -802,6 +802,19 @@ def compute_reconciliation(
     # dispute deducts only its amount, exactly as the Stripe side
     # caps it. Legacy rows without a persisted amount keep the
     # full-remainder behaviour as fallback.
+    # Remediation5 (fix 1): disputed_cents holds only the LATEST
+    # dispute event's amount, so a charge with several disputes was
+    # still under-deducted (two lost disputes of 600 + 300 left
+    # disputed_cents=300), and a won dispute could overwrite an
+    # earlier lost one's amount. When per-dispute records exist
+    # (product_purchase_disputes, migration 0021), the deduction is
+    # min(SUM of that purchase's LOST dispute amounts, amount -
+    # refunded) — the aggregate under the same cap, mirroring
+    # _aggregate_disputes on the Stripe side. A lost record without
+    # a persisted amount falls the whole purchase back to the
+    # legacy computation below (its amount is unknowable here);
+    # purchases with no records at all keep the legacy path
+    # untouched (pre-0021 disputes, direct service-level calls).
     product_disputed = db.execute(
         select(M.ProductPurchase).where(
             _product_anchor_in_range(),
@@ -809,12 +822,28 @@ def compute_reconciliation(
                 M.ProductPurchase.reversal_kind == "dispute_lost"),
         )
     ).scalars().all()
+    _dispute_records: dict = {}
+    if product_disputed:
+        for _rec in db.execute(
+            select(M.ProductPurchaseDispute).where(
+                M.ProductPurchaseDispute.product_purchase_id.in_(
+                    [p.id for p in product_disputed]))
+        ).scalars().all():
+            _dispute_records.setdefault(_rec.product_purchase_id, []).append(_rec)
+
+    def _ledger_dispute_cents(p) -> int:
+        remainder = max(0, (p.amount_cents or 0) - (p.refunded_cents or 0))
+        records = _dispute_records.get(p.id)
+        if records:
+            lost = [r for r in records if r.status == "lost"]
+            if all(r.amount_cents is not None for r in lost):
+                return min(sum(r.amount_cents for r in lost), remainder)
+        if getattr(p, "disputed_cents", None) is not None:
+            return min(p.disputed_cents, remainder)
+        return remainder
+
     product_ledger_disputes = sum(
-        (min(p.disputed_cents,
-             max(0, (p.amount_cents or 0) - (p.refunded_cents or 0)))
-         if getattr(p, "disputed_cents", None) is not None
-         else max(0, (p.amount_cents or 0) - (p.refunded_cents or 0)))
-        for p in product_disputed)
+        _ledger_dispute_cents(p) for p in product_disputed)
     for s in product_included:
         if s["id"] not in product_ledger_session_ids:
             differences.append({

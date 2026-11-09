@@ -2621,3 +2621,340 @@ def test_r4_sales_disabled_entitlement_holder_reports_list_offers_redemption(p16
     assert 'data-entitlement="1"' in listing.text
     assert "getAttribute('data-entitlement')" in listing.text
     assert "You hold an unused entitlement" in listing.text
+
+
+# --- Remediation round 5 (Codex review 5819904669 on fe3e7522: 2 P2 findings
+# --- + the migration-0020 CI defect) -----------------------------------------
+# Every regression test below FAILS on the pre-fix tree (fe3e7522) and
+# PASSES on the remediation-5 tree — verified by stashing the fixes
+# (see remediation5-phase-a-report.md). The one exception is marked
+# GUARD: it pins behaviour that must NOT change.
+
+def _r5_dispute_event(event_id, purchase, *, dispute_id, etype, amount,
+                      status=None):
+    """A dispute webhook event for a SPECIFIC dispute id (the shared
+    _charge_event helper hardcodes dp_test_1, one dispute per charge;
+    round 5 is about several disputes on one charge)."""
+    ev = _charge_event(event_id, purchase, etype=etype, amount=amount,
+                       status=status)
+    ev["data"]["object"]["id"] = dispute_id
+    return ev
+
+
+def _r5_dispute_records(p164_env, purchase_id):
+    from app import models
+    with p164_env.sessions() as db:
+        rows = db.query(models.ProductPurchaseDispute).filter(
+            models.ProductPurchaseDispute.product_purchase_id == purchase_id
+        ).all()
+        return sorted((r.stripe_dispute_id, r.amount_cents, r.status)
+                      for r in rows)
+
+
+# Fix 1: per-dispute amounts ---------------------------------------------------
+
+def test_r5_two_lost_disputes_aggregate_per_dispute(p164_env):
+    # P2 (finding 1): two lost disputes (600 + 300) on one $9 charge.
+    # Pre-fix the purchase row kept only the LATEST amount (300), so
+    # the ledger netted 600 against Stripe's 0. Per-dispute records
+    # aggregate under the cap; a redelivery of the same dispute's
+    # closed event (new webhook event id, same dispute id) updates
+    # the SAME record — never a second count.
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_a_open", purchase, dispute_id="dp_r5_a",
+        etype="charge.dispute.created", amount=600))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_a_lost", purchase, dispute_id="dp_r5_a",
+        etype="charge.dispute.closed", amount=600, status="lost"))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_a_lost_redelivery", purchase, dispute_id="dp_r5_a",
+        etype="charge.dispute.closed", amount=600, status="lost"))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_b_open", purchase, dispute_id="dp_r5_b",
+        etype="charge.dispute.created", amount=300))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_b_lost", purchase, dispute_id="dp_r5_b",
+        etype="charge.dispute.closed", amount=300, status="lost"))
+    assert _r5_dispute_records(p164_env, purchase.id) == [
+        ("dp_r5_a", 600, "lost"), ("dp_r5_b", 300, "lost")]
+    with p164_env.sessions() as db:
+        assert db.query(models.Entitlement).one().status == "revoked"
+        p = db.get(models.ProductPurchase, purchase.id)
+        day = p.completed_at.date()
+        charge = {"id": "ch_r5_two", "amount": 900, "amount_refunded": 0,
+                  "payment_intent": "pi_test_1", "metadata": {},
+                  "disputed": True,
+                  # The Stripe side's aggregate of the two disputes.
+                  "dispute": {"status": "lost", "amount": 900}}
+        result = PR.compute_reconciliation(
+            db, day, [_r3_product_session(purchase.id)], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["stripe_dispute_cents"] == 900
+    assert fam["ledger_dispute_cents"] == 900
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 0
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+def test_r5_won_dispute_does_not_erase_earlier_lost_dispute(p164_env):
+    # P2 (finding 1, won leg): a WON dispute (300) arriving after a
+    # LOST one (600) must not overwrite the lost amount — pre-fix
+    # disputed_cents became 300 (the won dispute's amount) while the
+    # Stripe side aggregates non-won disputes only (600).
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_c_open", purchase, dispute_id="dp_r5_c",
+        etype="charge.dispute.created", amount=600))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_c_lost", purchase, dispute_id="dp_r5_c",
+        etype="charge.dispute.closed", amount=600, status="lost"))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_d_open", purchase, dispute_id="dp_r5_d",
+        etype="charge.dispute.created", amount=300))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_d_won", purchase, dispute_id="dp_r5_d",
+        etype="charge.dispute.closed", amount=300, status="won"))
+    assert _r5_dispute_records(p164_env, purchase.id) == [
+        ("dp_r5_c", 600, "lost"), ("dp_r5_d", 300, "won")]
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        # F3 preserved: the won dispute flags manual review and the
+        # revoked entitlement is NOT auto-restored.
+        assert p.needs_manual_review is True
+        assert db.query(models.Entitlement).one().status == "revoked"
+        day = p.completed_at.date()
+        charge = {"id": "ch_r5_won", "amount": 900, "amount_refunded": 0,
+                  "payment_intent": "pi_test_1", "metadata": {},
+                  "disputed": True,
+                  "dispute": {"status": "lost", "amount": 600}}
+        result = PR.compute_reconciliation(
+            db, day, [_r3_product_session(purchase.id)], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["stripe_dispute_cents"] == 600
+    assert fam["ledger_dispute_cents"] == 600
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 300
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+def test_r5_lost_dispute_aggregate_capped_at_unrefunded_remainder(p164_env):
+    # P2 (finding 1, cap leg): the per-dispute aggregate is capped
+    # at the unrefunded remainder, mirroring the Stripe side: lost
+    # disputes of 600 + 300 with a 300 partial refund deduct 600,
+    # never 900 (no double-count past the charge).
+    from app import payment_reconcile as PR
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _settled_purchase(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_r5_partial_refund", purchase, etype="charge.refunded",
+        amount=900, refunded=300))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_e_lost", purchase, dispute_id="dp_r5_e",
+        etype="charge.dispute.closed", amount=600, status="lost"))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_f_lost", purchase, dispute_id="dp_r5_f",
+        etype="charge.dispute.closed", amount=300, status="lost"))
+    with p164_env.sessions() as db:
+        from app import models
+        p = db.get(models.ProductPurchase, purchase.id)
+        day = p.completed_at.date()
+        charge = {"id": "ch_r5_cap", "amount": 900, "amount_refunded": 300,
+                  "payment_intent": "pi_test_1", "metadata": {},
+                  "disputed": True,
+                  "dispute": {"status": "lost", "amount": 900}}
+        result = PR.compute_reconciliation(
+            db, day, [_r3_product_session(purchase.id)], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["ledger_refund_cents"] == 300
+    assert fam["stripe_refund_cents"] == 300
+    assert fam["ledger_dispute_cents"] == 600
+    assert fam["stripe_dispute_cents"] == 600
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 0
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+# Fix 2: reversed-before-completion accounting ---------------------------------
+
+def _r5_pending_with_pi(p164_env, user_id, rid):
+    from app import models
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        p.stripe_payment_intent_id = "pi_test_1"
+        db.commit()
+    return purchase
+
+
+def _r5_completed_event_with_anchor(event_id, purchase, anchor, **kw):
+    ev = _product_completed_event(event_id, purchase, **kw)
+    ev["created"] = int(anchor.timestamp())
+    ev["data"]["object"]["created"] = int(anchor.timestamp())
+    return ev
+
+
+def test_r5_full_refund_before_completion_records_payment_facts(p164_env):
+    # P2 (finding 2, refund leg): a pending purchase fully refunded
+    # BEFORE checkout.session.completed is terminal with NO
+    # completed_at / charge anchor, so reconciliation excluded it
+    # forever while Stripe included its paid session (false
+    # stripe_session_without_purchase; payment and reversal both
+    # invisible). The late completion event must record the
+    # validated payment facts WITHOUT granting, changing the
+    # terminal status, or resurrecting the purchase.
+    from app import payment_reconcile as PR
+    from app import models
+    from app.credits import _as_aware
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _r5_pending_with_pi(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_r5_refund_first", purchase, etype="charge.refunded"))
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.status == "refunded"
+        assert p.completed_at is None  # premise: no accounting facts
+    anchor = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+    r = _post_event(p164_env, _r5_completed_event_with_anchor(
+        "evt_r5_late_complete", purchase, anchor))
+    assert r.json()["status"] == "duplicate"  # still no grant
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.status == "refunded"  # terminal status untouched
+        assert p.completed_at is not None
+        assert _as_aware(p.stripe_charge_created_at) == anchor
+        assert db.query(models.Entitlement).count() == 0
+        recorded_completed_at = p.completed_at
+    # Redelivery: facts do not move, still no grant.
+    r2 = _post_event(p164_env, _r5_completed_event_with_anchor(
+        "evt_r5_late_complete_redelivery", purchase, anchor))
+    assert r2.json()["status"] == "duplicate"
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.completed_at == recorded_completed_at
+        assert db.query(models.Entitlement).count() == 0
+        charge = {"id": "ch_r5_early_refund", "amount": 900,
+                  "amount_refunded": 900, "payment_intent": "pi_test_1",
+                  "metadata": {}, "disputed": False}
+        result = PR.compute_reconciliation(
+            db, anchor.date(), [_r3_product_session(purchase.id)], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["ledger_gross_cents"] == 900
+    assert fam["stripe_gross_cents"] == 900
+    assert fam["ledger_refund_cents"] == 900
+    assert fam["stripe_refund_cents"] == 900
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 0
+    assert not any(d["kind"] == "stripe_session_without_purchase"
+                   for d in result["differences"])
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+def test_r5_lost_dispute_before_completion_records_payment_facts(p164_env):
+    # P2 (finding 2, dispute leg — the verification record's exact
+    # example): a $9 payment with an early $3 lost dispute reported
+    # Stripe net 600 vs ledger net 0, because the terminally
+    # disputed purchase recorded no accounting facts.
+    from app import payment_reconcile as PR
+    from app import models
+    from app.credits import _as_aware
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _r5_pending_with_pi(p164_env, user_id, rid)
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_g_open", purchase, dispute_id="dp_r5_g",
+        etype="charge.dispute.created", amount=300))
+    _post_event(p164_env, _r5_dispute_event(
+        "evt_r5_g_lost", purchase, dispute_id="dp_r5_g",
+        etype="charge.dispute.closed", amount=300, status="lost"))
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.status == "disputed"
+        assert p.completed_at is None  # premise: no accounting facts
+        assert getattr(p, "dispute_lost_at", None) is not None
+    anchor = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+    r = _post_event(p164_env, _r5_completed_event_with_anchor(
+        "evt_r5_complete_after_lost", purchase, anchor))
+    assert r.json()["status"] == "duplicate"
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.status == "disputed"  # NOT resurrected
+        assert p.completed_at is not None
+        assert _as_aware(p.stripe_charge_created_at) == anchor
+        assert db.query(models.Entitlement).count() == 0
+        charge = {"id": "ch_r5_early_dispute", "amount": 900,
+                  "amount_refunded": 0, "payment_intent": "pi_test_1",
+                  "metadata": {}, "disputed": True,
+                  "dispute": {"status": "lost", "amount": 300}}
+        result = PR.compute_reconciliation(
+            db, anchor.date(), [_r3_product_session(purchase.id)], [charge])
+    fam = result["per_family"]["product"]
+    assert fam["ledger_gross_cents"] == 900
+    assert fam["stripe_gross_cents"] == 900
+    assert fam["ledger_dispute_cents"] == 300
+    assert fam["stripe_dispute_cents"] == 300
+    assert fam["stripe_net_cents"] == fam["ledger_net_cents"] == 600
+    assert not any(d["kind"] == "stripe_session_without_purchase"
+                   for d in result["differences"])
+    assert not any(d["kind"] == "family_total_mismatch"
+                   for d in result["differences"])
+
+
+def test_r5_reversed_purchase_completion_with_bad_facts_records_nothing(p164_env):
+    # GUARD (passes pre- and post-fix by design): a completion event
+    # whose facts settlement would REJECT (amount mismatch) must
+    # not record accounting facts on a terminally reversed purchase
+    # and must not move its status — fact recording runs the same
+    # strict validation as settlement, never a bare timestamp copy.
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _r5_pending_with_pi(p164_env, user_id, rid)
+    _post_event(p164_env, _charge_event(
+        "evt_r5_refund_guard", purchase, etype="charge.refunded"))
+    anchor = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+    r = _post_event(p164_env, _r5_completed_event_with_anchor(
+        "evt_r5_bad_complete", purchase, anchor, amount=800))
+    assert r.json()["status"] == "duplicate"
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert p.status == "refunded"
+        assert p.completed_at is None
+        assert getattr(p, "stripe_charge_created_at", None) is None
+        assert db.query(models.Entitlement).count() == 0
+
+
+# Fix 3: migration revision ids fit the PostgreSQL column -----------------------
+
+def test_r5_alembic_revision_ids_fit_postgres_version_num_column():
+    # PG-shaped guard for fix 3: alembic_version.version_num is
+    # varchar(32) on PostgreSQL. Migration 0020's original revision
+    # id was 39 chars — every SQLite suite passed (SQLite does not
+    # enforce the length) while ALL 192 PostgreSQL CI legs errored
+    # at fixture setup with StringDataRightTruncation. Assert the
+    # invariant directly from the version files so it is caught
+    # locally on any future migration.
+    import ast
+    from pathlib import Path
+    versions_dir = Path(__file__).parents[1] / "alembic" / "versions"
+    offenders = []
+    for path in sorted(versions_dir.glob("*.py")):
+        for node in ast.parse(path.read_text()).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if any(isinstance(t, ast.Name) and t.id == "revision"
+                   for t in node.targets):
+                revision = ast.literal_eval(node.value)
+                if len(revision) > 32:
+                    offenders.append((path.name, revision))
+    assert offenders == []
