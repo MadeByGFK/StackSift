@@ -571,10 +571,32 @@
     var raw = btn ? btn.getAttribute('data-formats') : '';
     return raw ? raw.split(',').filter(function (f) { return f; }) : [];
   }
+  // PR #177 P1 remediation: two controls per report since S3-G2
+  // (the row Share button and the share-state line's Turn off
+  // control); state is per-report, mirrored across both controls.
+  // Both controls carry separate DOM copies of the same
+  // server-rendered keys/formats, so every mutation must sync all
+  // peers for that report — otherwise a peer keeps a consumed
+  // idempotency key and a later action through it replays that key
+  // as a server-side no-op while reporting success.
+  function sharePeersFor(btn) {
+    if (!btn) { return []; }
+    var reportId = btn.getAttribute('data-report');
+    var peers = [];
+    document.querySelectorAll('.share-open').forEach(function (candidate) {
+      if (candidate.getAttribute('data-report') === reportId) { peers.push(candidate); }
+    });
+    return peers.length ? peers : [btn];
+  }
+  function setShareKeyFor(btn, attr, value) {
+    sharePeersFor(btn).forEach(function (peer) { peer.setAttribute(attr, value); });
+  }
   function setActiveFormatsFor(btn, formats) {
     if (!btn) { return; }
-    btn.setAttribute('data-formats', formats.join(','));
-    btn.setAttribute('data-active', formats.length ? '1' : '');
+    sharePeersFor(btn).forEach(function (peer) {
+      peer.setAttribute('data-formats', formats.join(','));
+      peer.setAttribute('data-active', formats.length ? '1' : '');
+    });
   }
   function shareFormatIsActiveFor(btn, fmt) {
     return activeFormatsFor(btn).indexOf(fmt) !== -1;
@@ -700,7 +722,7 @@
     var createdFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share',
               originBtn.getAttribute('data-create-key')).then(function (d) {
-      if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); }
+      if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); setShareKeyFor(originBtn, 'data-create-key', originBtn.getAttribute('data-create-key')); }
       if (d._httpOk && d.share_url) { addActiveShareFormatFor(originBtn, createdFormat); }
       if (current !== originBtn) { return; }
       if (d._httpOk && d.share_url) {
@@ -723,7 +745,7 @@
     var rotatedFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share/rotate',
               originBtn.getAttribute('data-rotate-key')).then(function (d) {
-      if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); }
+      if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); setShareKeyFor(originBtn, 'data-rotate-key', originBtn.getAttribute('data-rotate-key')); }
       if (current !== originBtn) { return; }
       if (d._httpOk && d.share_url) {
         // PR #138 remediation round 3: as in create above, guard
@@ -746,7 +768,7 @@
       // leaves the link active: surface the error and keep state.
       var revoked = d._httpOk && d.status === 'revoked';
       if (revoked) {
-        originBtn.setAttribute('data-revoke-key', freshShareKey());
+        originBtn.setAttribute('data-revoke-key', freshShareKey()); setShareKeyFor(originBtn, 'data-revoke-key', originBtn.getAttribute('data-revoke-key'));
         removeActiveShareFormatFor(originBtn, revokedFormat);
       }
       if (current !== originBtn) { return; }

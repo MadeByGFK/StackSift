@@ -727,6 +727,16 @@ const rowA = makeRow('A', 'Expires 2026-11-11', 'Expires in 7 days');
 const rowB = makeRow('B', 'Expires 2026-11-11', 'Expires in 7 days');
 const shareBtnA = makeShareBtn('A');
 const shareBtnB = makeShareBtn('B');
+const sharePeer1 = makeShareBtn('peer1');
+sharePeer1.setAttribute('data-report', 'P');
+sharePeer1.setAttribute('data-create-key', 'create-P');
+sharePeer1.setAttribute('data-rotate-key', 'rotate-P');
+sharePeer1.setAttribute('data-revoke-key', 'revoke-P');
+const sharePeer2 = makeShareBtn('peer2');
+sharePeer2.setAttribute('data-report', 'P');
+sharePeer2.setAttribute('data-create-key', 'create-P');
+sharePeer2.setAttribute('data-rotate-key', 'rotate-P');
+sharePeer2.setAttribute('data-revoke-key', 'revoke-P');
 globalThis.window = globalThis;
 globalThis.__productReady = true;
 globalThis.location = { origin: 'https://example.test' };
@@ -741,7 +751,7 @@ globalThis.document = {
   querySelectorAll: function (sel) {
     if (sel === 'form[data-confirm]') { return [rowA.form, rowB.form]; }
     if (sel === 'form[data-retention-form]') { return [rowA.form, rowB.form]; }
-    if (sel === '.share-open') { return [shareBtnA, shareBtnB]; }
+    if (sel === '.share-open') { return [shareBtnA, shareBtnB, sharePeer1, sharePeer2]; }
     if (sel === 'input[name="share-format"]') { return radios; }
     return [];
   },
@@ -872,3 +882,95 @@ def test_s3_browser_share_switched_during_async_response():
     assert "TOKEN-A" not in out["msg"]
     assert out["linkValue"] == ""
     assert out["linkDisplay"] == "none"
+
+
+@pytestmark_js
+def test_s3_browser_share_peer_controls_sync_keys_and_formats():
+    """PR #177 P1 regression: TWO share-open controls for the SAME
+    report (row Share + S3-G2 Turn off) must mirror share state.
+    Revoke via control 1 consumes its revoke key and freshens it;
+    the peer must receive the SAME fresh key, otherwise a later
+    revoke via the peer replays the consumed key, the server's
+    prior-replay branch returns revoked without revoking the new
+    token, and the client reports success while the new link stays
+    live. This test drives revoke(1) -> create -> revoke(2) and
+    asserts peer key/format/active sync at each step. It fails on
+    the pre-fix reports.html (peer keeps the consumed key)."""
+    out = _run_js("""
+      const calls = [];
+      fetchImpl = function (url, opts) {
+        const key = opts && opts.body ? opts.body.get('idempotency_key') : null;
+        calls.push({ url: url, key: key });
+        if (url.indexOf('/share/revoke') !== -1) {
+          return Promise.resolve({ ok: true, status: 200,
+            json: function () { return Promise.resolve({ status: 'revoked' }); } });
+        }
+        if (url.indexOf('/share') !== -1) {
+          return Promise.resolve({ ok: true, status: 200,
+            json: function () { return Promise.resolve({ share_url: '/s/NEWTOKEN' }); } });
+        }
+        return Promise.reject(new Error('unexpected url ' + url));
+      };
+      // Sharing is on for report P on both controls (server render).
+      [sharePeer1, sharePeer2].forEach(function (b) {
+        b.setAttribute('data-formats', 'txt');
+        b.setAttribute('data-active', '1');
+      });
+      out.initialRevoke = sharePeer1.getAttribute('data-revoke-key');
+      // (1) Revoke via control 1.
+      await click(sharePeer1);
+      await click(byId('share-revoke'));
+      out.revokeCalls1 = calls.filter(function (c) { return c.url.indexOf('/revoke') !== -1; });
+      out.afterRevoke1Peer1Key = sharePeer1.getAttribute('data-revoke-key');
+      out.afterRevoke1Peer2Key = sharePeer2.getAttribute('data-revoke-key');
+      out.afterRevoke1Peer1Formats = sharePeer1.getAttribute('data-formats');
+      out.afterRevoke1Peer2Formats = sharePeer2.getAttribute('data-formats');
+      out.afterRevoke1Peer1Active = sharePeer1.getAttribute('data-active');
+      out.afterRevoke1Peer2Active = sharePeer2.getAttribute('data-active');
+      // (2) Create a new link via control 1, then revoke via control 2.
+      await click(sharePeer1);
+      await click(byId('share-create'));
+      out.afterCreatePeer1Formats = sharePeer1.getAttribute('data-formats');
+      out.afterCreatePeer2Formats = sharePeer2.getAttribute('data-formats');
+      out.afterCreatePeer1Active = sharePeer1.getAttribute('data-active');
+      out.afterCreatePeer2Active = sharePeer2.getAttribute('data-active');
+      out.afterCreatePeer1CreateKey = sharePeer1.getAttribute('data-create-key');
+      out.afterCreatePeer2CreateKey = sharePeer2.getAttribute('data-create-key');
+      await click(sharePeer2);
+      await click(byId('share-revoke'));
+      out.calls = calls;
+      out.revokeCalls = calls.filter(function (c) { return c.url.indexOf('/revoke') !== -1; });
+      out.finalPeer1Formats = sharePeer1.getAttribute('data-formats');
+      out.finalPeer2Formats = sharePeer2.getAttribute('data-formats');
+      out.finalPeer1Active = sharePeer1.getAttribute('data-active');
+      out.finalPeer2Active = sharePeer2.getAttribute('data-active');
+      out.finalPeer1RevokeKey = sharePeer1.getAttribute('data-revoke-key');
+      out.finalPeer2RevokeKey = sharePeer2.getAttribute('data-revoke-key');
+    """)
+    # (1) Both controls' revoke keys freshened together, to the same value.
+    assert out["initialRevoke"] == "revoke-P"
+    assert out["revokeCalls1"][0]["key"] == "revoke-P"
+    assert out["afterRevoke1Peer1Key"] != "revoke-P"
+    assert out["afterRevoke1Peer2Key"] != "revoke-P"
+    assert out["afterRevoke1Peer1Key"] == out["afterRevoke1Peer2Key"]
+    assert out["afterRevoke1Peer1Formats"] == ""
+    assert out["afterRevoke1Peer2Formats"] == ""
+    assert out["afterRevoke1Peer1Active"] == ""
+    assert out["afterRevoke1Peer2Active"] == ""
+    # Create syncs formats/active (and its fresh create key) to both peers.
+    assert out["afterCreatePeer1Formats"] == "txt"
+    assert out["afterCreatePeer2Formats"] == "txt"
+    assert out["afterCreatePeer1Active"] == "1"
+    assert out["afterCreatePeer2Active"] == "1"
+    assert out["afterCreatePeer1CreateKey"] != "create-P"
+    assert out["afterCreatePeer2CreateKey"] == out["afterCreatePeer1CreateKey"]
+    # (2) Revoke via the peer uses the FRESH key, not the consumed one.
+    assert len(out["revokeCalls"]) == 2
+    assert out["revokeCalls"][1]["key"] == out["afterRevoke1Peer2Key"]
+    assert out["revokeCalls"][1]["key"] != "revoke-P"
+    assert out["finalPeer1Formats"] == ""
+    assert out["finalPeer2Formats"] == ""
+    assert out["finalPeer1Active"] == ""
+    assert out["finalPeer2Active"] == ""
+    assert out["finalPeer1RevokeKey"] == out["finalPeer2RevokeKey"]
+    assert out["finalPeer1RevokeKey"] != out["afterRevoke1Peer1Key"]
