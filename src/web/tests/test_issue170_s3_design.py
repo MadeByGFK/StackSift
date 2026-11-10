@@ -657,7 +657,9 @@ class El {
     this.value = ''; this.href = ''; this.dataset = {};
     this.attrs = {}; this.listeners = {}; this.checked = false;
     this.disabled = false; this.classList = new ClassList();
+    this.className = ''; this.children = [];
   }
+  appendChild(child) { this.children.push(child); return child; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
@@ -737,6 +739,49 @@ sharePeer2.setAttribute('data-report', 'P');
 sharePeer2.setAttribute('data-create-key', 'create-P');
 sharePeer2.setAttribute('data-rotate-key', 'rotate-P');
 sharePeer2.setAttribute('data-revoke-key', 'revoke-P');
+// PR #177 P2 fixtures: a fake table row per report so the
+// share-state line sync can be driven. Report P was share-active
+// at page load, so the server rendered its .s3-share-state line
+// inside the row's .s3-state-cell and BOTH peer controls live in
+// that row (closest('.card') -> the row). Report Q was unshared
+// at page load: its row has a state cell but NO line element.
+function makeShareRow(prefix, withLine) {
+  const stateCell = new El(prefix + '-state-cell');
+  const line = withLine ? new El(prefix + '-share-line') : null;
+  if (line) {
+    line.className = 's3-share-state'; line.style.display = '';
+    stateCell.children.push(line);
+  }
+  const row = new El(prefix + '-card');
+  row.querySelector = function (sel) {
+    if (sel === '.s3-state-cell') { return stateCell; }
+    if (sel === '.s3-share-state') {
+      if (line) { return line; }
+      for (const child of stateCell.children) {
+        if (child.className === 's3-share-state') { return child; }
+      }
+      return null;
+    }
+    return null;
+  };
+  return { row: row, stateCell: stateCell, line: line };
+}
+const shareRowP = makeShareRow('P', true);
+sharePeer1.closest = function (sel) { return sel === '.card' ? shareRowP.row : null; };
+sharePeer2.closest = function (sel) { return sel === '.card' ? shareRowP.row : null; };
+const shareRowQ = makeShareRow('Q', false);
+const shareQ1 = makeShareBtn('Q1');
+shareQ1.setAttribute('data-report', 'Q');
+shareQ1.setAttribute('data-create-key', 'create-Q');
+shareQ1.setAttribute('data-rotate-key', 'rotate-Q');
+shareQ1.setAttribute('data-revoke-key', 'revoke-Q');
+shareQ1.closest = function (sel) { return sel === '.card' ? shareRowQ.row : null; };
+const shareQ2 = makeShareBtn('Q2');
+shareQ2.setAttribute('data-report', 'Q');
+shareQ2.setAttribute('data-create-key', 'create-Q');
+shareQ2.setAttribute('data-rotate-key', 'rotate-Q');
+shareQ2.setAttribute('data-revoke-key', 'revoke-Q');
+shareQ2.closest = function (sel) { return sel === '.card' ? shareRowQ.row : null; };
 globalThis.window = globalThis;
 globalThis.__productReady = true;
 globalThis.location = { origin: 'https://example.test' };
@@ -751,7 +796,7 @@ globalThis.document = {
   querySelectorAll: function (sel) {
     if (sel === 'form[data-confirm]') { return [rowA.form, rowB.form]; }
     if (sel === 'form[data-retention-form]') { return [rowA.form, rowB.form]; }
-    if (sel === '.share-open') { return [shareBtnA, shareBtnB, sharePeer1, sharePeer2]; }
+    if (sel === '.share-open') { return [shareBtnA, shareBtnB, sharePeer1, sharePeer2, shareQ1, shareQ2]; }
     if (sel === 'input[name="share-format"]') { return radios; }
     return [];
   },
@@ -762,6 +807,10 @@ globalThis.document = {
     const m = sel.match(/\[value="(\w+)"\]/);
     if (m) { return radios.find(function (r) { return r.value === m[1]; }) || null; }
     return null;
+  },
+  createElement: function (tag) { return new El('created-' + tag); },
+  createTextNode: function (t) {
+    const n = new El('text-node'); n.textContent = t; return n;
   },
 };
 let fetchImpl = function () { return Promise.reject(new Error('fetch not stubbed')); };
@@ -974,3 +1023,89 @@ def test_s3_browser_share_peer_controls_sync_keys_and_formats():
     assert out["finalPeer2Active"] == ""
     assert out["finalPeer1RevokeKey"] == out["finalPeer2RevokeKey"]
     assert out["finalPeer1RevokeKey"] != out["afterRevoke1Peer1Key"]
+
+
+@pytestmark_js
+def test_s3_browser_share_state_line_syncs_after_mutations():
+    """PR #177 P2 regression (Codex thread r4527852735): the
+    server-rendered .s3-share-state line must sync with share
+    mutations without a reload. Scenario P (line rendered, sharing
+    on): revoking the last active format HIDES the line; a later
+    create shows it again. Scenario Q (no line rendered, sharing
+    off): the first successful create BUILDS the line in the state
+    cell, matching the server render (class, verbatim text, Turn
+    off share-open button carrying the row's post-sync data-*),
+    and clicking that built Turn off button opens the share modal.
+    Fails on the pre-fix reports.html: no line sync exists, so the
+    line stays visible after the last revoke and is never built
+    on the first create."""
+    out = _run_js("""
+      fetchImpl = function (url, opts) {
+        if (url.indexOf('/share/revoke') !== -1) {
+          return Promise.resolve({ ok: true, status: 200,
+            json: function () { return Promise.resolve({ status: 'revoked' }); } });
+        }
+        if (url.indexOf('/share') !== -1) {
+          return Promise.resolve({ ok: true, status: 200,
+            json: function () { return Promise.resolve({ share_url: '/s/NEWTOKEN' }); } });
+        }
+        return Promise.reject(new Error('unexpected url ' + url));
+      };
+      // --- Scenario P: line present, sharing on (server render).
+      [sharePeer1, sharePeer2].forEach(function (b) {
+        b.setAttribute('data-formats', 'txt');
+        b.setAttribute('data-active', '1');
+      });
+      out.pInitialDisplay = shareRowP.line.style.display;
+      await click(sharePeer1);
+      await click(byId('share-revoke'));
+      out.pAfterRevokeDisplay = shareRowP.line.style.display;
+      out.pAfterRevokeFormats = sharePeer1.getAttribute('data-formats');
+      out.pAfterRevokeActive = sharePeer1.getAttribute('data-active');
+      await click(sharePeer1);
+      await click(byId('share-create'));
+      out.pAfterCreateDisplay = shareRowP.line.style.display;
+      out.pAfterCreateFormats = sharePeer1.getAttribute('data-formats');
+      // --- Scenario Q: no line, sharing off; first create builds it.
+      out.qCellChildrenBefore = shareRowQ.stateCell.children.length;
+      await click(shareQ1);
+      await click(byId('share-create'));
+      out.qCellChildrenAfter = shareRowQ.stateCell.children.length;
+      const builtLine = shareRowQ.stateCell.children.length
+        ? shareRowQ.stateCell.children[shareRowQ.stateCell.children.length - 1]
+        : null;
+      out.qLineClass = builtLine ? builtLine.className : null;
+      out.qLineText = (builtLine && builtLine.children.length)
+        ? builtLine.children[0].textContent : null;
+      let turnOffBtn = null;
+      if (builtLine) {
+        for (const child of builtLine.children) {
+          if (child.textContent === 'Turn off') { turnOffBtn = child; }
+        }
+      }
+      out.qTurnOffClass = turnOffBtn ? turnOffBtn.className : null;
+      out.qTurnOffReport = turnOffBtn ? turnOffBtn.getAttribute('data-report') : null;
+      out.qTurnOffFormats = turnOffBtn ? turnOffBtn.getAttribute('data-formats') : null;
+      await click(byId('share-close'));
+      out.qModalBeforeTurnOff = byId('share-modal').style.display;
+      if (turnOffBtn) { await click(turnOffBtn); }
+      out.qModalAfterTurnOff = byId('share-modal').style.display;
+    """)
+    # Scenario P: hide on last revoke, show again on create.
+    assert out["pInitialDisplay"] == ""
+    assert out["pAfterRevokeDisplay"] == "none"
+    assert out["pAfterRevokeFormats"] == ""
+    assert out["pAfterRevokeActive"] == ""
+    assert out["pAfterCreateDisplay"] == ""
+    assert out["pAfterCreateFormats"] == "txt"
+    # Scenario Q: the line is built on first create, server-shaped.
+    assert out["qCellChildrenBefore"] == 0
+    assert out["qCellChildrenAfter"] == 1
+    assert out["qLineClass"] == "s3-share-state"
+    assert out["qLineText"] == \
+        "Link sharing on — anyone with the link can view "
+    assert out["qTurnOffClass"] == "btn btn-ghost share-open"
+    assert out["qTurnOffReport"] == "Q"
+    assert out["qTurnOffFormats"] == "txt"
+    assert out["qModalBeforeTurnOff"] == "none"
+    assert out["qModalAfterTurnOff"] == "flex"

@@ -597,6 +597,50 @@
       peer.setAttribute('data-formats', formats.join(','));
       peer.setAttribute('data-active', formats.length ? '1' : '');
     });
+    syncShareStateLineFor(btn);
+  }
+  // PR #177 P2 remediation (Codex thread r4527852735): the
+  // .s3-share-state line ("Link sharing on ..." + its Turn off
+  // control) is rendered server-side only when the row was
+  // share-active at page load, so peer attribute mirroring alone
+  // left it stale: revoking the last active format kept the line
+  // (and a live Turn off control) visible until reload, and
+  // creating the first link on an initially unshared report never
+  // added it. Every successful create/revoke funnels through
+  // setActiveFormatsFor, so the line syncs here. Hide (never
+  // remove) on empty formats so the hidden Turn off peer stays in
+  // the DOM and peer-sync keeps working; show restores it. When
+  // the line was never rendered, build it to match the server
+  // render and wire its Turn off button through openShareModal
+  // exactly like the existing .share-open controls.
+  function syncShareStateLineFor(btn) {
+    var formats = activeFormatsFor(btn);
+    var row = (btn && typeof btn.closest === 'function') ? btn.closest('.card') : null;
+    if (!row || typeof row.querySelector !== 'function') { return; }
+    var line = row.querySelector('.s3-share-state');
+    if (formats.length > 0) {
+      if (line) { line.style.display = ''; return; }
+      if (typeof document.createElement !== 'function'
+          || typeof document.createTextNode !== 'function') { return; }
+      var cell = row.querySelector('.s3-state-cell');
+      if (!cell) { return; }
+      var span = document.createElement('span');
+      span.className = 's3-share-state';
+      span.appendChild(document.createTextNode('Link sharing on — anyone with the link can view '));
+      var turnOff = document.createElement('button');
+      turnOff.setAttribute('type', 'button');
+      turnOff.className = 'btn btn-ghost share-open';
+      turnOff.textContent = 'Turn off';
+      ['data-report', 'data-create-key', 'data-rotate-key', 'data-revoke-key',
+       'data-active', 'data-formats', 'data-unlocked'].forEach(function (attr) {
+        turnOff.setAttribute(attr, btn.getAttribute(attr) || '');
+      });
+      turnOff.addEventListener('click', function () { openShareModal(turnOff); });
+      span.appendChild(turnOff);
+      cell.appendChild(span);
+    } else if (line) {
+      line.style.display = 'none';
+    }
   }
   function shareFormatIsActiveFor(btn, fmt) {
     return activeFormatsFor(btn).indexOf(fmt) !== -1;
@@ -690,23 +734,24 @@
         });
       });
   }
-  document.querySelectorAll('.share-open').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      current = btn;
-      clearDisplayedLink();
-      var txtRadio = document.querySelector('input[name="share-format"][value="txt"]');
-      if (txtRadio) { txtRadio.checked = true; }
-      var active = shareFormatIsActiveFor(btn, 'txt');
-      createBtn.style.display = active ? 'none' : '';
-      rotateBtn.style.display = active ? '' : 'none';
-      revokeBtn.style.display = active ? '' : 'none';
-      shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
-      var unlocked = btn.getAttribute('data-unlocked') === '1';
-      document.querySelectorAll('.share-lock-note').forEach(function (n) {
-        n.style.display = unlocked ? 'none' : '';
-      });
-      shareModal.style.display = 'flex';
+  function openShareModal(btn) {
+    current = btn;
+    clearDisplayedLink();
+    var txtRadio = document.querySelector('input[name="share-format"][value="txt"]');
+    if (txtRadio) { txtRadio.checked = true; }
+    var active = shareFormatIsActiveFor(btn, 'txt');
+    createBtn.style.display = active ? 'none' : '';
+    rotateBtn.style.display = active ? '' : 'none';
+    revokeBtn.style.display = active ? '' : 'none';
+    shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+    var unlocked = btn.getAttribute('data-unlocked') === '1';
+    document.querySelectorAll('.share-lock-note').forEach(function (n) {
+      n.style.display = unlocked ? 'none' : '';
     });
+    shareModal.style.display = 'flex';
+  }
+  document.querySelectorAll('.share-open').forEach(function (btn) {
+    btn.addEventListener('click', function () { openShareModal(btn); });
   });
   document.getElementById('share-close').addEventListener('click', function () {
     shareModal.style.display = 'none';
