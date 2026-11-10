@@ -95,6 +95,25 @@ def test_s2_entry_cards_link_existing_routes_without_price_text():
     # no staged multi-file list on the Analyze surface.
     assert "$" not in seg
     assert "staged" not in seg.lower()
+    # Codex round-1 remediation (PR #176): pin the COMPLETE approved
+    # card copy, so a price/size/retention claim cannot be appended
+    # without failing here (the $ / staged checks alone let e.g.
+    # "Costs 3 credits; up to 100 MB; retained for 30 days." pass).
+    card_text = re.findall(
+        r'<span class="s2-entry-(?:title|sub|link)">([^<]+)</span>', seg)
+    assert card_text == [
+        "Compare two logs",
+        "Upload a before and an after log and see what changed "
+        "between them.",
+        "Compare logs →",
+        "Batch analysis",
+        "Upload 2 to 5 log files and get one combined report, in "
+        "upload order.",
+        "Start a batch →",
+    ], card_text
+    assert not re.search(
+        r"credit|\$|\bMB\b|\bGB\b|retained|retention|\bcosts?\b|"
+        r"\bprice|\bfree\b", seg, re.IGNORECASE), seg
     assert 'data-s2-entry="compare"' in html
     assert html.count('type="file"') == 1  # single-file form only
 
@@ -115,12 +134,25 @@ def test_s2_css_block_is_analyze_scoped():
     # style.css (so the S4 test's own marker-to-EOF slice stays
     # purely S4); this slice ends at the next slice's marker.
     block = CSS[CSS.index(marker):CSS.index("Issue #170 S4")]
+    # The marker sits inside the block's header comment: drop that
+    # comment's tail, then strip any remaining comments, so comment
+    # text (which contains commas) cannot satisfy or break a
+    # selector check.
+    block = block.split("*/", 1)[1]
+    block = re.sub(r"/\*.*?\*/", "", block, flags=re.S)
     selectors = re.findall(r"([^{}]+)\{", block)
     assert selectors, "no rules in the S2 block"
-    for sel in selectors:
-        if sel.strip().startswith("@media"):
+    for group in selectors:
+        if group.strip().startswith("@media"):
             continue  # the media wrapper; its inner rule is checked too
-        assert ".s2" in sel, f"unscoped selector in S2 block: {sel!r}"
+        # Codex round-1 remediation (PR #176): validate EACH selector
+        # in a comma list independently, against the actual .s2-
+        # class prefix — a list like ".s2-entry-card:hover, body"
+        # must fail, not pass on the strength of its first member.
+        for sel in group.split(","):
+            sel = sel.strip()
+            assert re.search(r"\.s2-", sel), \
+                f"unscoped selector in S2 block: {sel!r}"
     assert ".s2-entry-card" in block and ".s2-panel" in block
     assert "var(--accent)" in block and "var(--panel)" in block
 
@@ -162,6 +194,23 @@ def test_s2_form_fields_and_js_hooks_verbatim():
                  "fi.files = ev.dataTransfer.files"):
         assert hook in html, hook
     assert "form.dataset.submitting" in html  # duplicate-submit guard
+
+
+def test_s2_script_blocks_byte_identical_to_base():
+    """Codex round-1 remediation (PR #176): hook-presence checks
+    cannot establish script parity (deleting e.preventDefault();
+    return; from the duplicate-submit guard passed them all). Pin
+    the complete inline script blocks of index.html by digest. The
+    digest is identical on the base tree (9ef2897f) and the built
+    tree — S2 touched no script — so this is a regression gate: any
+    future edit to either block fails it."""
+    import hashlib
+    blocks = re.findall(r"<script[^>]*>(.*?)</script>", INDEX, re.S)
+    assert len(blocks) == 2
+    digest = hashlib.sha256("\n".join(blocks).encode()).hexdigest()
+    assert digest == \
+        "b8ae7de2f265ce3bf9d5ae715982166cbb57c63de308966b315e799353d35260"
+    assert "e.preventDefault();" in blocks[0]  # duplicate-submit guard
 
 
 def test_s2_live_copy_verbatim_and_rejected_framings_absent():
