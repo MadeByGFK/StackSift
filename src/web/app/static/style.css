@@ -284,6 +284,30 @@ table.issues tr:last-child td { border-bottom: none; }
 .ss-text-right { text-align: right; }
 .ss-count-cell { text-align: right; color: var(--muted); }
 
+/* ---- Issue #170 S2 (Analyze surface design alignment) ----
+   Every rule in this block is scoped to the Analyze surface: all
+   selectors carry the .s2- prefix, and the .s2- classes exist only
+   in index.html plus the shared panel opt-in on compare.html /
+   batch.html (their <section> gains .s2-panel; no structural, form,
+   route, or flow change there) (A7). No shared selector, token, or
+   :root value is touched, so pricing/auth/reports/settings/shared/
+   sample surfaces cannot be restyled by these rules. Values reuse
+   the live tokens only (navy/gold house system, Decisions 2 and 3).
+   The remake's "50 MB free" framing is rejected outright (A2) and
+   no price text appears here or on the entry cards: Compare/Batch
+   dollar copy belongs to #164 Phase B, which has not landed. */
+.s2-hero .s2-eyebrow { font-family: var(--font-code); color: var(--accent); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin: 0 0 12px; max-width: none; }
+.s2-dropzone { box-shadow: inset 0 0 0 1px var(--panel); padding: 52px 24px; }
+.s2-note-row { margin: 14px 0 0; }
+.s2-entry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 28px 0 0; }
+@media (max-width: 640px) { .s2-entry-grid { grid-template-columns: 1fr; } }
+.s2-entry-card { display: block; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; text-decoration: none; color: var(--text); }
+.s2-entry-card:hover { border-color: var(--accent); }
+.s2-entry-title { display: block; font-size: 16px; font-weight: 700; margin: 0 0 6px; }
+.s2-entry-sub { display: block; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.s2-entry-link { display: block; color: var(--accent); font-weight: 600; font-size: 14px; margin-top: 12px; }
+.s2-panel { border-top: 3px solid var(--accent); }
+section.s2-panel { background: var(--panel); border: 1px solid var(--border); border-top: 3px solid var(--accent); border-radius: var(--radius); padding: 24px; margin-top: 26px; }
 /* ---- Issue #170 S4 (Settings surface design alignment) ----
    Every rule in this block is scoped to the Settings surface: all
    selectors carry the .s4- prefix, and .s4-group / .s4-settings exist
@@ -299,3 +323,4 @@ table.issues tr:last-child td { border-bottom: none; }
 .s4-section-num { font-family: var(--font-code); color: var(--accent); font-size: 13px; font-weight: 700; letter-spacing: .5px; }
 .s4-section-label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
 .s4-group .btn-small:hover { border-color: var(--accent); }
+
