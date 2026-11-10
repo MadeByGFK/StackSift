@@ -113,10 +113,12 @@ def test_reports_page_deep_dive_rows_still_have_no_extend(auth_env):
     analysis_id = gen.json()["analysis_result_id"]
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
-    cards = page.text.split('<li class="card">')
+    cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+        # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1):
+        # the row's own link is labelled "Open", not "View".
+        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]
