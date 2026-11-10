@@ -143,7 +143,7 @@ def _generate(auth_env, rid, csrf):
 
 
 def _card_for(page_text, report_id):
-    cards = page_text.split('<li class="card">')
+    cards = page_text.split('<tr class="card s3-row">')
     view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
     matches = [c for c in cards if view_link in c]
     assert len(matches) == 1, report_id
@@ -467,7 +467,7 @@ def test_f3_control_response_without_switch_displays_normally():
       out.afterResolve = snapA();
     """)
     after = out["afterResolve"]
-    assert after["msg"] == "Analysis Report ready.", after
+    assert after["msg"] == "Investigation Report ready.", after
     assert after["linkRow"] == "block", after
     assert "ANALYSIS-A" in after["viewHref"], after
     assert after["confirmDisplay"] == "none", after

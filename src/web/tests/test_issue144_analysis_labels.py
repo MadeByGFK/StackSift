@@ -7,7 +7,10 @@ button changes (Extend/Share for Analysis Reports are the separate
 parked item #145 and are NOT touched here):
 
 1. Title: deep_dive rows carry a title above the report filename
-   that reads exactly "Analysis Report".
+   that reads exactly "Investigation Report".
+   (Name updated 2026-11-10 under the founder naming sweep in
+   #170 S3: the paid deliverable is "Investigation Report";
+   "Analysis Report" is retired as a user-facing name.)
 2. Timestamp label: deep_dive rows read "Created <timestamp>";
    analysis / comparison / batch rows keep "Analyzed <timestamp>".
 
@@ -26,22 +29,22 @@ from test_phase2a_regressions import env  # noqa: F401
 from test_phase2b_paid_e2e import paid_env  # noqa: F401
 from test_structured_export_e2e import _custom_result, _setup
 
-_TITLE = '<div class="kind-title">Analysis Report</div>'
+_TITLE = '<div class="kind-title">Investigation Report</div>'
 _TS = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
 
 
 def _cards(page_text):
-    """Map report id -> that row's <li class="card"> markup only.
+    """Map report id -> that row's <tr class="card s3-row"> markup only.
 
     Keyed by the row's own View link (a source row's Analysis link
     also points at the derived report, so the View link is the
     unambiguous row identity, mirroring test_deep_dive_paid).
-    Each chunk is truncated at </li> so page-level markup after the
+    Each chunk is truncated at </tr> so page-level markup after the
     list (modals etc.) cannot leak into a row's assertions.
     """
     cards = {}
-    for chunk in page_text.split('<li class="card">')[1:]:
-        card = chunk.split("</li>")[0]
+    for chunk in page_text.split('<tr class="card s3-row">')[1:]:
+        card = chunk.split("</tr>")[0]
         m = re.search(r'href="/reports/([0-9a-f-]{36})" class="btn btn-ghost">View', card)
         assert m, card[:200]
         cards[m.group(1)] = card

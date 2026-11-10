@@ -186,7 +186,7 @@ def test_my_reports_row_keeps_full_actions_and_deep_dive_suppression(auth_env):
     analysis_id = gen.json()["analysis_result_id"]
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
-    cards = page.text.split('<li class="card">')
+    cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
         view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'

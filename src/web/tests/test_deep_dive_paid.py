@@ -441,7 +441,7 @@ def test_reports_list_deep_dive_row_has_no_extend_but_normal_row_does(auth_env):
     analysis_id = gen.json()["analysis_result_id"]
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
-    cards = page.text.split('<li class="card">')
+    cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
         # Match the row's own View link (not e.g. a source row's
