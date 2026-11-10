@@ -47,6 +47,38 @@ the built tree. Tests pinning pre-existing behaviour verbatim
 retention wording, header/nav, no-charging, the A4 browser
 behaviours) are regression gates — they pass on both trees and are
 labelled as such; a gate is not teeth.
+
+Founder fidelity remediation (2026-11-10, PR #177 — the S3 items
+of the design-fidelity diff land on this PR before merge):
+  G1  Row actions are DIRECT controls: the primary Export button +
+      format dropdown menu are gone (which also remediates the two
+      Codex P2 clipping findings on c66f61cd by construction — the
+      .s3-table-wrap overflow can no longer clip a menu that does
+      not exist); each export is its own inline form (action URL,
+      CSRF input, data-confirm byte-identical) with a uniform
+      btn-ghost submit labelled "Export PDF"/"Export CSV"/
+      "Export JSON"; "View" is renamed "Open"; NO "Free" tag
+      (S3-R2, staged until #164 Phase C). The bare "Analysis" row
+      action is renamed "Investigation Report" (2026-11-09 naming
+      ruling supersedes the earlier deliberate keep; internal
+      analysis-* ids/classes unchanged).
+  G2  State & retention cell gains a bold status word ("Ready" /
+      "Expired" — Expired exactly for redemption_only rows, the
+      only expired rows this list renders) and, when the row's
+      share state is active (and Share itself is not suppressed
+      for the row), a share-state line whose "Turn off" control
+      opens the EXISTING Share modal via the share-open mechanism
+      with the same data-* attributes as the row's Share button.
+      The expiry date span and "Expires in N days" pill keep
+      their hooks and wording (Decision 8).
+  G3  Page head: eyebrow "My Reports"; sub "Open, share, or export
+      your reports. Free reports are kept for 7 days; paid
+      deliverables are kept for 90 days." (the design's "delete"
+      wording stays barred — no Delete anywhere).
+  G4  Date cell is two lines ("Nov 04, 2026" over "12:00 UTC"),
+      superseding the #144 Analyzed/Created prefix (founder
+      fidelity ruling 2026-11-10); deep_dive rows stay
+      distinguished by the Investigation Report kind-title.
 """
 
 import json
@@ -121,7 +153,7 @@ def _render(reports, **overrides):
 
 
 def _row_for(html, report_id):
-    view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+    view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
     rows = html.split('<tr class="card s3-row">')
     matches = [r for r in rows if view_link in r]
     assert len(matches) == 1, report_id
@@ -153,10 +185,19 @@ def test_s3_table_structure_and_columns():
 
 def test_s3_page_head_eyebrow_and_empty_state():
     html = _render([_report()])
-    assert '<p class="s3-eyebrow">Manage</p>' in html
+    # G3 (founder fidelity ruling 2026-11-10): eyebrow is the page
+    # name (CSS uppercases it to MY REPORTS) and the sub carries
+    # the design's retention sentence — now true post-#164 Phase A.
+    # The design sub's "delete" wording stays barred (S3-R1/A4).
+    assert '<p class="s3-eyebrow">My Reports</p>' in html
     assert html.index('class="s3-eyebrow"') < html.index(
         "<h1>My Reports</h1>")
-    assert "Your analysis reports from the last 7 days." in html
+    sub = ("Open, share, or export your reports. Free reports are "
+           "kept for 7 days; paid deliverables are kept for 90 days.")
+    assert f'<p class="sub">{sub}</p>' in html
+    assert "Your analysis reports from the last 7 days." not in html
+    assert "Manage</p>" not in html
+    assert "delete" not in sub.lower()
     empty = _render([])
     assert '<div class="empty s3-empty">' in empty
     assert "No reports yet. Analyze a log file to get started." in empty
@@ -214,15 +255,23 @@ def test_s3_css_blocks_are_s3_scoped():
 def test_s3_normal_row_full_action_inventory():
     rid = "row-normal"
     row = _row_for(_render([_report(id=rid)]), rid)
-    assert ">View</a>" in row
-    assert "export-toggle" in row and ">Export</button>" in row
-    assert f'id="menu-{rid}"' in row
+    # G1: Open (renamed from View) + direct export controls.
+    assert ">Open</a>" in row
+    assert ">View</a>" not in row
     assert f'action="/reports/{rid}/pdf"' in row
     assert f'action="/reports/{rid}/exports/csv"' in row
     assert f'action="/reports/{rid}/exports/json"' in row
+    assert ">Export PDF</button>" in row
+    assert ">Export CSV</button>" in row
+    assert ">Export JSON</button>" in row
     assert row.count("data-confirm") == 4  # 3 exports + Extend
     assert row.count(f'data-confirm="{_LOCKED}"') == 3
-    assert "analysis-open" in row and ">Analysis</button>" in row
+    # Rename (2026-11-09 naming ruling): the row action is the
+    # deliverable's name; the bare "Analysis" label is gone, the
+    # internal analysis-open class/ids are unchanged.
+    assert "analysis-open" in row
+    assert ">Investigation Report</button>" in row
+    assert ">Analysis</button>" not in row
     assert "share-open" in row and ">Share</button>" in row
     assert f'action="/reports/{rid}/retention"' in row
     assert ">Extend</button>" in row
@@ -230,6 +279,97 @@ def test_s3_normal_row_full_action_inventory():
     assert row.count("data-retention-expiry-date") == 1
     assert row.count("data-retention-expiry-pill") == 1
     assert row.count("data-retention-status") == 1
+
+
+def test_s3_g1_no_export_dropdown_anywhere():
+    """G1 teeth + Codex clipping regression gate: the Export
+    dropdown is REMOVED, so the .s3-table-wrap overflow-x clipping
+    found by Codex on c66f61cd (overflow-y computing to auto and
+    clipping the absolutely-positioned .menu below the table) is
+    remediated by construction. No menu markup, toggle, or menu
+    CSS/JS remains in reports.html at all; exports are three
+    inline forms whose submits are uniform btn-ghost, and no
+    "Free" tag is rendered (S3-R2)."""
+    rid = "row-g1"
+    html = _render([_report(id=rid)])
+    row = _row_for(html, rid)
+    for gone in ("menu-wrap", "export-toggle", 'class="menu"',
+                 "menu-item", f'id="menu-{rid}"', 'data-menu=',
+                 "btn-primary export", ">Export</button>"):
+        assert gone not in row, gone
+        assert gone not in REPORTS, gone
+    assert ".menu" not in REPORTS and ".export-toggle" not in REPORTS
+    # Uniform quiet styling: every export submit is btn-ghost and
+    # no row control carries btn-primary.
+    # Open + 3 export submits + Investigation Report + Share +
+    # Extend submit = 7 quiet controls on a normal row.
+    assert row.count("btn btn-ghost") == 7
+    for label in ("Export PDF", "Export CSV", "Export JSON"):
+        assert f'class="btn btn-ghost">{label}</button>' in row, label
+    assert "btn-primary" not in row
+    # No Free tag on exports (staged until #164 Phase C, S3-R2).
+    assert ">Free<" not in row and "Free</span>" not in row
+
+
+def test_s3_g2_status_word_and_share_state_line():
+    """G2 teeth: the State cell leads with a bold status word —
+    "Ready" for a live row, "Expired" for a redemption_only row —
+    while the Decision 8 expiry date/pill keep hooks and wording.
+    The share-state line appears ONLY when the row's share state
+    is active, and its Turn off control is a second share-open
+    carrying the SAME data-* attributes as the row's Share button
+    (it opens the existing Share modal — no new endpoint/flow)."""
+    rid = "row-g2"
+    row = _row_for(_render([_report(id=rid)]), rid)
+    state = row[row.index('class="s3-state-cell"'):
+                row.index('class="s3-actions-cell"')]
+    assert '<strong class="s3-status-word">Ready</strong>' in state
+    assert "Expired</strong>" not in state
+    assert "Expires 2026-11-11" in state
+    assert "Expires in 7 days" in state
+    assert "Link sharing on" not in state  # share inactive
+
+    expired = _row_for(_render([_report(
+        id="row-g2x", redemption_only=True)]), "row-g2x")
+    xstate = expired[expired.index('class="s3-state-cell"'):
+                     expired.index('class="s3-actions-cell"')]
+    assert '<strong class="s3-status-word">Expired</strong>' in xstate
+    assert "Redemption only — this report has expired" in xstate
+
+    shared = _row_for(_render([_report(
+        id="row-g2s", share_active=True, share_formats=["txt"])]),
+        "row-g2s")
+    sstate = shared[shared.index('class="s3-state-cell"'):
+                    shared.index('class="s3-actions-cell"')]
+    assert ("Link sharing on — anyone with the link can view"
+            in sstate)
+    assert ">Turn off</button>" in sstate
+    # Two share-open controls on the row (Share + Turn off), with
+    # byte-identical data-* attribute sets.
+    assert shared.count("share-open") == 2
+    attrs = re.findall(r'class="btn btn-ghost share-open"([^>]*)>',
+                       shared)
+    assert len(attrs) == 2 and attrs[0] == attrs[1], attrs
+    assert 'data-formats="txt"' in attrs[0]
+    assert 'data-active="1"' in attrs[0]
+
+
+def test_s3_g4_date_cell_two_lines():
+    """G4 teeth: the Date cell is two lines — "Nov 04, 2026" over
+    "12:00 UTC" — for every row kind. The #144 Analyzed/Created
+    prefix is superseded (founder fidelity ruling 2026-11-10);
+    deep_dive rows stay distinguished by the kind-title."""
+    for overrides in ({}, {"type": "deep_dive",
+                           "filename": "deep.log",
+                           "analysis_eligible": False}):
+        rid = "row-g4"
+        row = _row_for(_render([_report(id=rid, **overrides)]), rid)
+        cell = row[row.index('class="s3-date-cell"'):
+                   row.index('class="s3-severity-cell"')]
+        assert '<span class="s3-date-line">Nov 04, 2026</span>' in cell
+        assert '<span class="s3-date-sub">12:00 UTC</span>' in cell
+        assert "Analyzed" not in cell and "Created" not in cell
+        assert "2026-11-04 12:00" not in cell
 
 
 def test_s3_unlocked_row_export_confirms_are_free_text():
@@ -259,20 +399,25 @@ def test_s3_comparison_and_batch_rows_omit_csv_json():
 
 
 def test_s3_deep_dive_row_action_gates():
-    """A4 absence gate: deep_dive rows keep View + Export (all
-    formats) but have NO Share and NO Extend (both routes 404 for
-    them), carry the 'Investigation Report' kind title, and read
-    'Created', never 'Analyzed' (#144 semantics retained)."""
+    """A4 absence gate: deep_dive rows keep Open + direct Exports
+    (all formats) but have NO Share and NO Extend (both routes 404
+    for them) and carry the 'Investigation Report' kind title.
+    G4: the date cell is the two-line date/time with no
+    Analyzed/Created prefix (the #144 prefix is superseded by the
+    founder fidelity ruling 2026-11-10; the kind title is what
+    distinguishes these rows)."""
     rid = "row-deep"
     row = _row_for(_render([_report(
         id=rid, type="deep_dive", filename="deep-source.log",
         analysis_eligible=False)]), rid)
     assert '<div class="kind-title">Investigation Report</div>' in row
     assert row.index("Investigation Report") < row.index("deep-source.log")
-    assert re.search(r"Created 2026-11-04 12:00", row)
-    assert "Analyzed" not in row
+    assert '<span class="s3-date-line">Nov 04, 2026</span>' in row
+    assert '<span class="s3-date-sub">12:00 UTC</span>' in row
+    assert "Analyzed" not in row and "Created" not in row
     assert 'action="/reports/row-deep/pdf"' in row
     assert 'action="/reports/row-deep/exports/csv"' in row
+    assert ">Export PDF</button>" in row
     assert "share-open" not in row and ">Share</button>" not in row
     assert "Extend" not in row and "/retention" not in row
     assert "analysis-open" not in row
@@ -285,7 +430,8 @@ def test_s3_analysis_link_vs_purchase_popup():
     done = _row_for(_render([_report(
         id="row-done", analysis_result_id="derived-1")]), "row-done")
     assert '<a href="/reports/derived-1" class="btn btn-ghost">' \
-           "Analysis</a>" in done
+           "Investigation Report</a>" in done
+    assert ">Analysis</a>" not in done
     assert "analysis-open" not in done
     todo = _row_for(_render([_report(id="row-todo")]), "row-todo")
     assert "analysis-open" in todo
@@ -295,16 +441,19 @@ def test_s3_analysis_link_vs_purchase_popup():
 
 
 def test_s3_redemption_only_row_suppressions():
-    """Gate: redemption-only rows keep View + Analysis (the redeem
-    path) and suppress Export/Share/Extend (they would 410), with
-    the redemption label in the State cell."""
+    """Gate: redemption-only rows keep Open + Investigation Report
+    (the redeem path) and suppress Export/Share/Extend (they would
+    410), with the redemption label and the G2 "Expired" status
+    word in the State cell."""
     rid = "row-redeem"
     row = _row_for(_render([_report(id=rid, redemption_only=True)]), rid)
     assert "Redemption only — this report has expired" in row
-    assert "export-toggle" not in row
+    assert '<strong class="s3-status-word">Expired</strong>' in row
+    assert "/pdf" not in row and "Export PDF" not in row
     assert "share-open" not in row
     assert "Extend" not in row
     assert "analysis-open" in row
+    assert ">Investigation Report</button>" in row
 
 
 def test_s3_no_delete_action_anywhere():
@@ -340,10 +489,13 @@ def test_s3_retired_product_names_absent():
     surface in S3): the retired user-facing names "Analysis Report"
     and "Investigation Brief" appear nowhere in reports.html; the
     paid deliverable is "Investigation Report" in the kind title,
-    the modal actions, and the JS result messages. (The short
-    "Analysis" row-action label is the action label, not the
-    deliverable name, and is retained.) Teeth: the base template
-    carries all five retired-name strings, so this fails on base."""
+    the modal actions, and the JS result messages. Founder ruling
+    2026-11-10 extends the sweep to the row action itself: the
+    bare "Analysis" action label is renamed "Investigation Report"
+    (both the link and the analysis-open button); only internal
+    identifiers (analysis-open, analysis-*) keep the word. Teeth:
+    the base template carries all five retired-name strings, so
+    this fails on base."""
     assert "Analysis Report" not in REPORTS
     assert "Investigation Brief" not in REPORTS
     assert '<div class="kind-title">Investigation Report</div>' in REPORTS
@@ -351,6 +503,10 @@ def test_s3_retired_product_names_absent():
     assert ">Generate Investigation Report</button>" in REPORTS
     assert "'Investigation Report ready.'" in REPORTS
     assert REPORTS.count("Investigation Report generation failed.") == 2
+    assert ">Analysis</button>" not in REPORTS
+    assert ">Analysis</a>" not in REPORTS
+    assert ">Investigation Report</button>" in REPORTS
+    assert ">Investigation Report</a>" in REPORTS
 
 
 def test_s3_hooks_and_confirm_texts_verbatim():
@@ -359,8 +515,9 @@ def test_s3_hooks_and_confirm_texts_verbatim():
     rid = "row-hooks"
     html = _render([_report(id=rid)])
     row = _row_for(html, rid)
-    assert f'data-menu="menu-{rid}"' in row
-    assert 'aria-haspopup="true"' in row
+    # G1: the dropdown's data-menu/aria-haspopup hooks are gone
+    # with the menu itself; every other hook is carried verbatim.
+    assert "data-menu" not in row and "aria-haspopup" not in row
     assert f'data-confirm="{_EXTEND_CONFIRM}"' in row
     assert "data-retention-form" in row
     assert 'name="idempotency_key" value="retention-key"' in row
@@ -384,6 +541,7 @@ def test_s3_retention_cell_matches_actual_state():
     row = _row_for(_render([_report(id="row-state")]), "row-state")
     state = row[row.index('class="s3-state-cell"'):
                 row.index('class="s3-actions-cell"')]
+    assert '<strong class="s3-status-word">Ready</strong>' in state
     assert "Expires 2026-11-11" in state
     assert "Expires in 7 days" in state
     assert "90 days" not in state

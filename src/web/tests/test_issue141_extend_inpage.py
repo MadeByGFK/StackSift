@@ -116,7 +116,9 @@ def test_reports_page_deep_dive_rows_still_have_no_extend(auth_env):
     cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+        # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1):
+        # the row's own link is labelled "Open", not "View".
+        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]

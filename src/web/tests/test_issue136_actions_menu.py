@@ -19,9 +19,14 @@ code changes):
   direct "Export PDF (2 credits)" button — each has exactly ONE
   action (PDF only), so there is nothing to consolidate and a
   one-item menu would hide the up-front price behind an extra click.
-- ``reports.html`` (My Reports): the full row View · Export ·
-  Analysis · Share · Extend is unchanged, including the PR #139
-  suppression of Share and Extend on deep_dive rows.
+- ``reports.html`` (My Reports): the full row actions were
+  unchanged BY THIS PASS. PREMISE CHANGED (founder fidelity
+  ruling 2026-11-10, PR #177 S3-G1 + naming ruling): the row now
+  renders Open · Export PDF/CSV/JSON (direct inline forms, no
+  dropdown) · Investigation Report · Share · Extend — same
+  actions, endpoints and gating, direct-control presentation;
+  the PR #139 suppression of Share and Extend on deep_dive rows
+  is unchanged.
 - ``settings.html``: unchanged — Credits and Report Access already
   live on the account page.
 
@@ -189,13 +194,20 @@ def test_my_reports_row_keeps_full_actions_and_deep_dive_suppression(auth_env):
     cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+        # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1):
+        # the row's first control is labelled "Open", not "View".
+        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]
 
     normal = _card_for(str(rid))
-    assert "export-toggle" in normal and ">Export</button>" in normal
+    # PREMISE CHANGED (S3-G1): no Export dropdown — direct inline
+    # Export PDF/CSV/JSON forms with uniform quiet submits.
+    assert "export-toggle" not in normal and "menu-wrap" not in normal
+    assert ">Export PDF</button>" in normal
+    assert ">Export CSV</button>" in normal
+    assert ">Export JSON</button>" in normal
     assert "share-open" in normal and ">Share</button>" in normal
     assert f"/reports/{rid}/retention" in normal and ">Extend</button>" in normal
     # PR #139 remediation F2 + Extend guard: deep_dive rows keep

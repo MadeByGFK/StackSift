@@ -13,6 +13,13 @@ parked item #145 and are NOT touched here):
    "Analysis Report" is retired as a user-facing name.)
 2. Timestamp label: deep_dive rows read "Created <timestamp>";
    analysis / comparison / batch rows keep "Analyzed <timestamp>".
+   PREMISE CHANGED (founder fidelity ruling 2026-11-10, PR #177
+   S3-G4): the Analyzed/Created prefix is SUPERSEDED — every
+   row's Date cell is now two lines, "Mon DD, YYYY" over
+   "HH:MM UTC", with no prefix for any kind; deep_dive rows stay
+   distinguished by the title in (1). The timestamp tests below
+   pin the new two-line format at the same strength (per-kind
+   assertions over the same mixed list).
 
 Surface: My Reports (manage reports) — one-job-per-page rule.
 
@@ -30,22 +37,25 @@ from test_phase2b_paid_e2e import paid_env  # noqa: F401
 from test_structured_export_e2e import _custom_result, _setup
 
 _TITLE = '<div class="kind-title">Investigation Report</div>'
-_TS = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
+_DATE_LINE = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{2}, \d{4}"
+_TIME_LINE = r"\d{2}:\d{2} UTC"
 
 
 def _cards(page_text):
     """Map report id -> that row's <tr class="card s3-row"> markup only.
 
-    Keyed by the row's own View link (a source row's Analysis link
-    also points at the derived report, so the View link is the
-    unambiguous row identity, mirroring test_deep_dive_paid).
+    Keyed by the row's own Open link (a source row's Investigation
+    Report link also points at the derived report, so the Open
+    link is the unambiguous row identity, mirroring
+    test_deep_dive_paid). (Label premise changed 2026-11-10,
+    S3-G1: "View" is now "Open".)
     Each chunk is truncated at </tr> so page-level markup after the
     list (modals etc.) cannot leak into a row's assertions.
     """
     cards = {}
     for chunk in page_text.split('<tr class="card s3-row">')[1:]:
         card = chunk.split("</tr>")[0]
-        m = re.search(r'href="/reports/([0-9a-f-]{36})" class="btn btn-ghost">View', card)
+        m = re.search(r'href="/reports/([0-9a-f-]{36})" class="btn btn-ghost">Open', card)
         assert m, card[:200]
         cards[m.group(1)] = card
     return cards
@@ -84,18 +94,28 @@ def test_deep_dive_row_shows_analysis_report_title_above_filename(auth_env):
     assert card.index(_TITLE) < card.index("deep-source.log")
 
 
-def test_deep_dive_row_timestamp_reads_created_not_analyzed(auth_env):
+def test_deep_dive_row_date_cell_is_two_line_without_prefix(auth_env):
+    # PREMISE CHANGED (S3-G4 supersession, 2026-11-10): no
+    # Created/Analyzed prefix remains — the date cell is the
+    # two-line date over time-UTC for every kind.
     rows, _ = _mixed_list(auth_env)
     card = rows["deep_dive"]
-    assert re.search(rf"Created {_TS}", card)
+    assert 'class="s3-date-line"' in card and re.search(_DATE_LINE, card)
+    assert 'class="s3-date-sub"' in card and re.search(_TIME_LINE, card)
+    assert "Created" not in card
     assert "Analyzed" not in card
 
 
-def test_source_rows_keep_analyzed_and_have_no_title(auth_env):
+def test_source_rows_two_line_date_and_no_title(auth_env):
+    # PREMISE CHANGED (S3-G4 supersession, 2026-11-10): source
+    # rows carry the same two-line date cell and no prefix; the
+    # no-title gate is unchanged.
     rows, _ = _mixed_list(auth_env)
     for kind in ("analysis", "comparison", "batch"):
         card = rows[kind]
-        assert re.search(rf"Analyzed {_TS}", card), kind
+        assert 'class="s3-date-line"' in card and re.search(_DATE_LINE, card), kind
+        assert 'class="s3-date-sub"' in card and re.search(_TIME_LINE, card), kind
+        assert "Analyzed" not in card, kind
         assert "Created" not in card, kind
         assert _TITLE not in card, kind
 
@@ -105,6 +125,6 @@ def test_mixed_list_renders_both_row_kinds(auth_env):
     # Exactly one titled row on the whole page: the deep_dive row.
     assert page_text.count(_TITLE) == 1
     assert _TITLE in rows["deep_dive"]
-    assert re.search(r"Created ", rows["deep_dive"])
-    for kind in ("analysis", "comparison", "batch"):
-        assert re.search(r"Analyzed ", rows[kind]), kind
+    for kind in ("deep_dive", "analysis", "comparison", "batch"):
+        assert 'class="s3-date-line"' in rows[kind] and re.search(_DATE_LINE, rows[kind]), kind
+        assert 'class="s3-date-sub"' in rows[kind] and re.search(_TIME_LINE, rows[kind]), kind

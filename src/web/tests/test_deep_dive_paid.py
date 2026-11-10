@@ -444,9 +444,12 @@ def test_reports_list_deep_dive_row_has_no_extend_but_normal_row_does(auth_env):
     cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
-        # Match the row's own View link (not e.g. a source row's
-        # Analysis link, which also points at the derived report).
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+        # Match the row's own Open link (not e.g. a source row's
+        # Investigation Report link, which also points at the
+        # derived report). (Label premise changed 2026-11-10,
+        # PR #177 S3-G1/rename: "View" -> "Open", "Analysis" ->
+        # "Investigation Report".)
+        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]

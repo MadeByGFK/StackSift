@@ -314,6 +314,12 @@ table.issues tr:last-child td { border-bottom: none; }
 .s3-pill.warnings { color: var(--yellow); }
 .s3-pill.errors { color: var(--red); }
 .s3-state-cell .expiry { margin-left: 8px; }
+.s3-status-word { font-weight: 700; }
+.s3-share-state { display: block; margin-top: 8px; color: var(--muted); font-size: 13px; }
+.s3-share-state .btn { height: 30px; padding: 0 10px; font-size: 13px; margin-left: 6px; }
+.s3-date-line { display: block; }
+.s3-date-sub { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.s3-actions-cell .actions { flex-wrap: wrap; }
 .s3-empty { border-top: 3px solid var(--accent); }
 @media (max-width: 640px) { .s3-table th, .s3-table td { padding: 12px; } }
 /* ---- Issue #170 S2 (Analyze surface design alignment) ----

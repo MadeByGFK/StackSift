@@ -67,12 +67,9 @@
   .btn-primary:hover{background:#e0bd4a}
   .btn-primary .cost{font-weight:500;opacity:.75}
 
-  /* Issue #129: Export dropdown + popup modals */
-  .menu-wrap{position:relative;display:inline-block}
-  .menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:150px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-  .menu form{margin:0}
-  .menu-item{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font:inherit;font-size:14px;font-weight:600;padding:8px 10px;border-radius:6px;cursor:pointer}
-  .menu-item:hover{background:var(--panel-hover)}
+  /* Issue #129: popup modals (the Export dropdown was removed by
+     the 2026-11-10 founder fidelity ruling on PR #177 — exports are
+     direct inline controls now, see the actions cell below) */
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50}
   .modal-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:420px;width:90%}
   .modal-card p{margin:0 0 14px}
@@ -139,6 +136,12 @@
   .s3-pill.errors{color:var(--err)}
   .s3-pill.errors::before{background:var(--err)}
   .s3-state-cell .expiry{margin-left:8px}
+  .s3-status-word{font-weight:700}
+  .s3-share-state{display:block;margin-top:8px;color:var(--muted);font-size:13px}
+  .s3-share-state .btn{height:30px;padding:0 10px;font-size:13px;margin-left:6px}
+  .s3-date-line{display:block}
+  .s3-date-sub{display:block;color:var(--muted);font-size:13px;margin-top:2px}
+  .s3-actions-cell .actions{flex-wrap:wrap}
   .s3-empty{border-top:3px solid var(--accent)}
   .s3-entry-card{display:block;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:20px;text-decoration:none;color:var(--text);margin:28px 0 0}
   .s3-entry-card:hover{border-color:var(--accent)}
@@ -176,9 +179,9 @@
 <main>
   <div class="page-head">
     <div>
-      <p class="s3-eyebrow">Manage</p>
+      <p class="s3-eyebrow">My Reports</p>
       <h1>My Reports</h1>
-      <p class="sub">Your analysis reports from the last 7 days.</p>
+      <p class="sub">Open, share, or export your reports. Free reports are kept for 7 days; paid deliverables are kept for 90 days.</p>
     </div>
     <p class="count"><strong>{{ total }}</strong> reports</p>
   </div>
@@ -203,49 +206,71 @@
         <div class="name">{{ report.filename }}</div>
       </div></div></td>
       <td class="s3-date-cell">
-          {# Issue #144: deep_dive rows were Created (derived), not
-             Analyzed; source rows (analysis/comparison/batch) keep
-             "Analyzed". #}
-          <span>{% if report.type == 'deep_dive' %}Created{% else %}Analyzed{% endif %} {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+          {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G4):
+             two-line date cell — date over time (UTC). This
+             supersedes the #144 Analyzed/Created prefix; deep_dive
+             rows stay distinguished by the "Investigation Report"
+             kind-title in the Report cell. #}
+          <span class="s3-date-line">{{ report.created_at.strftime('%b %d, %Y') }}</span>
+          <span class="s3-date-sub">{{ report.created_at.strftime('%H:%M') }} UTC</span>
       </td>
       <td class="s3-severity-cell"><span class="s3-pill{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warnings{% elif report.severity == 'errors' %} errors{% else %} neutral{% endif %}">{% if report.severity == 'ok' %}OK{% elif report.severity == 'warnings' %}Warnings{% elif report.severity == 'errors' %}Errors{% else %}—{% endif %}</span></td>
       <td class="s3-state-cell">
+          {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G2):
+             bold status word first — "Expired" exactly for
+             redemption_only rows (the only expired rows this list
+             renders; expired rows without a live entitlement are
+             not listed), "Ready" otherwise. The expiry date span
+             and "Expires in N days" pill below keep their hooks
+             and wording (Decision 8). #}
+          <strong class="s3-status-word">{% if report.redemption_only %}Expired{% else %}Ready{% endif %}</strong>
           {% if report.redemption_only %}<span class="redemption-only-label">Redemption only — this report has expired; your Investigation Report entitlement can still be redeemed.</span> {% endif %}
           <span data-retention-expiry-date>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
           <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}" data-retention-expiry-pill>Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
+          {% if report.share_active and report.type != 'deep_dive' and not report.redemption_only %}
+          <span class="s3-share-state">Link sharing on — anyone with the link can view <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Turn off</button></span>
+          {% endif %}
       </td>
       <td class="s3-actions-cell"><div class="actions">
-        <a href="/reports/{{ report.id }}" class="btn btn-ghost">View</a>
+        {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G1): row
+           actions are DIRECT controls in the design pattern — no
+           Export dropdown/menu (which the table's overflow-x also
+           clipped, per the Codex findings on c66f61cd). Each export
+           keeps its own form with its action URL, CSRF input and
+           data-confirm text byte-identical to the menu version;
+           every row control is uniformly quiet (btn-ghost). No
+           "Free" tag (S3-R2: staged until #164 Phase C). Row order:
+           Open / Export PDF / Export CSV / Export JSON /
+           Investigation Report / Share / Extend. #}
+        <a href="/reports/{{ report.id }}" class="btn btn-ghost">Open</a>
         {% if not report.redemption_only %}
-        <span class="menu-wrap">
-          <button type="button" class="btn btn-primary export-toggle" data-menu="menu-{{ report.id }}" aria-haspopup="true" aria-expanded="false">Export</button>
-          <span class="menu" id="menu-{{ report.id }}" style="display:none">
-            <form method="post" action="/reports/{{ report.id }}/pdf" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+            <form method="post" action="/reports/{{ report.id }}/pdf" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="display:inline;margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="menu-item">PDF</button>
+              <button type="submit" class="btn btn-ghost">Export PDF</button>
             </form>
             {% if report.type != 'comparison' and report.report_kind != 'batch' %}
-            <form method="post" action="/reports/{{ report.id }}/exports/csv" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+            <form method="post" action="/reports/{{ report.id }}/exports/csv" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="display:inline;margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="menu-item">CSV</button>
+              <button type="submit" class="btn btn-ghost">Export CSV</button>
             </form>
-            <form method="post" action="/reports/{{ report.id }}/exports/json" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+            <form method="post" action="/reports/{{ report.id }}/exports/json" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="display:inline;margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="menu-item">JSON</button>
+              <button type="submit" class="btn btn-ghost">Export JSON</button>
             </form>
             {% endif %}
-          </span>
-        </span>
         {% endif %}
-        {# Issue #106 Stage 2 + founder amendment: row order is
-           View / Export / Analysis / Share / Extend. Analysis opens
-           the shared popup below; an existing Investigation Report links
-           straight to it (no second charge). #}
+        {# Issue #106 Stage 2 + founder amendment: the Investigation
+           Report action opens the shared popup below; an existing
+           Investigation Report links straight to it (no second
+           charge). Label renamed from the bare "Analysis" by the
+           founder ruling 2026-11-10 (2026-11-09 naming ruling:
+           the deliverable is "Investigation Report"); internal
+           ids/classes (analysis-open, analysis-*) unchanged. #}
         {% if report.type == 'analysis' %}
           {% if report.analysis_result_id %}
-          <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Analysis</a>
+          <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Investigation Report</a>
           {% else %}
-          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-entitlement="{{ '1' if report.entitlement_available else '' }}" data-reason="{{ report.analysis_reason or '' }}" data-deadline="{{ report.redemption_deadline or '' }}">Analysis</button>
+          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-entitlement="{{ '1' if report.entitlement_available else '' }}" data-reason="{{ report.analysis_reason or '' }}" data-deadline="{{ report.redemption_deadline or '' }}">Investigation Report</button>
           {% endif %}
         {% endif %}
         {# Issue #106 Stage 2 / PR #139 F2: no Share for Analysis
@@ -364,15 +389,6 @@
 
 <script>
 (function () {
-  document.querySelectorAll('.export-toggle').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var menu = document.getElementById(btn.getAttribute('data-menu'));
-      var open = menu.style.display === 'block';
-      document.querySelectorAll('.menu').forEach(function (m) { m.style.display = 'none'; });
-      menu.style.display = open ? 'none' : 'block';
-      btn.setAttribute('aria-expanded', open ? 'false' : 'true');
-    });
-  });
   var modal = document.getElementById('ss-confirm');
   var text = document.getElementById('ss-confirm-text');
   var pending = null;

@@ -188,20 +188,27 @@ def test_my_reports_row_actions_follow_unlock(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
-    # Action row: View / Export (dropdown with all three formats) /
-    # Share / Extend — and no old per-format PDF button.
+    # PREMISE CHANGED (2026-11-10 founder fidelity ruling, PR #177
+    # S3-G1): the row's Export dropdown is removed — the Lovable
+    # design uses direct controls. Each format is now its own direct
+    # submit on the row; the unlock semantics below are unchanged.
+    # Action row: Open / Export PDF / Export CSV / Export JSON /
+    # Share / Extend — no dropdown trigger remains.
     assert f'href="/reports/{rid}"' in page.text
     assert f"/reports/{rid}/pdf" in page.text
     assert f"/reports/{rid}/exports/csv" in page.text
     assert f"/reports/{rid}/exports/json" in page.text
     assert f"/reports/{rid}/retention" in page.text
-    assert ">Export</button>" in page.text
+    assert ">Export</button>" not in page.text
+    assert ">Export PDF</button>" in page.text
+    assert ">Export CSV</button>" in page.text
+    assert ">Export JSON</button>" in page.text
     assert ">Share</button>" in page.text
     assert ">Extend</button>" in page.text
     assert "(2 credits)" not in page.text
     assert "data-confirm" in page.text  # popup before any charge
-    # Unlock via CSV from the row's dropdown route, then the row's PDF
-    # action is a direct free download on the same unlock.
+    # Unlock via CSV from the row's direct CSV export route, then the
+    # row's PDF action is a direct free download on the same unlock.
     before = _balance(auth_env, user_id)
     csv_r = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert csv_r.status_code == 200
