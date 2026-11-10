@@ -105,7 +105,10 @@ def test_sample_report_public_brief_banner_sequence(sample_client):
     assert r.status_code == 200, r.text[:300]
     body = r.text
     assert BANNER in body
-    assert "Investigation Brief" in body
+    # PREMISE CHANGED (fidelity rename S1-N3): the sample page's
+    # §01 heading is "Investigation Report" (PDF/text keep the
+    # internal Brief label — see the PDF test below).
+    assert "Investigation Report" in body
     assert LEAD in body
     assert dd.BRIEF_NOT_ESTABLISHED in body
     assert dd.BRIEF_SEQUENCE_CAPTION in body

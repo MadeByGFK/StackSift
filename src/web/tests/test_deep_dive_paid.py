@@ -389,7 +389,9 @@ def test_analysis_view_renders_without_internal_labels(auth_env):
     analysis_id = first.json()["analysis_result_id"]
     page = auth_env.client.get(f"/reports/{analysis_id}")
     assert page.status_code == 200, page.text[:300]
-    assert "Analysis Report" in page.text
+    # PREMISE CHANGED (fidelity rename S1-N3, 2026-11-09 naming
+    # ruling): the paid page title/heading is Investigation Report.
+    assert "Investigation Report" in page.text
     for forbidden in ("_evidence_refs", "evidence_refs",
                       "source_integrity_digest", "generator_version"):
         assert forbidden not in page.text
@@ -398,8 +400,9 @@ def test_analysis_view_renders_without_internal_labels(auth_env):
 def test_report_page_analysis_action_after_export(auth_env, monkeypatch):
     # PREMISE CHANGED (issue #136, one job per page): the Export ·
     # Analysis · Share button row collapsed into ONE "Actions" menu.
-    # The placement rule survives inside the menu: the Export items
-    # come first, then Analysis, then Share.
+    # PREMISE CHANGED AGAIN (fidelity G1, 2026-11-10): the menu is
+    # retired for direct controls; the placement rule survives in
+    # the cluster: Export forms first, then Analysis, then Share.
     # #164: the dollar copy renders when the product Price is
     # configured (this fixture env does not set it by default).
     monkeypatch.setenv("STRIPE_PRICE_INVESTIGATION_REPORT",
@@ -407,7 +410,8 @@ def test_report_page_analysis_action_after_export(auth_env, monkeypatch):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
-    assert page.text.count('id="actions-btn"') == 1
+    assert 'id="actions-btn"' not in page.text
+    assert 'data-s1-actions' in page.text
     assert 'id="export-btn"' not in page.text
     export_at = page.text.index(f'action="/reports/{rid}/pdf"')
     analysis_at = page.text.index('id="analysis-btn"')

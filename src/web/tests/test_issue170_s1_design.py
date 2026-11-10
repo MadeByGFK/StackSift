@@ -156,7 +156,9 @@ def test_s1_deep_dive_numbered_brief_and_groups():
         is_sample=False, current_user=None, report_id=None,
         csrf_token="t")
     assert 'class="s1-section-head"' in html
-    assert "Investigation Brief" in html
+    # PREMISE CHANGED (fidelity rename S1-N3, 2026-11-09 naming
+    # ruling): the §01 heading is "Investigation Report".
+    assert "Investigation Report" in html
     assert "data-s1-group-index=" in html
     assert "data-s1-premium-card" not in html
 
@@ -413,7 +415,8 @@ def test_s1_sample_invariants_survive_reskin():
     assert "WellInstance" in html
     assert "<form" not in html.lower()
     assert "data-s1-premium-card" not in html
-    assert "Investigation Brief" in html
+    # PREMISE CHANGED (rename S1-N3): heading is Investigation Report.
+    assert "Investigation Report" in html
 
 
 # --- Standard PDF gap-close (Decision 14 as amended by A3) -------------------

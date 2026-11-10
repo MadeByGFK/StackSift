@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StackSift Analysis Report — {{ filename }}</title>
+<title>StackSift Investigation Report — {{ filename }}</title>
 <link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <meta name="robots" content="noindex">
@@ -50,8 +50,11 @@
   </div>
   {% endif %}
 
+  <nav class="s1-breadcrumb" aria-label="Breadcrumb"><a href="/reports">← My Reports</a> <span aria-hidden="true">›</span> Report detail</nav>
+
   <section class="report-head">
-    <h2>{% if branding and branding.report_title %}{{ branding.report_title }}{% else %}Analysis Report — {{ filename }}{% endif %}</h2>
+    {% if ss_id is defined and ss_id %}<p class="s1-eyebrow" data-ss-id>{{ ss_id }}</p>{% endif %}
+    <h2>{% if branding and branding.report_title %}{{ branding.report_title }}{% else %}Investigation Report — {{ filename }}{% endif %}</h2>
     {% if report_generated_at %}<div class="meta">Generated {{ report_generated_at }}</div>{% endif %}
     <div class="summary-panel" style="background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);border-radius:8px;padding:12px 14px;margin-top:10px">{{ analysis_projection.summary }}</div>
     {% if current_user and report_id %}
@@ -62,24 +65,22 @@
        same single "Actions" menu as the source report page, holding
        the identical export forms with their data-confirm popups —
        this page has no Analysis/Share actions of its own. #}
-    <div class="report-actions" style="margin-top:1rem">
-      <span style="display:inline-block;position:relative">
-        <button type="button" class="btn-small" id="actions-btn" aria-haspopup="true" aria-expanded="false">Actions</button>
-        <span id="actions-menu" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:8px;padding:6px;min-width:170px">
+    {# Fidelity G1 (superseding the #136 menu on this page too):
+       direct export controls — gold PDF + CSV/JSON chips, tags
+       following the unlock state; same forms/endpoints/confirms. #}
+    <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
           <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export PDF</button>
+            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
           </form>
           <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export CSV</button>
+            <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
           </form>
           <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export JSON</button>
+            <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
           </form>
-        </span>
-      </span>
 
       <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:340px">
@@ -91,15 +92,6 @@
 
       <script>
       (function () {
-        var actionsBtn = document.getElementById('actions-btn');
-        var actionsMenu = document.getElementById('actions-menu');
-        if (actionsBtn && actionsMenu) {
-          actionsBtn.addEventListener('click', function () {
-            var open = actionsMenu.style.display === 'block';
-            actionsMenu.style.display = open ? 'none' : 'block';
-            actionsBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
-          });
-        }
         var modal = document.getElementById('ss-confirm');
         var text = document.getElementById('ss-confirm-text');
         var pending = null;
@@ -160,7 +152,7 @@
      legacy artifact with no brief key renders no brief section. #}
   {% if analysis_projection.brief %}
   <div class="card group-card" style="margin-top:16px">
-    <div class="s1-section-head" style="margin-top:0"><span class="s1-section-num">01</span><h3 class="section-title" style="margin-top:0">Investigation Brief</h3></div>
+    <div class="s1-section-head" style="margin-top:0"><span class="s1-section-num">01</span><h3 class="section-title" style="margin-top:0">Investigation Report</h3></div>
     {% for sentence in analysis_projection.brief.summary %}<p>{{ sentence }}</p>{% endfor %}
     {% if analysis_projection.brief.lead %}
     <p><strong>Investigation lead:</strong> {{ analysis_projection.brief.lead.template }} <span style="color:var(--muted);font-weight:400">× {{ analysis_projection.brief.lead.count }}</span></p>
@@ -257,6 +249,12 @@
     <a href="/reports"><button type="button" class="btn-primary">Back to My Reports</button></a>
   </div>
   {% endif %}
+
+  <div class="s1-footer-band" data-s1-footer-band>
+    <span class="logo">stacksift<span>.</span></span>
+    <span class="s1-footer-meta">INVESTIGATION REPORT{% if ss_id is defined and ss_id %} · {{ ss_id }}{% endif %}{% if report_generated_at %} · Generated {{ report_generated_at }}{% endif %}</span>
+  </div>
+  <p class="s1-tagline" data-s1-tagline>Your logs. Your insights. Your control.</p>
 
   <footer>
     StackSift · a Goodfolk Digital project · <a href="https://github.com/MadeByGFK/StackSift">CLI on GitHub</a>

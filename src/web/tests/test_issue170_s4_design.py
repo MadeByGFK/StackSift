@@ -146,8 +146,11 @@ def test_s4_css_block_is_settings_scoped():
 def test_s4_parity_all_base_forms_endpoints_and_hooks():
     html = _render()
     actions = re.findall(r'<form[^>]*action="([^"]+)"', html)
-    assert actions == ["/auth/logout", "/auth/link/google",
-                       "/auth/link/github"], actions
+    # PREMISE CHANGED (fidelity S4-G2): §01 gains the design's
+    # in-group Log out form, so /auth/logout appears twice (header
+    # nav + field row); endpoints are otherwise unchanged.
+    assert actions == ["/auth/logout", "/auth/logout",
+                       "/auth/link/google", "/auth/link/github"], actions
     # CSRF field present inside every form (logout + both link
     # forms; the shared auth_form_script include adds its own field
     # elsewhere on the page, exactly as on the base tree).

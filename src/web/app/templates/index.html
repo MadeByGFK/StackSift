@@ -95,8 +95,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
   <section class="hero s2-hero">
     <p class="s2-eyebrow">Analyze</p>
-    <h1>Drop in a log file.<br>Get an <span>incident summary</span>.</h1>
-    <p>StackSift scans your logs and tells you what broke, how often, and what to investigate first — in seconds, not hours.</p>
+    {# Fidelity S2-G1: design hero copy verbatim. #}
+    <h1>Analyze a log file</h1>
+    <p>Drop in a log file and get a severity-ranked incident summary — what failed first, what it affected, and what to check next.</p>
   </section>
 
   {% if error %}
@@ -127,6 +128,8 @@ document.addEventListener('DOMContentLoaded', function() {
   <p class="demo-cta">No log handy? <a href="/demo">Try with sample logs →</a></p>
   <p class="demo-cta">Want the full picture? <a href="/sample-report">See a sample Investigation Report →</a></p>
   <p class="rate-note s2-note-row">Free tier: {{ remaining }} of 10 analyses left this hour · No signup needed · Temporary processing</p>
+  {# Fidelity G12: privacy tagline under the form (Analyze surface). #}
+  <p class="s1-tagline" data-s1-tagline>Your logs. Your insights. Your control.</p>
 
   <div class="s2-entry-grid">
     <a class="s2-entry-card" href="/compare" data-s2-entry="compare">

@@ -46,6 +46,30 @@ def _as_aware(dt: datetime | None) -> datetime | None:
     return dt
 
 
+def assign_ss_id(db: Session, result, when: datetime) -> str:
+    """Issue #170 fidelity (S1-C2): assign the SS-format display ID.
+
+    Daily sequence: the suffix is one past the highest suffix already
+    stored for the analysis date, so values are unique per day and
+    stable once flushed. Called inside the store transaction, after
+    the Result row exists; the column's unique index is the backstop.
+    """
+    from app.fidelity import format_ss_id
+    prefix = f"SS-{when.strftime('%Y%m%d')}-"
+    existing = db.execute(
+        select(models.Result.ss_id).where(
+            models.Result.ss_id.like(prefix + "%"))
+    ).scalars().all()
+    highest = 0
+    for value in existing:
+        try:
+            highest = max(highest, int(str(value).rsplit("-", 1)[1]))
+        except (ValueError, IndexError):
+            continue
+    result.ss_id = format_ss_id(when, highest + 1)
+    return result.ss_id
+
+
 # ---------------------------------------------------------------------------
 # Configuration (v11.1 Section 6: unvalidated proposals, config not hardcoded)
 # ---------------------------------------------------------------------------
@@ -898,6 +922,8 @@ def store_product_result(db, user_id, redemption_id, data, *, result_type="deep_
         ready_at=now, expires_at=now + timedelta(days=retention_days))
     db.add(result)
     db.flush()
+    assign_ss_id(db, result, now)
+    db.flush()
     return result
 
 
@@ -1094,6 +1120,9 @@ def store_result(db, user_id, operation_id, data, *, result_type="analysis", sev
         ready_at=now, expires_at=now + timedelta(days=7))
     db.add(result)
     db.flush()
+    if result_type in ("analysis", "comparison", "deep_dive"):
+        assign_ss_id(db, result, now)
+        db.flush()
     return result
 
 

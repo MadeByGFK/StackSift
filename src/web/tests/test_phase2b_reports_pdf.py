@@ -531,8 +531,10 @@ def test_fresh_analysis_result_shows_pdf_export_button(env):
     # per-format "Export PDF (2 credits)" button on the report page.
     # PREMISE-CHANGED again by issue #136 (one job per page): that
     # dropdown is now the single "Actions" menu on the report page.
-    assert ">Actions</button>" in resp.text
-    assert ">Export PDF</button>" in resp.text
+    # PREMISE CHANGED AGAIN (fidelity G1, 2026-11-10): direct
+    # export controls replace the Actions menu.
+    assert 'data-s1-actions' in resp.text
+    assert ">Export PDF" in resp.text
     assert "Export PDF (2 credits)" not in resp.text
 
     # Replay of the same request (no re-analysis) shows the button too.

@@ -664,11 +664,16 @@ def build_notable_events(ranked, issues, incident_templates):
         issue = issues[template]
         # Include CRITICAL/ERROR, or top-ranked WARNs
         if issue["level"] in ("CRITICAL", "ERROR") or len(notable) < 5:
+            services = issue.get("services") or []
             notable.append({
                 "template": template[:100],
                 "level": issue["level"],
                 "count": issue["count"],
                 "score": round(score, 1),
+                # Fidelity G8: source projected from the issue's own
+                # retained services (first listed); None when the
+                # issue recorded no service — never invented.
+                "source": services[0] if services else None,
             })
         if len(notable) >= 10:
             break
