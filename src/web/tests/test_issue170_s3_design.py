@@ -79,6 +79,31 @@ of the design-fidelity diff land on this PR before merge):
       superseding the #144 Analyzed/Created prefix (founder
       fidelity ruling 2026-11-10); deep_dive rows stay
       distinguished by the Investigation Report kind-title.
+
+Founder mobile-fix ruling (2026-11-10, hand-check of merged S3 on
+his phone — the S3 hand-check was NOT a pass):
+  M1  SUPERSEDES G1 FOR MY REPORTS ONLY, at all widths: row Export
+      is ONE button with a styled dropdown (founder: "Make it a
+      drop down on desktop too"). The S1 Report page keeps G1's
+      direct controls. Each export keeps its own form (action URL,
+      CSRF input, data-confirm byte-identical) INSIDE the dropdown
+      panel; no per-format direct buttons remain in the actions
+      row. Premise-changed tests: the G1 no-dropdown test is
+      replaced by the mobile-fix tests below, the full-inventory
+      and hooks tests now pin the toggle/panel structure, and all
+      other G1-era assertions (labels, confirms, gating, absences)
+      carry over unchanged.
+  M2  Mobile rows reflow to a ~three-line stacked layout (line 1:
+      icon + filename + severity pill, fully visible; line 2: state
+      word + retention/expiry + share-state, with the date cell;
+      line 3: one compact actions row — no full-width stacked
+      buttons), pinned by data-s3-line hooks (1/1/2/2/3 across the
+      five cells) and the mobile grid CSS. At mobile width the
+      table wrap no longer clips (overflow visible), so the
+      dropdown panel is not inside an overflow-clipped ancestor.
+  The Batch entry card under the table (founder ruling
+  2026-11-09) was checked on the base head for this slice
+  (5c780b17) and is ALREADY present — no change needed.
 """
 
 import json
@@ -255,7 +280,8 @@ def test_s3_css_blocks_are_s3_scoped():
 def test_s3_normal_row_full_action_inventory():
     rid = "row-normal"
     row = _row_for(_render([_report(id=rid)]), rid)
-    # G1: Open (renamed from View) + direct export controls.
+    # M1 (supersedes G1 on this surface): Open + ONE Export button
+    # whose dropdown panel holds the three export forms.
     assert ">Open</a>" in row
     assert ">View</a>" not in row
     assert f'action="/reports/{rid}/pdf"' in row
@@ -281,34 +307,103 @@ def test_s3_normal_row_full_action_inventory():
     assert row.count("data-retention-status") == 1
 
 
-def test_s3_g1_no_export_dropdown_anywhere():
-    """G1 teeth + Codex clipping regression gate: the Export
-    dropdown is REMOVED, so the .s3-table-wrap overflow-x clipping
-    found by Codex on c66f61cd (overflow-y computing to auto and
-    clipping the absolutely-positioned .menu below the table) is
-    remediated by construction. No menu markup, toggle, or menu
-    CSS/JS remains in reports.html at all; exports are three
-    inline forms whose submits are uniform btn-ghost, and no
-    "Free" tag is rendered (S3-R2)."""
-    rid = "row-g1"
+def test_s3_mobilefix_single_export_button_and_menu():
+    """M1 teeth (founder mobile-fix ruling 2026-11-10, superseding
+    G1 on My Reports at ALL widths): each row carries exactly ONE
+    Export button (the dropdown toggle, quiet btn-ghost, with
+    aria-haspopup/aria-expanded) and exactly ONE dropdown panel,
+    initially hidden and styled in the house system. The three
+    export forms live INSIDE the panel, in PDF/CSV/JSON order,
+    each with its action URL, CSRF input and locked data-confirm
+    byte-identical to the direct-control era; NO per-format export
+    form or submit appears in the actions row outside the panel.
+    No "Free" tag is rendered (S3-R2). Fails on the base tree,
+    where exports are three direct row forms and no toggle/panel
+    exists at all."""
+    rid = "row-m1"
     html = _render([_report(id=rid)])
     row = _row_for(html, rid)
-    for gone in ("menu-wrap", "export-toggle", 'class="menu"',
-                 "menu-item", f'id="menu-{rid}"', 'data-menu=',
-                 "btn-primary export", ">Export</button>"):
-        assert gone not in row, gone
-        assert gone not in REPORTS, gone
-    assert ".menu" not in REPORTS and ".export-toggle" not in REPORTS
-    # Uniform quiet styling: every export submit is btn-ghost and
-    # no row control carries btn-primary.
-    # Open + 3 export submits + Investigation Report + Share +
-    # Extend submit = 7 quiet controls on a normal row.
-    assert row.count("btn btn-ghost") == 7
+    assert row.count("data-s3-export-btn") == 1
+    assert row.count("data-s3-export-menu") == 1
+    assert ('class="btn btn-ghost s3-export-btn" aria-haspopup="true" '
+            'aria-expanded="false" data-s3-export-btn>Export '
+            '<span class="s3-caret" aria-hidden="true">▾</span>'
+            '</button>') in row
+    assert '<div class="s3-export-menu" data-s3-export-menu hidden>' in row
+    # Panel slice: the three export forms, in order, fully gated.
+    panel = row[row.index("data-s3-export-menu"):
+                row.index("</div>", row.index("data-s3-export-menu"))]
+    order = [panel.index(f'action="/reports/{rid}/pdf"'),
+             panel.index(f'action="/reports/{rid}/exports/csv"'),
+             panel.index(f'action="/reports/{rid}/exports/json"')]
+    assert order == sorted(order), order
+    assert panel.count('name="csrf_token"') == 3
+    assert panel.count(f'data-confirm="{_LOCKED}"') == 3
     for label in ("Export PDF", "Export CSV", "Export JSON"):
-        assert f'class="btn btn-ghost">{label}</button>' in row, label
+        assert (f'class="btn btn-ghost s3-export-item">{label}</button>'
+                in panel), label
+    # Outside the panel there are no per-format direct controls:
+    # strip the panel (it ends at the wrapper's close, marked by
+    # the second closing div after the panel open) and re-check.
+    outside = row[:row.index('<div class="s3-export">')]
+    outside += row[row.index('</div>\n        </div>'):] \
+        if '</div>\n        </div>' in row else ""
+    assert "Export PDF" not in outside and "s3-export-form" not in outside
+    # Uniform quiet styling everywhere on the row: Open + Export
+    # toggle + 3 export submits + Investigation Report + Share +
+    # Extend submit = 8 quiet controls, no btn-primary.
+    assert row.count("btn btn-ghost") == 8
     assert "btn-primary" not in row
-    # No Free tag on exports (staged until #164 Phase C, S3-R2).
     assert ">Free<" not in row and "Free</span>" not in row
+    # The panel is styled in the house system (page tokens, panel
+    # surface, border, radius) and positioned against its wrapper.
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    assert ".s3-export{position:relative" in inline
+    assert ".s3-export-menu{position:absolute" in inline
+    assert "background:var(--panel)" in inline
+    assert ".s3-export-menu[hidden]{display:none}" in inline
+
+
+def test_s3_mobilefix_mobile_stacked_layout_hooks():
+    """M2 teeth: the three-line mobile structure is pinned in both
+    markup and CSS. Markup: data-s3-line groups the five cells as
+    1 (Report, Severity) / 2 (State, Date) / 3 (Actions). CSS: at
+    max-width 640px the row is a grid with exactly those areas,
+    the thead is hidden, the severity pill cannot wrap/clip, the
+    filename column can shrink (minmax(0,1fr)), the actions row's
+    buttons are compact (flex:none — NOT the full-width stacked
+    buttons Kolby flagged), and the table wrap stops clipping
+    (overflow:visible) so the export dropdown panel is not inside
+    an overflow-clipped ancestor at mobile width. Fails on the
+    base tree: no data-s3-line hooks and no grid block exist."""
+    rid = "row-m2"
+    row = _row_for(_render([_report(id=rid)]), rid)
+    assert row.count('data-s3-line="1"') == 2  # Report + Severity
+    assert row.count('data-s3-line="2"') == 2  # State + Date
+    assert row.count('data-s3-line="3"') == 1  # Actions
+    assert 'class="s3-report-cell" data-s3-line="1"' in row
+    assert 'class="s3-severity-cell" data-s3-line="1"' in row
+    assert 'class="s3-state-cell" data-s3-line="2"' in row
+    assert 'class="s3-date-cell" data-s3-line="2"' in row
+    assert 'class="s3-actions-cell" data-s3-line="3"' in row
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    mobile = inline[inline.rindex("@media (max-width:640px)"):]
+    assert ".s3-table-wrap{overflow:visible" in mobile
+    assert "display:grid" in mobile
+    assert ('grid-template-areas:"report severity" "state date" '
+            '"actions actions"') in mobile
+    assert "grid-template-columns:minmax(0,1fr) auto" in mobile
+    assert ".s3-table thead{display:none}" in mobile
+    assert ".s3-severity-cell .s3-pill{white-space:nowrap}" in mobile
+    assert ".s3-actions-cell .s3-actions-row .btn{flex:none" in mobile
+    assert "height:32px" in mobile
+    # The clipping rule the mobile block overrides is the desktop
+    # wrap's overflow-x — the override must come after it in source.
+    assert inline.index("overflow-x:auto") < \
+        mobile.index("overflow:visible") + inline.rindex(
+            "@media (max-width:640px)")
 
 
 def test_s3_g2_status_word_and_share_state_line():
@@ -515,9 +610,11 @@ def test_s3_hooks_and_confirm_texts_verbatim():
     rid = "row-hooks"
     html = _render([_report(id=rid)])
     row = _row_for(html, rid)
-    # G1: the dropdown's data-menu/aria-haspopup hooks are gone
-    # with the menu itself; every other hook is carried verbatim.
-    assert "data-menu" not in row and "aria-haspopup" not in row
+    # M1: the old data-menu hook stays gone; the new toggle carries
+    # aria-haspopup exactly once (its own hook, data-s3-export-btn).
+    assert "data-menu" not in row
+    assert row.count('aria-haspopup="true"') == 1
+    assert row.count("data-s3-export-btn") == 1
     assert f'data-confirm="{_EXTEND_CONFIRM}"' in row
     assert "data-retention-form" in row
     assert 'name="idempotency_key" value="retention-key"' in row
@@ -636,6 +733,104 @@ def test_s3_nonported_surfaces_carry_no_s3_markup(auth_env):
                   "accent": None, "logo_url": None})
     assert "s3-" not in html
     assert "SAMPLE" in html
+
+
+# --- Mobile-fix dropdown behaviour (Node harness, separate script) ----------
+
+pytestmark_export_js = pytest.mark.skipif(
+    shutil.which("node") is None, reason="node required for template JS tests")
+
+_EXPORT_HARNESS = r"""
+'use strict';
+class El {
+  constructor(name) {
+    this.name = name; this.hidden = true; this.attrs = {};
+    this.listeners = {};
+  }
+  addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
+}
+function makeRow(prefix) {
+  const menu = new El(prefix + '-menu'); menu.hidden = true;
+  const btn = new El(prefix + '-btn'); btn.setAttribute('aria-expanded', 'false');
+  const wrap = new El(prefix + '-wrap');
+  wrap.querySelector = function (sel) { return sel === '[data-s3-export-menu]' ? menu : null; };
+  btn.closest = function (sel) { return sel === '.s3-export' ? wrap : null; };
+  return { btn: btn, menu: menu, wrap: wrap };
+}
+const rowA = makeRow('A'); const rowB = makeRow('B');
+const docListeners = {};
+globalThis.document = {
+  querySelectorAll: function (sel) {
+    if (sel === '[data-s3-export-menu]') { return [rowA.menu, rowB.menu]; }
+    if (sel === '[data-s3-export-btn]') { return [rowA.btn, rowB.btn]; }
+    return [];
+  },
+  addEventListener: function (ev, fn) { docListeners[ev] = fn; },
+};
+async function click(el) {
+  (el.listeners.click || []).forEach(function (fn) { fn({}); });
+}
+"""
+
+
+def _run_export_js(scenario):
+    script = None
+    for candidate in re.findall(r"<script>(.*?)</script>", REPORTS, re.S):
+        if "data-s3-export-btn" in candidate and "s3CloseMenus" in candidate:
+            script = candidate
+            break
+    assert script is not None, "reports.html export dropdown script not found"
+    full = (_EXPORT_HARNESS + "\n" + script + "\n(async () => {\n"
+            "  const out = {};\n" + scenario
+            + "\n  console.log('RESULT:' + JSON.stringify(out));\n"
+            "})().catch(function (e) { console.error(e && e.stack || e); "
+            "process.exit(3); });\n")
+    proc = subprocess.run(["node", "-e", full], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, \
+        f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
+    line = next(l for l in proc.stdout.splitlines()
+                if l.startswith("RESULT:"))
+    return json.loads(line[len("RESULT:"):])
+
+
+@pytestmark_export_js
+def test_s3_mobilefix_export_dropdown_toggle_behaviour():
+    """M1 behaviour teeth: the Export button toggles ONLY its own
+    row's panel (hidden + aria-expanded), opening a second row's
+    panel closes the first, re-clicking closes its own, and an
+    outside document click closes all. Fails on the base tree —
+    the dropdown script does not exist there, so the extractor
+    assertion fires before any behaviour is checked."""
+    out = _run_export_js("""
+      await click(rowA.btn);
+      out.aOpenHidden = rowA.menu.hidden;
+      out.aOpenAria = rowA.btn.getAttribute('aria-expanded');
+      await click(rowB.btn);
+      out.afterB_AHidden = rowA.menu.hidden;
+      out.afterB_AAria = rowA.btn.getAttribute('aria-expanded');
+      out.afterB_BHidden = rowB.menu.hidden;
+      out.afterB_BAria = rowB.btn.getAttribute('aria-expanded');
+      await click(rowB.btn);
+      out.bReclosedHidden = rowB.menu.hidden;
+      out.bReclosedAria = rowB.btn.getAttribute('aria-expanded');
+      await click(rowA.btn);
+      docListeners.click({ target: {} });
+      out.outsideAHidden = rowA.menu.hidden;
+      out.outsideAAria = rowA.btn.getAttribute('aria-expanded');
+    """)
+    assert out["aOpenHidden"] is False
+    assert out["aOpenAria"] == "true"
+    assert out["afterB_AHidden"] is True
+    assert out["afterB_AAria"] == "false"
+    assert out["afterB_BHidden"] is False
+    assert out["afterB_BAria"] == "true"
+    assert out["bReclosedHidden"] is True
+    assert out["bReclosedAria"] == "false"
+    assert out["outsideAHidden"] is True
+    assert out["outsideAAria"] == "false"
 
 
 # --- A4 browser tests (Node harness over the real inline script) ------------
