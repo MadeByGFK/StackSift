@@ -79,6 +79,80 @@ of the design-fidelity diff land on this PR before merge):
       superseding the #144 Analyzed/Created prefix (founder
       fidelity ruling 2026-11-10); deep_dive rows stay
       distinguished by the Investigation Report kind-title.
+
+Founder mobile-fix ruling (2026-11-10, hand-check of merged S3 on
+his phone — the S3 hand-check was NOT a pass):
+  M1  SUPERSEDES G1 FOR MY REPORTS ONLY, at all widths: row Export
+      is ONE button with a styled dropdown (founder: "Make it a
+      drop down on desktop too"). The S1 Report page keeps G1's
+      direct controls. Each export keeps its own form (action URL,
+      CSRF input, data-confirm byte-identical) INSIDE the dropdown
+      panel; no per-format direct buttons remain in the actions
+      row. Premise-changed tests: the G1 no-dropdown test is
+      replaced by the mobile-fix tests below, the full-inventory
+      and hooks tests now pin the toggle/panel structure, and all
+      other G1-era assertions (labels, confirms, gating, absences)
+      carry over unchanged.
+  M2  Mobile rows reflow to a ~three-line stacked layout (line 1:
+      icon + filename + severity pill, fully visible; line 2: state
+      word + retention/expiry + share-state, with the date cell;
+      line 3: one compact actions row — no full-width stacked
+      buttons), pinned by data-s3-line hooks (1/1/2/2/3 across the
+      five cells) and the mobile grid CSS. At mobile width the
+      table wrap no longer clips (overflow visible), so the
+      dropdown panel is not inside an overflow-clipped ancestor.
+  The Batch entry card under the table (founder ruling
+  2026-11-09) was checked on the base head for this slice
+  (5c780b17) and is ALREADY present — no change needed.
+
+Founder desktop addendum (2026-11-10 21:57 ET, PR #179 fold-in):
+  M3  ROW-UNDER at ALL widths: the seven row actions leave the
+      side ACTIONS column entirely and sit in their own full-width
+      row UNDER each report's main row (a second <tr> per report
+      whose single cell spans all four remaining columns). The
+      thead loses the "Actions" header. Desktop and mobile share
+      this one structure; on mobile the actions row IS line 3 of
+      the three-line sketch (data-s3-line="3" now sits on the
+      actions <tr>; main-row cells keep lines 1/2). The Date cell
+      renders as two clean lines (date / time UTC) with no
+      word-by-word wrap (white-space:nowrap on the cell + spans).
+      Premise-changed tests (named in advance, A8): the table
+      columns test (Actions column gone), the mobile stacked
+      layout hooks test (actions no longer a grid area inside
+      the main row; the main-row grid is two lines and the
+      actions <tr> is the mobile card's lower half), the
+      _row_for helper (a row segment now spans BOTH <tr>s), and
+      the G2/retention state-cell slices (unchanged anchors —
+      the actions cell still follows the state cell, now in the
+      second <tr>). Assertion strength is kept or raised.
+  M4  Codex P2 on PR #179: the export panel was right:0 with
+      min-width:196px; in the row-under structure the Export
+      trigger sits near the LEFT edge at all widths, so the
+      right-aligned panel overhung the viewport's left edge.
+      The panel now anchors to the trigger's left edge
+      (left:0; right:auto) and is capped at
+      max-width:calc(100vw - 24px).
+  M5  Runtime interaction tests (standing rule 2026-11-10): the
+      Node dropdown harness enumerates the mutation sequences
+      (open A -> open B, Escape, outside click) asserting the
+      DISPLAYED state (hidden + aria-expanded) after each step,
+      and a structural test pins the Share control + share-state
+      line to the same row's report id/keys after the move (the
+      share modal JS itself is untouched apart from a guarded
+      previous-sibling fallback in syncShareStateLineFor /
+      updateExtendedRow, needed because closest('.card') now
+      lands on the actions row first).
+  M6  PR #179 Codex P2 remediation: that fallback broke the
+      retention STATUS update — updateExtendedRow reassigned its
+      row variable to the main row, then looked
+      [data-retention-status] up there (always null; the status
+      lives in the actions row next to the form), so "Retention
+      extended." was never displayed. The fix keeps a separate
+      actions-row reference for the status lookup (falling back
+      to the main row only if the actions row has none), and the
+      Node harness mock now mirrors the real split-row DOM
+      (expiry in the main row, form + status in the actions-row
+      sibling) so the existing extend test has teeth for it.
 """
 
 import json
@@ -153,11 +227,16 @@ def _render(reports, **overrides):
 
 
 def _row_for(html, report_id):
+    # M3 premise change: a report's segment spans BOTH rows — the
+    # main <tr class="card s3-row"> and the row-under actions
+    # <tr class="card s3-actions-tr"> that follows it — up to the
+    # next report's main row (the same slicing the deep-dive row
+    # helpers in other test files already used).
     view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
     rows = html.split('<tr class="card s3-row">')
     matches = [r for r in rows if view_link in r]
     assert len(matches) == 1, report_id
-    return matches[0].split("</tr>")[0]
+    return matches[0].split("</tbody>")[0]
 
 
 # --- New table structure (TEETH) --------------------------------------------
@@ -169,10 +248,13 @@ def test_s3_table_structure_and_columns():
     assert '<div class="s3-table-wrap">' in html
     head = html[html.index("<thead>"):html.index("</thead>")]
     cols = [head.index(f">{name}<") for name in
-            ("Report", "Date", "Severity", "State &amp; retention",
-             "Actions")]
+            ("Report", "Date", "Severity", "State &amp; retention")]
     assert cols == sorted(cols), cols
+    # M3 premise change (founder ruling 2026-11-10 21:57): there
+    # is NO Actions column — the actions live in a row under.
+    assert ">Actions<" not in head
     assert html.count('<tr class="card s3-row">') == 1
+    assert html.count('<tr class="card s3-actions-tr"') == 1
     # The card list is gone (structure teeth, not a copy gate).
     assert '<ul class="list">' not in html
     assert '<li class="card">' not in html
@@ -255,7 +337,8 @@ def test_s3_css_blocks_are_s3_scoped():
 def test_s3_normal_row_full_action_inventory():
     rid = "row-normal"
     row = _row_for(_render([_report(id=rid)]), rid)
-    # G1: Open (renamed from View) + direct export controls.
+    # M1 (supersedes G1 on this surface): Open + ONE Export button
+    # whose dropdown panel holds the three export forms.
     assert ">Open</a>" in row
     assert ">View</a>" not in row
     assert f'action="/reports/{rid}/pdf"' in row
@@ -281,34 +364,204 @@ def test_s3_normal_row_full_action_inventory():
     assert row.count("data-retention-status") == 1
 
 
-def test_s3_g1_no_export_dropdown_anywhere():
-    """G1 teeth + Codex clipping regression gate: the Export
-    dropdown is REMOVED, so the .s3-table-wrap overflow-x clipping
-    found by Codex on c66f61cd (overflow-y computing to auto and
-    clipping the absolutely-positioned .menu below the table) is
-    remediated by construction. No menu markup, toggle, or menu
-    CSS/JS remains in reports.html at all; exports are three
-    inline forms whose submits are uniform btn-ghost, and no
-    "Free" tag is rendered (S3-R2)."""
-    rid = "row-g1"
+def test_s3_mobilefix_single_export_button_and_menu():
+    """M1 teeth (founder mobile-fix ruling 2026-11-10, superseding
+    G1 on My Reports at ALL widths): each row carries exactly ONE
+    Export button (the dropdown toggle, quiet btn-ghost, with
+    aria-haspopup/aria-expanded) and exactly ONE dropdown panel,
+    initially hidden and styled in the house system. The three
+    export forms live INSIDE the panel, in PDF/CSV/JSON order,
+    each with its action URL, CSRF input and locked data-confirm
+    byte-identical to the direct-control era; NO per-format export
+    form or submit appears in the actions row outside the panel.
+    No "Free" tag is rendered (S3-R2). Fails on the base tree,
+    where exports are three direct row forms and no toggle/panel
+    exists at all."""
+    rid = "row-m1"
     html = _render([_report(id=rid)])
     row = _row_for(html, rid)
-    for gone in ("menu-wrap", "export-toggle", 'class="menu"',
-                 "menu-item", f'id="menu-{rid}"', 'data-menu=',
-                 "btn-primary export", ">Export</button>"):
-        assert gone not in row, gone
-        assert gone not in REPORTS, gone
-    assert ".menu" not in REPORTS and ".export-toggle" not in REPORTS
-    # Uniform quiet styling: every export submit is btn-ghost and
-    # no row control carries btn-primary.
-    # Open + 3 export submits + Investigation Report + Share +
-    # Extend submit = 7 quiet controls on a normal row.
-    assert row.count("btn btn-ghost") == 7
+    assert row.count("data-s3-export-btn") == 1
+    assert row.count("data-s3-export-menu") == 1
+    assert ('class="btn btn-ghost s3-export-btn" aria-haspopup="true" '
+            'aria-expanded="false" data-s3-export-btn>Export '
+            '<span class="s3-caret" aria-hidden="true">▾</span>'
+            '</button>') in row
+    assert '<div class="s3-export-menu" data-s3-export-menu hidden>' in row
+    # Panel slice: the three export forms, in order, fully gated.
+    panel = row[row.index("data-s3-export-menu"):
+                row.index("</div>", row.index("data-s3-export-menu"))]
+    order = [panel.index(f'action="/reports/{rid}/pdf"'),
+             panel.index(f'action="/reports/{rid}/exports/csv"'),
+             panel.index(f'action="/reports/{rid}/exports/json"')]
+    assert order == sorted(order), order
+    assert panel.count('name="csrf_token"') == 3
+    assert panel.count(f'data-confirm="{_LOCKED}"') == 3
     for label in ("Export PDF", "Export CSV", "Export JSON"):
-        assert f'class="btn btn-ghost">{label}</button>' in row, label
+        assert (f'class="btn btn-ghost s3-export-item">{label}</button>'
+                in panel), label
+    # Outside the panel there are no per-format direct controls:
+    # strip the panel (it ends at the wrapper's close, marked by
+    # the second closing div after the panel open) and re-check.
+    outside = row[:row.index('<div class="s3-export">')]
+    outside += row[row.index('</div>\n        </div>'):] \
+        if '</div>\n        </div>' in row else ""
+    assert "Export PDF" not in outside and "s3-export-form" not in outside
+    # Uniform quiet styling everywhere on the row: Open + Export
+    # toggle + 3 export submits + Investigation Report + Share +
+    # Extend submit = 8 quiet controls, no btn-primary.
+    assert row.count("btn btn-ghost") == 8
     assert "btn-primary" not in row
-    # No Free tag on exports (staged until #164 Phase C, S3-R2).
     assert ">Free<" not in row and "Free</span>" not in row
+    # The panel is styled in the house system (page tokens, panel
+    # surface, border, radius) and positioned against its wrapper.
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    assert ".s3-export{position:relative" in inline
+    assert ".s3-export-menu{position:absolute" in inline
+    assert "background:var(--panel)" in inline
+    assert ".s3-export-menu[hidden]{display:none}" in inline
+    # M4 (Codex P2 on PR #179): the panel anchors to the trigger's
+    # LEFT edge — in the row-under structure the trigger sits near
+    # the left at all widths, so a right:0 panel overhung the
+    # viewport's left edge and cut off the export controls — and
+    # it can never exceed the viewport width.
+    assert ".s3-export-menu{position:absolute;left:0;right:auto" \
+        in inline
+    assert "max-width:calc(100vw - 24px)" in inline
+    assert ".s3-export-menu{position:absolute;right:0" not in inline
+
+
+def test_s3_mobilefix_mobile_stacked_layout_hooks():
+    """M2 teeth, as amended by M3 (founder ruling 2026-11-10
+    21:57 — premise changed, named in advance): the three lines
+    are now TWO rows. Markup: data-s3-line groups the main-row
+    cells as 1 (Report, Severity) / 2 (State, Date), and line 3
+    sits on the actions <tr> itself. CSS: at max-width 640px the
+    main row is a grid with exactly the line-1/line-2 areas, the
+    actions <tr> is the card's lower half (display:block, shared
+    panel/border, no separate margin), the thead is hidden, the
+    severity pill cannot wrap/clip, the filename column can
+    shrink (minmax(0,1fr)), the actions row's buttons are compact
+    (flex:none — NOT the full-width stacked buttons Kolby
+    flagged), and the table wrap stops clipping
+    (overflow:visible) so the export dropdown panel is not inside
+    an overflow-clipped ancestor at mobile width."""
+    rid = "row-m2"
+    row = _row_for(_render([_report(id=rid)]), rid)
+    assert row.count('data-s3-line="1"') == 2  # Report + Severity
+    assert row.count('data-s3-line="2"') == 2  # State + Date
+    assert row.count('data-s3-line="3"') == 1  # Actions <tr>
+    assert 'class="s3-report-cell" data-s3-line="1"' in row
+    assert 'class="s3-severity-cell" data-s3-line="1"' in row
+    assert 'class="s3-state-cell" data-s3-line="2"' in row
+    assert 'class="s3-date-cell" data-s3-line="2"' in row
+    assert '<tr class="card s3-actions-tr" data-s3-line="3">' in row
+    assert 'class="s3-actions-cell" data-s3-line="3"' not in row
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    mobile = inline[inline.rindex("@media (max-width:640px)"):]
+    assert ".s3-table-wrap{overflow:visible" in mobile
+    assert "display:grid" in mobile
+    assert ('grid-template-areas:"report severity" "state date"'
+            ) in mobile
+    assert '"actions actions"' not in mobile
+    assert "grid-template-columns:minmax(0,1fr) auto" in mobile
+    assert ".s3-table thead{display:none}" in mobile
+    assert (".s3-table tbody tr.card.s3-actions-tr{display:block"
+            in mobile)
+    assert ".s3-severity-cell .s3-pill{white-space:nowrap}" in mobile
+    assert ".s3-actions-cell .s3-actions-row .btn{flex:none" in mobile
+    assert "height:32px" in mobile
+    # The clipping rule the mobile block overrides is the desktop
+    # wrap's overflow-x — the override must come after it in source.
+    assert inline.index("overflow-x:auto") < \
+        mobile.index("overflow:visible") + inline.rindex(
+            "@media (max-width:640px)")
+
+
+def test_s3_rowunder_actions_row_structure():
+    """M3 teeth (founder ruling 2026-11-10 21:57, all widths): the
+    seven row actions are NOT in the main row at all — the main
+    <tr> carries only the four content cells — and sit in their
+    own full-width row under it: a second <tr> whose single cell
+    spans all four columns (colspan="4") and carries the actions
+    container. Order inside the actions row is Open / Export /
+    Investigation Report / Share / Extend, every control quiet
+    btn-ghost. The desktop CSS gives the actions row's spanning
+    cell the group separator (the main row's cells carry none).
+    Fails on the pre-addendum tree (e632936c): the actions cell
+    sits inside the main row and the thead has an Actions column.
+    """
+    rid = "row-under"
+    html = _render([_report(id=rid)])
+    assert ">Actions<" not in html
+    main = html[html.index('<tr class="card s3-row">'):]
+    main = main[:main.index("</tr>")]
+    for absent in (">Open</a>", "s3-export", ">Share</button>",
+                   "/retention", 'class="s3-actions-cell"'):
+        assert absent not in main, absent
+    assert main.count("<td") == 4
+    row = _row_for(html, rid)
+    assert '<tr class="card s3-actions-tr" data-s3-line="3">' in row
+    assert '<td class="s3-actions-cell" colspan="4">' in row
+    actions = row[row.index('<tr class="card s3-actions-tr"'):]
+    order = [actions.index(">Open</a>"),
+             actions.index("data-s3-export-btn"),
+             actions.index(">Investigation Report</button>"),
+             actions.index(">Share</button>"),
+             actions.index(">Extend</button>")]
+    assert order == sorted(order), order
+    assert actions.count("btn btn-ghost") == \
+        row.count("btn btn-ghost")  # all quiet controls are here
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    desktop = inline[:inline.rindex("@media (max-width:640px)")]
+    assert ".s3-table tbody tr.s3-row td{border-bottom:none}" \
+        in desktop
+    assert (".s3-table tbody tr.s3-actions-tr td{padding:2px 16px "
+            "16px;border-bottom:1px solid var(--border)}") in desktop
+
+
+def test_s3_rowunder_share_wiring_same_row():
+    """M5(d) structural gate: after the row-under move, the Share
+    control in the actions row and the Turn off control inside
+    the .s3-share-state line (state cell, main row) are still
+    wired to the SAME row's report — both share-open controls
+    carry this row's data-report and byte-identical create /
+    rotate / revoke keys, and no other row's id leaks in. The
+    share modal JS itself is untouched by the move (apart from
+    the guarded sibling fallback), so rendered-page structure is
+    the assertion surface for the wiring."""
+    rid_a, rid_b = "row-share-a", "row-share-b"
+    html = _render([
+        _report(id=rid_a, share_active=True, share_formats=["txt"],
+                share_create_key="create-a",
+                share_rotate_key="rotate-a",
+                share_revoke_key="revoke-a"),
+        _report(id=rid_b, share_active=True, share_formats=["txt"],
+                share_create_key="create-b",
+                share_rotate_key="rotate-b",
+                share_revoke_key="revoke-b"),
+    ])
+    for rid, suffix in ((rid_a, "a"), (rid_b, "b")):
+        row = _row_for(html, rid)
+        # State line lives in the MAIN row; Share in the row under.
+        state = row[:row.index('<tr class="card s3-actions-tr"')]
+        actions = row[row.index('<tr class="card s3-actions-tr"'):]
+        assert 'class="s3-share-state"' in state
+        assert ">Turn off</button>" in state
+        assert ">Share</button>" in actions
+        attrs = re.findall(
+            r'class="btn btn-ghost share-open"([^>]*)>', row)
+        assert len(attrs) == 2, attrs
+        assert attrs[0] == attrs[1], attrs
+        for attr in (f'data-report="{rid}"',
+                     f'data-create-key="create-{suffix}"',
+                     f'data-rotate-key="rotate-{suffix}"',
+                     f'data-revoke-key="revoke-{suffix}"'):
+            assert attr in attrs[0], attr
+        other = "b" if suffix == "a" else "a"
+        assert f"create-{other}" not in row
 
 
 def test_s3_g2_status_word_and_share_state_line():
@@ -370,6 +623,17 @@ def test_s3_g4_date_cell_two_lines():
         assert '<span class="s3-date-sub">12:00 UTC</span>' in cell
         assert "Analyzed" not in cell and "Created" not in cell
         assert "2026-11-04 12:00" not in cell
+    # M3 date premise (founder addendum 2026-11-10 21:57): the two
+    # lines must not wrap word-by-word in a narrow column — the
+    # cell and both spans are white-space:nowrap at ALL widths
+    # (the rules live outside the mobile media block).
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    desktop = inline[:inline.rindex("@media (max-width:640px)")]
+    assert ".s3-date-cell{white-space:nowrap}" in desktop
+    assert ".s3-date-line{display:block;white-space:nowrap}" in desktop
+    assert "white-space:nowrap" in desktop.split(
+        ".s3-date-sub{")[1].split("}")[0]
 
 
 def test_s3_unlocked_row_export_confirms_are_free_text():
@@ -515,9 +779,11 @@ def test_s3_hooks_and_confirm_texts_verbatim():
     rid = "row-hooks"
     html = _render([_report(id=rid)])
     row = _row_for(html, rid)
-    # G1: the dropdown's data-menu/aria-haspopup hooks are gone
-    # with the menu itself; every other hook is carried verbatim.
-    assert "data-menu" not in row and "aria-haspopup" not in row
+    # M1: the old data-menu hook stays gone; the new toggle carries
+    # aria-haspopup exactly once (its own hook, data-s3-export-btn).
+    assert "data-menu" not in row
+    assert row.count('aria-haspopup="true"') == 1
+    assert row.count("data-s3-export-btn") == 1
     assert f'data-confirm="{_EXTEND_CONFIRM}"' in row
     assert "data-retention-form" in row
     assert 'name="idempotency_key" value="retention-key"' in row
@@ -638,6 +904,146 @@ def test_s3_nonported_surfaces_carry_no_s3_markup(auth_env):
     assert "SAMPLE" in html
 
 
+# --- Mobile-fix dropdown behaviour (Node harness, separate script) ----------
+
+pytestmark_export_js = pytest.mark.skipif(
+    shutil.which("node") is None, reason="node required for template JS tests")
+
+_EXPORT_HARNESS = r"""
+'use strict';
+class El {
+  constructor(name) {
+    this.name = name; this.hidden = true; this.attrs = {};
+    this.listeners = {};
+  }
+  addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
+}
+function makeRow(prefix) {
+  const menu = new El(prefix + '-menu'); menu.hidden = true;
+  const btn = new El(prefix + '-btn'); btn.setAttribute('aria-expanded', 'false');
+  const wrap = new El(prefix + '-wrap');
+  wrap.querySelector = function (sel) { return sel === '[data-s3-export-menu]' ? menu : null; };
+  btn.closest = function (sel) { return sel === '.s3-export' ? wrap : null; };
+  return { btn: btn, menu: menu, wrap: wrap };
+}
+const rowA = makeRow('A'); const rowB = makeRow('B');
+const docListeners = {};
+globalThis.document = {
+  querySelectorAll: function (sel) {
+    if (sel === '[data-s3-export-menu]') { return [rowA.menu, rowB.menu]; }
+    if (sel === '[data-s3-export-btn]') { return [rowA.btn, rowB.btn]; }
+    return [];
+  },
+  addEventListener: function (ev, fn) { docListeners[ev] = fn; },
+};
+async function click(el) {
+  (el.listeners.click || []).forEach(function (fn) { fn({}); });
+}
+"""
+
+
+def _run_export_js(scenario):
+    script = None
+    for candidate in re.findall(r"<script>(.*?)</script>", REPORTS, re.S):
+        if "data-s3-export-btn" in candidate and "s3CloseMenus" in candidate:
+            script = candidate
+            break
+    assert script is not None, "reports.html export dropdown script not found"
+    full = (_EXPORT_HARNESS + "\n" + script + "\n(async () => {\n"
+            "  const out = {};\n" + scenario
+            + "\n  console.log('RESULT:' + JSON.stringify(out));\n"
+            "})().catch(function (e) { console.error(e && e.stack || e); "
+            "process.exit(3); });\n")
+    proc = subprocess.run(["node", "-e", full], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, \
+        f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
+    line = next(l for l in proc.stdout.splitlines()
+                if l.startswith("RESULT:"))
+    return json.loads(line[len("RESULT:"):])
+
+
+@pytestmark_export_js
+def test_s3_mobilefix_export_dropdown_toggle_behaviour():
+    """M1 behaviour teeth: the Export button toggles ONLY its own
+    row's panel (hidden + aria-expanded), opening a second row's
+    panel closes the first, re-clicking closes its own, and an
+    outside document click closes all. Fails on the base tree —
+    the dropdown script does not exist there, so the extractor
+    assertion fires before any behaviour is checked."""
+    out = _run_export_js("""
+      await click(rowA.btn);
+      out.aOpenHidden = rowA.menu.hidden;
+      out.aOpenAria = rowA.btn.getAttribute('aria-expanded');
+      await click(rowB.btn);
+      out.afterB_AHidden = rowA.menu.hidden;
+      out.afterB_AAria = rowA.btn.getAttribute('aria-expanded');
+      out.afterB_BHidden = rowB.menu.hidden;
+      out.afterB_BAria = rowB.btn.getAttribute('aria-expanded');
+      await click(rowB.btn);
+      out.bReclosedHidden = rowB.menu.hidden;
+      out.bReclosedAria = rowB.btn.getAttribute('aria-expanded');
+      await click(rowA.btn);
+      docListeners.click({ target: {} });
+      out.outsideAHidden = rowA.menu.hidden;
+      out.outsideAAria = rowA.btn.getAttribute('aria-expanded');
+    """)
+    assert out["aOpenHidden"] is False
+    assert out["aOpenAria"] == "true"
+    assert out["afterB_AHidden"] is True
+    assert out["afterB_AAria"] == "false"
+    assert out["afterB_BHidden"] is False
+    assert out["afterB_BAria"] == "true"
+    assert out["bReclosedHidden"] is True
+    assert out["bReclosedAria"] == "false"
+    assert out["outsideAHidden"] is True
+    assert out["outsideAAria"] == "false"
+
+
+@pytestmark_export_js
+def test_s3_mobilefix_export_dropdown_runtime_sequences():
+    """M5 runtime sequences (standing rule 2026-11-10 — displayed
+    state asserted after EACH mutation, DOM-level, not page
+    contract): (a) open Export on row A, then open Export on
+    row B -> A's panel hidden + A's aria-expanded="false", B's
+    open + "true"; (b) Escape closes the open panel and resets
+    aria-expanded; (c) an outside click closes it and resets
+    aria-expanded. Runs against the real inline dropdown script
+    extracted from reports.html, in the row-under structure."""
+    out = _run_export_js("""
+      // (a) A, then B through the second control sharing state.
+      await click(rowA.btn);
+      out.a1Hidden = rowA.menu.hidden;
+      out.a1Aria = rowA.btn.getAttribute('aria-expanded');
+      await click(rowB.btn);
+      out.aAHidden = rowA.menu.hidden;
+      out.aAAria = rowA.btn.getAttribute('aria-expanded');
+      out.aBHidden = rowB.menu.hidden;
+      out.aBAria = rowB.btn.getAttribute('aria-expanded');
+      // (b) Escape closes B and resets its aria-expanded.
+      docListeners.keydown({ key: 'Escape' });
+      out.bBHidden = rowB.menu.hidden;
+      out.bBAria = rowB.btn.getAttribute('aria-expanded');
+      out.bAHidden = rowA.menu.hidden;
+      out.bAAria = rowA.btn.getAttribute('aria-expanded');
+      // (c) Reopen A, then an outside click closes it.
+      await click(rowA.btn);
+      out.cPreHidden = rowA.menu.hidden;
+      docListeners.click({ target: {} });
+      out.cAHidden = rowA.menu.hidden;
+      out.cAAria = rowA.btn.getAttribute('aria-expanded');
+    """)
+    assert out["a1Hidden"] is False and out["a1Aria"] == "true"
+    assert out["aAHidden"] is True and out["aAAria"] == "false"
+    assert out["aBHidden"] is False and out["aBAria"] == "true"
+    assert out["bBHidden"] is True and out["bBAria"] == "false"
+    assert out["bAHidden"] is True and out["bAAria"] == "false"
+    assert out["cPreHidden"] is False
+    assert out["cAHidden"] is True and out["cAAria"] == "false"
+
+
 # --- A4 browser tests (Node harness over the real inline script) ------------
 
 pytestmark_js = pytest.mark.skipif(
@@ -684,10 +1090,23 @@ function makeRow(prefix, expiryText, pillText) {
   const dateEl = new El(prefix + '-date'); dateEl.textContent = expiryText;
   const pillEl = new El(prefix + '-pill'); pillEl.textContent = pillText;
   const statusEl = new El(prefix + '-status'); statusEl.style.display = 'none';
-  const rowEl = new El(prefix + '-row');
-  rowEl.querySelector = function (sel) {
+  // PR #179 Codex P2 fixture: mirror the REAL row-under DOM — the
+  // expiry date/pill live in the MAIN row, while the retention
+  // form and its [data-retention-status] element live in a
+  // separate ACTIONS row (.card) whose previousElementSibling is
+  // the main row and whose closest('.card') is itself. The old
+  // mock placed all three elements in one row, which hid the bug
+  // where updateExtendedRow fell back to the main row and then
+  // looked the status element up there (always null).
+  const mainRowEl = new El(prefix + '-main-row');
+  mainRowEl.querySelector = function (sel) {
     if (sel === '[data-retention-expiry-date]') { return dateEl; }
     if (sel === '[data-retention-expiry-pill]') { return pillEl; }
+    return null;
+  };
+  const rowEl = new El(prefix + '-row');
+  rowEl.previousElementSibling = mainRowEl;
+  rowEl.querySelector = function (sel) {
     if (sel === '[data-retention-status]') { return statusEl; }
     return null;
   };
@@ -695,6 +1114,7 @@ function makeRow(prefix, expiryText, pillText) {
   const form = new El(prefix + '-form');
   form.action = '/reports/' + prefix + '/retention';
   form._row = rowEl;
+  form._mainRow = mainRowEl;
   form.getAttribute = function (k) {
     if (k === 'data-confirm') { return "Extend this report's retention by 90 days for 1 credit?"; }
     return El.prototype.getAttribute.call(this, k);
@@ -702,7 +1122,9 @@ function makeRow(prefix, expiryText, pillText) {
   form.querySelector = function (sel) { return sel.indexOf('submit') !== -1 ? btn : null; };
   form.closest = function (sel) { return sel === '.card' ? rowEl : null; };
   form.requestSubmit = function () { dispatchSubmit(form); };
-  return { form: form, rowEl: rowEl, dateEl: dateEl, pillEl: pillEl, statusEl: statusEl, btn: btn };
+  return { form: form, rowEl: rowEl, mainRowEl: mainRowEl,
+           actionsRowEl: rowEl, dateEl: dateEl, pillEl: pillEl,
+           statusEl: statusEl, btn: btn };
 }
 function dispatchSubmit(form) {
   const ev = {
@@ -867,9 +1289,16 @@ def test_s3_browser_two_rows_present():
 
 @pytestmark_js
 def test_s3_browser_extend_updates_only_that_row():
-    """A4 browser test: Extend submitted on row A updates ONLY row
-    A's expiry date/pill/status (via form.closest('.card'), the
-    preserved ancestor contract); row B is byte-identical after."""
+    """A4 browser test + PR #179 Codex P2 regression: Extend
+    submitted on row A updates ONLY row A's expiry date/pill (on
+    the MAIN row, reached via the actions row's
+    previousElementSibling fallback) AND its retention status
+    (on the ACTIONS row, where the form lives — text set to
+    "Retention extended." and display cleared so it is shown /
+    announced); row B is byte-identical after. The harness mock
+    mirrors the real split-row DOM, so this fails on the pre-fix
+    template: the fallen-back main-row status lookup returned
+    null and the status was never displayed."""
     out = _run_js("""
       fetchImpl = function () {
         return Promise.resolve({ ok: true, status: 200,
@@ -884,18 +1313,22 @@ def test_s3_browser_extend_updates_only_that_row():
       out.aDate = rowA.dateEl.textContent;
       out.aPill = rowA.pillEl.textContent;
       out.aStatus = rowA.statusEl.textContent;
+      out.aStatusDisplay = rowA.statusEl.style.display;
       out.bDate = rowB.dateEl.textContent;
       out.bPill = rowB.pillEl.textContent;
       out.bStatus = rowB.statusEl.textContent;
+      out.bStatusDisplay = rowB.statusEl.style.display;
       out.badge = byId('credit-badge').textContent;
     """)
     assert out["modalShown"] == "flex"
     assert out["aDate"] == "Expires 2027-02-09"
     assert out["aPill"] == "Expires in 97 days"
     assert out["aStatus"] == "Retention extended."
+    assert out["aStatusDisplay"] == ""
     assert out["bDate"] == "Expires 2026-11-11"
     assert out["bPill"] == "Expires in 7 days"
     assert out["bStatus"] == ""
+    assert out["bStatusDisplay"] == "none"
     assert "2 credits" in out["badge"]
 
 

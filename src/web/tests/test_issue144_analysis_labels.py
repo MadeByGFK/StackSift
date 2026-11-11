@@ -42,19 +42,31 @@ _TIME_LINE = r"\d{2}:\d{2} UTC"
 
 
 def _cards(page_text):
-    """Map report id -> that row's <tr class="card s3-row"> markup only.
+    """Map report id -> that report's row markup (main row + the
+    row-under actions row).
 
     Keyed by the row's own Open link (a source row's Investigation
     Report link also points at the derived report, so the Open
     link is the unambiguous row identity, mirroring
     test_deep_dive_paid). (Label premise changed 2026-11-10,
     S3-G1: "View" is now "Open".)
-    Each chunk is truncated at </tr> so page-level markup after the
-    list (modals etc.) cannot leak into a row's assertions.
+    PREMISE CHANGED (founder ruling 2026-11-10 21:57, S3 row-under
+    fold-in on PR #179): the Open link now lives in the actions
+    row UNDER the main row, so a chunk can no longer be truncated
+    at the first </tr> — the old truncation cut every chunk before
+    its Open link and all four tests failed on the keying
+    assertion. Instead the table is isolated first (so page-level
+    markup after the list — modals etc. — cannot leak into a
+    row's assertions, the protection the truncation provided) and
+    each chunk spans both <tr>s up to the next report's main row;
+    every assertion in this file is unchanged and at the same
+    strength.
     """
+    table = page_text.split('<table class="s3-table">')[1]
+    table = table.split("</table>")[0]
     cards = {}
-    for chunk in page_text.split('<tr class="card s3-row">')[1:]:
-        card = chunk.split("</tr>")[0]
+    for chunk in table.split('<tr class="card s3-row">')[1:]:
+        card = chunk
         m = re.search(r'href="/reports/([0-9a-f-]{36})" class="btn btn-ghost">Open', card)
         assert m, card[:200]
         cards[m.group(1)] = card

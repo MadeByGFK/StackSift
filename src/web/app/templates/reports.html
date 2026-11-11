@@ -67,9 +67,11 @@
   .btn-primary:hover{background:#e0bd4a}
   .btn-primary .cost{font-weight:500;opacity:.75}
 
-  /* Issue #129: popup modals (the Export dropdown was removed by
-     the 2026-11-10 founder fidelity ruling on PR #177 — exports are
-     direct inline controls now, see the actions cell below) */
+  /* Issue #129: popup modals (the Export dropdown presentation on
+     My Reports is governed by the 2026-11-10 founder mobile-fix
+     ruling — one Export button with a styled dropdown in the
+     actions cell below, superseding PR #177's direct controls
+     for this surface only) */
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50}
   .modal-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:420px;width:90%}
   .modal-card p{margin:0 0 14px}
@@ -139,8 +141,17 @@
   .s3-status-word{font-weight:700}
   .s3-share-state{display:block;margin-top:8px;color:var(--muted);font-size:13px}
   .s3-share-state .btn{height:30px;padding:0 10px;font-size:13px;margin-left:6px}
-  .s3-date-line{display:block}
-  .s3-date-sub{display:block;color:var(--muted);font-size:13px;margin-top:2px}
+  .s3-date-cell{white-space:nowrap}
+  .s3-date-line{display:block;white-space:nowrap}
+  .s3-date-sub{display:block;color:var(--muted);font-size:13px;margin-top:2px;white-space:nowrap}
+  /* Row-under actions (founder ruling 2026-11-10 21:57 ET, all
+     widths): the actions live in their own full-width row under
+     the main row — the main row's cells carry no bottom border,
+     the actions row's single spanning cell carries the separator
+     between report groups. */
+  .s3-table tbody tr.s3-row td{border-bottom:none}
+  .s3-table tbody tr.s3-actions-tr td{padding:2px 16px 16px;border-bottom:1px solid var(--border)}
+  .s3-table tbody tr.s3-actions-tr:last-child td{border-bottom:none}
   .s3-report-sub{color:var(--muted);font-size:13px;margin-top:2px;font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
   .s3-actions-cell .actions{flex-wrap:wrap}
   .s3-empty{border-top:3px solid var(--accent)}
@@ -149,8 +160,41 @@
   .s3-entry-title{display:block;font-size:16px;font-weight:700;margin:0 0 6px}
   .s3-entry-sub{display:block;color:var(--muted);font-size:14px;line-height:1.5}
   .s3-entry-link{display:block;color:var(--accent);font-weight:600;font-size:14px;margin-top:12px}
+  /* S3 mobile fix (founder ruling 2026-11-10): Export is ONE button
+     with a styled dropdown at ALL widths on My Reports only (the
+     S1 Report page keeps its direct export controls). The menu is
+     positioned against its .s3-export wrapper; on mobile the table
+     wrap stops clipping (overflow visible in the media block below)
+     and rows reflow to the ruled three-line stacked layout. */
+  .s3-export{position:relative;display:inline-block}
+  .s3-export-btn{white-space:nowrap}
+  .s3-caret{font-size:11px;color:var(--accent)}
+  .s3-export-menu{position:absolute;left:0;right:auto;top:calc(100% + 6px);z-index:40;min-width:196px;max-width:calc(100vw - 24px);background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:6px;box-shadow:0 14px 30px rgba(0,0,0,.38);display:flex;flex-direction:column;gap:4px}
+  .s3-export-menu[hidden]{display:none}
+  .s3-export-menu .s3-export-form{display:block;margin:0}
+  .s3-export-menu .s3-export-item{width:100%;justify-content:flex-start}
   @media (max-width:640px){
     .s3-table th,.s3-table td{padding:12px}
+    /* Three-line stacked rows: the wrap no longer clips (no
+       overflow-x ancestor at mobile), the thead is hidden, and the
+       row becomes a grid — line 1 Report+Severity, line 2
+       State+Date, line 3 the compact actions row. */
+    .s3-table-wrap{overflow:visible;border:none;background:transparent;border-radius:0}
+    .s3-table{display:block;width:100%}
+    .s3-table thead{display:none}
+    .s3-table tbody{display:block}
+    .s3-table tbody tr.card.s3-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"report severity" "state date";gap:10px 12px;padding:16px;background:var(--panel);border:1px solid var(--border);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0;margin-bottom:0;overflow:visible}
+    .s3-table tbody tr.card.s3-actions-tr{display:block;background:var(--panel);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);margin-bottom:12px;padding:0 16px 16px;overflow:visible}
+    .s3-table td.s3-report-cell{grid-area:report;padding:0;border-bottom:none;min-width:0}
+    .s3-table td.s3-severity-cell{grid-area:severity;padding:0;border-bottom:none;align-self:start;white-space:nowrap}
+    .s3-table td.s3-state-cell{grid-area:state;padding:0;border-bottom:none;min-width:0}
+    .s3-table td.s3-date-cell{grid-area:date;padding:0;border-bottom:none;text-align:right;white-space:nowrap}
+    .s3-table td.s3-actions-cell{display:block;padding:0;border-bottom:none}
+    .s3-report-cell .s3-report-main{min-width:0}
+    .s3-severity-cell .s3-pill{white-space:nowrap}
+    .s3-actions-cell .s3-actions-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;width:100%;padding-top:12px;border-top:1px solid var(--border)}
+    .s3-actions-cell .s3-actions-row .btn{flex:none;height:32px;padding:0 10px;font-size:13px}
+    .s3-export .s3-export-menu{left:0;right:auto}
   }
 </style>
 </head>
@@ -191,12 +235,12 @@
   <div class="s3-table-wrap">
   <table class="s3-table">
     <thead>
-      <tr><th scope="col">Report</th><th scope="col">Date</th><th scope="col">Severity</th><th scope="col">State &amp; retention</th><th scope="col">Actions</th></tr>
+      <tr><th scope="col">Report</th><th scope="col">Date</th><th scope="col">Severity</th><th scope="col">State &amp; retention</th></tr>
     </thead>
     <tbody>
     {% for report in reports %}
     <tr class="card s3-row">
-      <td class="s3-report-cell"><div class="s3-report-main"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warn{% elif report.severity == 'errors' %} err{% else %} neutral{% endif %}"></span></div>
+      <td class="s3-report-cell" data-s3-line="1"><div class="s3-report-main"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warn{% elif report.severity == 'errors' %} err{% else %} neutral{% endif %}"></span></div>
       <div class="info">
         {# Issue #144: Investigation Report (deep_dive) rows carry an
            "Investigation Report" title above the filename so they are
@@ -209,7 +253,7 @@
            format label, each only when the row carries it. #}
         {% if report.ss_id or report.format_label %}<div class="s3-report-sub" data-s3-report-sub>{{ report.ss_id or '' }}{% if report.ss_id and report.format_label %} · {% endif %}{{ report.format_label or '' }}</div>{% endif %}
       </div></div></td>
-      <td class="s3-date-cell">
+      <td class="s3-date-cell" data-s3-line="2">
           {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G4):
              two-line date cell — date over time (UTC). This
              supersedes the #144 Analyzed/Created prefix; deep_dive
@@ -218,8 +262,8 @@
           <span class="s3-date-line">{{ report.created_at.strftime('%b %d, %Y') }}</span>
           <span class="s3-date-sub">{{ report.created_at.strftime('%H:%M') }} UTC</span>
       </td>
-      <td class="s3-severity-cell"><span class="s3-pill{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warnings{% elif report.severity == 'errors' %} errors{% else %} neutral{% endif %}">{% if report.severity == 'ok' %}OK{% elif report.severity == 'warnings' %}Warnings{% elif report.severity == 'errors' %}Errors{% else %}—{% endif %}</span></td>
-      <td class="s3-state-cell">
+      <td class="s3-severity-cell" data-s3-line="1"><span class="s3-pill{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warnings{% elif report.severity == 'errors' %} errors{% else %} neutral{% endif %}">{% if report.severity == 'ok' %}OK{% elif report.severity == 'warnings' %}Warnings{% elif report.severity == 'errors' %}Errors{% else %}—{% endif %}</span></td>
+      <td class="s3-state-cell" data-s3-line="2">
           {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G2):
              bold status word first — "Expired" exactly for
              redemption_only rows (the only expired rows this list
@@ -235,33 +279,39 @@
           <span class="s3-share-state">Link sharing on — anyone with the link can view <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Turn off</button></span>
           {% endif %}
       </td>
-      <td class="s3-actions-cell"><div class="actions">
-        {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G1): row
-           actions are DIRECT controls in the design pattern — no
-           Export dropdown/menu (which the table's overflow-x also
-           clipped, per the Codex findings on c66f61cd). Each export
-           keeps its own form with its action URL, CSRF input and
-           data-confirm text byte-identical to the menu version;
-           every row control is uniformly quiet (btn-ghost). No
-           "Free" tag (S3-R2: staged until #164 Phase C). Row order:
-           Open / Export PDF / Export CSV / Export JSON /
+    </tr>
+    <tr class="card s3-actions-tr" data-s3-line="3">
+      <td class="s3-actions-cell" colspan="4"><div class="actions s3-actions-row">
+        {# Founder mobile-fix ruling 2026-11-10 (supersedes PR #177
+           S3-G1 FOR MY REPORTS ONLY, at all widths): row Export is
+           ONE button with a styled dropdown. Each export keeps its
+           own form with its action URL, CSRF input and data-confirm
+           text byte-identical; the forms live inside the dropdown
+           panel, not as direct row controls. Every row control is
+           uniformly quiet (btn-ghost). No "Free" tag (S3-R2: staged
+           until #164 Phase C). Row order: Open / Export /
            Investigation Report / Share / Extend. #}
         <a href="/reports/{{ report.id }}" class="btn btn-ghost">Open</a>
         {% if not report.redemption_only %}
-            <form method="post" action="/reports/{{ report.id }}/pdf" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="display:inline;margin:0">
+        <div class="s3-export">
+          <button type="button" class="btn btn-ghost s3-export-btn" aria-haspopup="true" aria-expanded="false" data-s3-export-btn>Export <span class="s3-caret" aria-hidden="true">▾</span></button>
+          <div class="s3-export-menu" data-s3-export-menu hidden>
+            <form method="post" action="/reports/{{ report.id }}/pdf" class="s3-export-form" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="btn btn-ghost">Export PDF</button>
+              <button type="submit" class="btn btn-ghost s3-export-item">Export PDF</button>
             </form>
             {% if report.type != 'comparison' and report.report_kind != 'batch' %}
-            <form method="post" action="/reports/{{ report.id }}/exports/csv" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="display:inline;margin:0">
+            <form method="post" action="/reports/{{ report.id }}/exports/csv" class="s3-export-form" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="btn btn-ghost">Export CSV</button>
+              <button type="submit" class="btn btn-ghost s3-export-item">Export CSV</button>
             </form>
-            <form method="post" action="/reports/{{ report.id }}/exports/json" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="display:inline;margin:0">
+            <form method="post" action="/reports/{{ report.id }}/exports/json" class="s3-export-form" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="btn btn-ghost">Export JSON</button>
+              <button type="submit" class="btn btn-ghost s3-export-item">Export JSON</button>
             </form>
             {% endif %}
+          </div>
+        </div>
         {% endif %}
         {# Issue #106 Stage 2 + founder amendment: the Investigation
            Report action opens the shared popup below; an existing
@@ -393,6 +443,50 @@
 
 <script>
 (function () {
+  // S3 mobile fix: the single Export button toggles its row's
+  // dropdown panel (hidden attribute + aria-expanded); opening one
+  // row's panel closes the others, an outside click or Escape
+  // closes all. Presentation only — the export forms inside the
+  // panel keep their own submit/confirm handling below.
+  function s3Menus() {
+    return document.querySelectorAll('[data-s3-export-menu]');
+  }
+  function s3CloseMenus(except) {
+    s3Menus().forEach(function (menu) {
+      if (menu !== except) { menu.hidden = true; }
+    });
+    document.querySelectorAll('[data-s3-export-btn]').forEach(function (btn) {
+      var wrap = btn.closest ? btn.closest('.s3-export') : null;
+      var menu = wrap ? wrap.querySelector('[data-s3-export-menu]') : null;
+      btn.setAttribute('aria-expanded', menu && !menu.hidden ? 'true' : 'false');
+    });
+  }
+  document.querySelectorAll('[data-s3-export-btn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var wrap = btn.closest ? btn.closest('.s3-export') : null;
+      var menu = wrap ? wrap.querySelector('[data-s3-export-menu]') : null;
+      if (!menu) { return; }
+      var willOpen = menu.hidden;
+      s3CloseMenus(menu);
+      menu.hidden = !willOpen;
+      btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    });
+  });
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('click', function (e) {
+      if (!e.target || !e.target.closest || !e.target.closest('.s3-export')) {
+        s3CloseMenus(null);
+      }
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { s3CloseMenus(null); }
+    });
+  }
+})();
+</script>
+
+<script>
+(function () {
   var modal = document.getElementById('ss-confirm');
   var text = document.getElementById('ss-confirm-text');
   var pending = null;
@@ -492,7 +586,22 @@
     badge.textContent = '\u{1FA99} ' + next + ' credits';
   }
   function updateExtendedRow(form, data) {
-    var card = form.closest ? form.closest('.card') : null;
+    var actionsCard = form.closest ? form.closest('.card') : null;
+    var card = actionsCard;
+    // Row-under actions (2026-11-10 21:57): the Extend form now
+    // sits in the actions row (.card) UNDER the main row, whose
+    // cells carry the expiry date/pill. If the closest .card has
+    // no expiry element, fall back to the previous sibling row
+    // for the expiry lookups. The retention status element lives
+    // in the ACTIONS row (next to the form), so it is looked up
+    // on actionsCard below, not on the fallen-back main row
+    // (PR #179 Codex P2: looking it up on the main row always
+    // returned null, so "Retention extended." never displayed).
+    if (card && typeof card.querySelector === 'function'
+        && !card.querySelector('[data-retention-expiry-date]')
+        && card.previousElementSibling) {
+      card = card.previousElementSibling;
+    }
     if (!card || !data.expires_at) { return; }
     var expiry = new Date(data.expires_at);
     if (isNaN(expiry.getTime())) { return; }
@@ -511,7 +620,13 @@
         else { pillEl.classList.remove('soon'); }
       }
     }
-    var statusEl = card.querySelector('[data-retention-status]');
+    var statusEl = null;
+    if (actionsCard && typeof actionsCard.querySelector === 'function') {
+      statusEl = actionsCard.querySelector('[data-retention-status]');
+    }
+    if (!statusEl && typeof card.querySelector === 'function') {
+      statusEl = card.querySelector('[data-retention-status]');
+    }
     if (statusEl) {
       statusEl.textContent = 'Retention extended.';
       statusEl.style.display = '';
@@ -620,6 +735,15 @@
   function syncShareStateLineFor(btn) {
     var formats = activeFormatsFor(btn);
     var row = (btn && typeof btn.closest === 'function') ? btn.closest('.card') : null;
+    // Row-under actions (2026-11-10 21:57): the row Share button
+    // sits in the actions row (.card) UNDER the main row, whose
+    // state cell carries the share-state line. If the closest
+    // .card has no state cell, fall back to the previous sibling.
+    if (row && typeof row.querySelector === 'function'
+        && !row.querySelector('.s3-state-cell')
+        && row.previousElementSibling) {
+      row = row.previousElementSibling;
+    }
     if (!row || typeof row.querySelector !== 'function') { return; }
     var line = row.querySelector('.s3-share-state');
     if (formats.length > 0) {
