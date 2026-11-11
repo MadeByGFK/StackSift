@@ -552,8 +552,12 @@ def test_8_actions_menu_preserved_verbatim(auth_env):
     page = auth_env.client.get(f"/reports/{analysis_id}")
     assert page.status_code == 200, page.text[:300]
     html = page.text
-    assert 'id="actions-btn"' in html
-    assert 'id="actions-menu"' in html
+    # PREMISE CHANGED (fidelity G1, 2026-11-10): the Actions menu
+    # is retired for direct export controls; the forms, endpoints
+    # and confirm copy below are preserved exactly.
+    assert 'id="actions-btn"' not in html
+    assert 'id="actions-menu"' not in html
+    assert 'data-s1-actions' in html
     assert 'id="ss-confirm"' in html
     for action in (f"/reports/{analysis_id}/pdf",
                    f"/reports/{analysis_id}/exports/csv",

@@ -234,12 +234,16 @@ def test_report_page_two_buttons_no_microcopy_popups(auth_env):
     assert page.status_code == 200
     # Exactly one Actions menu; the old top-level buttons are gone
     # and the menu items carry the Export format labels.
-    assert page.text.count('id="actions-btn"') == 1
-    assert ">Actions</button>" in page.text
+    # PREMISE CHANGED AGAIN (fidelity G1, 2026-11-10): the Actions
+    # menu is retired — exports are direct controls (gold PDF +
+    # CSV/JSON chips) carrying the same forms and labels.
+    assert 'id="actions-btn"' not in page.text
+    assert 'id="actions-menu"' not in page.text
+    assert 'data-s1-actions' in page.text
     assert 'id="export-btn"' not in page.text
-    assert ">Export PDF</button>" in page.text
-    assert ">Export CSV</button>" in page.text
-    assert ">Export JSON</button>" in page.text
+    assert ">Export PDF" in page.text
+    assert ">Export CSV" in page.text
+    assert ">Export JSON" in page.text
     assert "Export PDF (2 credits)" not in page.text
     # No explanatory microcopy / paragraphs for the actions.
     for gone in (

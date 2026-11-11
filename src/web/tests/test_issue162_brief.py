@@ -681,7 +681,10 @@ def test_route_paid_html_contains_brief_free_page_does_not(auth_env):
     assert gen.status_code == 200, gen.text[:300]
     page = auth_env.client.get(f"/reports/{gen.json()['analysis_result_id']}")
     assert page.status_code == 200
-    assert "Investigation Brief" in page.text
+    # PREMISE CHANGED (fidelity rename S1-N3): the HTML §01
+    # heading is "Investigation Report"; the Brief body content
+    # (incl. BRIEF_NOT_ESTABLISHED) is unchanged.
+    assert "Investigation Report" in page.text
     assert dd.BRIEF_NOT_ESTABLISHED in page.text
     assert "evidence_refs" not in page.text
 
@@ -795,7 +798,7 @@ def test_route_brief_failure_reverses_and_prior_artifact_untouched(
     assert _balance(auth_env, user_id) == before  # full reversal
     assert _artifact_manifest(auth_env, prior_id) == prior_manifest
     view = auth_env.client.get(f"/reports/{prior_id}")
-    assert view.status_code == 200 and "Investigation Brief" in view.text
+    assert view.status_code == 200 and "Investigation Report" in view.text  # rename S1-N3
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
 

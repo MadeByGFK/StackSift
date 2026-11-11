@@ -70,12 +70,14 @@ def test_s2_hero_eyebrow_and_dropzone_composition():
     html = _render_index()
     assert '<section class="hero s2-hero">' in html
     assert '<p class="s2-eyebrow">Analyze</p>' in html
-    # Eyebrow precedes the retained h1 and sub copy, verbatim.
+    # PREMISE CHANGED (fidelity S2-G1, founder ruling 2026-11-10):
+    # the design hero copy replaces the retained live copy verbatim.
     assert html.index('class="s2-eyebrow"') < html.index(
-        "Drop in a log file.<br>")
-    assert "Drop in a log file.<br>Get an <span>incident summary</span>." \
-        in html
-    assert "StackSift scans your logs and tells you what broke" in html
+        "<h1>Analyze a log file</h1>")
+    assert "<h1>Analyze a log file</h1>" in html
+    assert "Drop in a log file and get a severity-ranked incident " \
+        "summary — what failed first, what it affected, and what " \
+        "to check next." in html
     assert '<label class="dropzone s2-dropzone" id="dropzone"' in html
 
 

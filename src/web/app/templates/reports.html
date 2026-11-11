@@ -141,6 +141,7 @@
   .s3-share-state .btn{height:30px;padding:0 10px;font-size:13px;margin-left:6px}
   .s3-date-line{display:block}
   .s3-date-sub{display:block;color:var(--muted);font-size:13px;margin-top:2px}
+  .s3-report-sub{color:var(--muted);font-size:13px;margin-top:2px;font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
   .s3-actions-cell .actions{flex-wrap:wrap}
   .s3-empty{border-top:3px solid var(--accent)}
   .s3-entry-card{display:block;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:20px;text-decoration:none;color:var(--text);margin:28px 0 0}
@@ -204,6 +205,9 @@
         <div class="kind-title">Investigation Report</div>
         {% endif %}
         <div class="name">{{ report.filename }}</div>
+        {# Fidelity S3-C1 (rides S1-C2): subline = SS-ID + honest
+           format label, each only when the row carries it. #}
+        {% if report.ss_id or report.format_label %}<div class="s3-report-sub" data-s3-report-sub>{{ report.ss_id or '' }}{% if report.ss_id and report.format_label %} · {% endif %}{{ report.format_label or '' }}</div>{% endif %}
       </div></div></td>
       <td class="s3-date-cell">
           {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G4):

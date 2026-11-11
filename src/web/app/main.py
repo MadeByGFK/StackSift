@@ -2056,6 +2056,15 @@ def _analysis_response(request, status, data=None, message=None, *, output="html
             data["redemption_deadline"] = (
                 _credits_fresh._as_aware(_fresh_src.expires_at)
                 + _td_fresh(days=30)).strftime("%Y-%m-%d")
+        if _fresh_src is not None:
+            from app import fidelity as _fidelity_fresh
+            data["ss_id"] = getattr(_fresh_src, "ss_id", None) or \
+                _fidelity_fresh.derive_ss_id(
+                    _fresh_src.id, _fresh_src.ready_at)
+            if not data.get("analysis_timestamp"):
+                data["analysis_timestamp"] = \
+                    _fidelity_fresh.analysis_timestamp_label(
+                        _fresh_src.ready_at)
     return templates.TemplateResponse(request, "report.html", data, status_code=status)
 
 
@@ -3285,8 +3294,19 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
             db, _user.id, r.id, "investigation_report") \
             if r.type == "analysis" else None
         _row_expired = _as_aware(r.expires_at) <= now
+        # Fidelity S3-C1 (rides S1-C2): SS-ID + honest format label
+        # for the report-cell subline. Format comes from the stored
+        # manifest's detected_format where present.
+        from app import fidelity as _fidelity_list
+        _row_format = None
+        if _manifest_data is not None:
+            _row_format = _manifest_data.get("detected_format")
         reports.append({
             "id": str(r.id),
+            "ss_id": getattr(r, "ss_id", None) or
+                _fidelity_list.derive_ss_id(r.id, r.ready_at),
+            "format_label": _fidelity_list.honest_format_label(_row_format)
+                if _row_format else None,
             "filename": filename,
             "severity": r.severity,  # 'ok' | 'warnings' | 'errors' | None (pre-#49 rows)
             "created_at": r.created_at,
@@ -3466,6 +3486,15 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
     data["csrf_token"] = _csrf
     data["report_id"] = str(result.id)
     data["is_historical"] = True
+    # Issue #170 fidelity: SS-ID (stored, or deterministic legacy
+    # derivation) + head-meta analysis timestamp (payload value from
+    # generation time, falling back to the Result's ready_at).
+    from app import fidelity as _fidelity_view
+    data["ss_id"] = getattr(result, "ss_id", None) or \
+        _fidelity_view.derive_ss_id(result.id, result.ready_at)
+    if not data.get("analysis_timestamp"):
+        data["analysis_timestamp"] = \
+            _fidelity_view.analysis_timestamp_label(result.ready_at)
     # Issue #106 Stage 2: an Analysis Report renders its own template
     # from the public projection only (no internal refs/digests).
     if result.type == "deep_dive":

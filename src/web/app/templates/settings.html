@@ -19,6 +19,14 @@
 .btn-small { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: #fff; cursor: pointer; font-size: 0.85rem; }
 .btn-danger { border-color: #7a2a2a; background: #4a1e1e; }
 .oauth-row { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; color: #fff; font-size: 0.9rem; }
+.s4-page-head { margin-bottom: 0.5rem; }
+.s4-eyebrow { font-family: var(--font-code, monospace); color: var(--accent); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin: 0 0 8px; }
+.s4-page-head h1 { color: #fff; font-size: 28px; margin: 0 0 4px; }
+.s4-page-sub { color: #a0aec0; margin: 0; font-size: 0.95rem; }
+.s4-field-row { display: flex; gap: 16px; align-items: center; padding: 0.6rem 0; border-bottom: 1px solid var(--border); }
+.s4-field-row:last-child { border-bottom: none; }
+.s4-field-label { width: 90px; flex: none; color: #a0aec0; font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.s4-field-value { color: #fff; font-size: 0.95rem; }
 </style>
 </head>
 <body>
@@ -42,15 +50,27 @@
     </nav>
   </header>
   <div class="settings-wrap s4-settings">
+    {# Fidelity S4-G1: page head per design (eyebrow + h1 + sub). #}
+    <div class="s4-page-head" data-s4-page-head>
+      <p class="s4-eyebrow">Settings</p>
+      <h1>Settings</h1>
+      <p class="s4-page-sub">Your account, credits, and report access.</p>
+    </div>
     <section class="s4-group" data-s4-group="account" data-s4-num="01">
       <div class="s4-section-head">
         <span class="s4-section-num" aria-hidden="true">01</span>
         <span class="s4-section-label">Account</span>
       </div>
     <div class="settings-card">
-      <h1>Account settings</h1>
-      <p><strong style="color:#fff">{{ user.email }}</strong>{% if user.display_name %} · {{ user.display_name }}{% endif %}</p>
-      <p>Email {% if user.email_verified %}✓ verified{% else %}— not verified{% endif %}</p>
+      <h2>Account settings</h2>
+      {# Fidelity S4-G2: §01 interior as label/value field rows
+         (Email / Plan / Log out). The Plan VALUE keeps the current
+         truthful interim-model text (S4-C1 deferred to #164
+         Phase C). Connected accounts + Active sessions below stay
+         (ruled content) — composition only. #}
+      <div class="s4-field-row"><span class="s4-field-label">Email</span><span class="s4-field-value"><strong style="color:#fff">{{ user.email }}</strong>{% if user.display_name %} · {{ user.display_name }}{% endif %} · {% if user.email_verified %}✓ verified{% else %}not verified{% endif %}</span></div>
+      <div class="s4-field-row"><span class="s4-field-label">Plan</span><span class="s4-field-value">Credit packs — {{ balance_summary.eligible }} credits available</span></div>
+      <div class="s4-field-row"><span class="s4-field-label">Log out</span><span class="s4-field-value"><form method="post" action="/auth/logout" style="display:inline;margin:0"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="btn-small">Log out</button></form></span></div>
     </div>
     <div class="settings-card">
       <h2>Connected accounts</h2>

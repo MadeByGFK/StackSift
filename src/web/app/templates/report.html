@@ -70,7 +70,14 @@
   </script>
   {% endif %}
 
+  {# Fidelity G2: breadcrumb per design. #}
+  <nav class="s1-breadcrumb" aria-label="Breadcrumb"><a href="/reports">← My Reports</a> <span aria-hidden="true">›</span> Report detail</nav>
+
   <section class="report-head">
+    {# Fidelity S1-C2: SS-format ID in the eyebrow when the report
+       carries one (stored reports; anonymous immediate renders and
+       the demo have no record and show no ID). #}
+    {% if ss_id is defined and ss_id %}<p class="s1-eyebrow" data-ss-id>{{ ss_id }}</p>{% endif %}
     <h2>{{ filename }}</h2>
     <div class="meta">
       Analyzed in {{ "%.2f"|format(elapsed) }}s ·
@@ -79,55 +86,51 @@
       {% else %}
         Plain-text log format
       {% endif %}
+      {# Fidelity S1-C1 (timestamp half): analysis date/time in the
+         head meta, projected from generation time / ready_at. #}
+      {% if analysis_timestamp is defined and analysis_timestamp %} · Analyzed {{ analysis_timestamp }}{% endif %}
     </div>
     <div>
       <span class="badge {{ health.color }}" data-health-label="{{ health.label }}" data-health-color="{{ health.color }}">{{ health.label }}</span>
     </div>
     {% if current_user and report_id and not is_demo %}
     {# Issue #129 + founder UI amendments (2026-11-03): the report page
-       action row is Export · Analysis · Share (#106 Stage 2 added
-       Analysis after Export by explicit founder amendment to the
-       original exactly-two-buttons rule), with no explanatory
-       paragraphs. Extend moved to the My Reports row. Every charged
-       action is confirmed in a popup BEFORE any charge.
-       Issue #136 (one job per page — Report = read): the whole row
-       collapses into ONE "Actions" menu holding the SAME actions in
-       the SAME order (Export PDF/CSV/JSON, then Analysis, then
-       Share). No capability, charge, or confirmation behaviour
-       changed: the export forms keep their data-confirm popups and
-       the Analysis/Share items open the existing modals (or, for an
-       existing Analysis Report, link to it) exactly as the old
-       buttons did. #}
-    <div class="report-actions" style="margin-top:1rem">
-      <span style="display:inline-block;position:relative">
-        <button type="button" class="btn-small" id="actions-btn" aria-haspopup="true" aria-expanded="false">Actions</button>
-        <span id="actions-menu" style="display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:8px;padding:6px;min-width:170px">
+       action row is Export · Analysis · Share. Extend moved to the
+       My Reports row. Every charged action is confirmed in a popup
+       BEFORE any charge.
+       Issue #170 fidelity G1 (founder ruling 2026-11-10, superseding
+       the #136 Actions menu): DIRECT controls per the design — gold
+       Export PDF button + CSV/JSON outline chips, tags following the
+       per-report unlock state, with Analysis and Share as quiet
+       direct controls beside them. Same forms, endpoints, order and
+       data-confirm gating as the retired menu; no menu remains.
+       (No TXT chip: no per-report TXT export endpoint exists — the
+       old menu's format set was PDF/CSV/JSON.) #}
+    <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
           <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export PDF</button>
+            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
           </form>
           {% if not report_kind %}
           <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export CSV</button>
+            <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
           </form>
           <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn-small" style="display:block;width:100%;text-align:left">Export JSON</button>
+            <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
           </form>
           {% endif %}
-          {# Issue #106 Stage 2: Analysis sits AFTER the Export items
-             inside the menu — the click only opens the popup;
+          {# Issue #106 Stage 2: Analysis sits AFTER the Export
+             controls — the click only opens the popup;
              Cancel/Escape changes no state; Confirm is the charge
              point and results show in page. #}
           {% if analysis_result_id %}
-          <a href="/reports/{{ analysis_result_id }}" class="btn-small" style="display:block;text-decoration:none">Analysis</a>
+          <a href="/reports/{{ analysis_result_id }}" class="s1-chip" style="text-decoration:none">Analysis</a>
           {% else %}
-          <button type="button" class="btn-small" id="analysis-btn" style="display:block;width:100%;text-align:left">Analysis</button>
+          <button type="button" class="s1-chip" id="analysis-btn">Analysis</button>
           {% endif %}
-          <button type="button" class="btn-small" id="share-btn" style="display:block;width:100%;text-align:left">Share</button>
-        </span>
-      </span>
+          <button type="button" class="s1-chip" id="share-btn">Share</button>
 
       <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
         <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
@@ -144,12 +147,12 @@
           {% if entitlement_available is defined and entitlement_available %}
           <p id="analysis-msg" style="margin:0 0 12px">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
           {% else %}
-          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Analysis Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
+          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Investigation Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
           {% endif %}
           <div id="analysis-link-row" style="display:none;margin-bottom:12px">
-            <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
+            <a class="btn-small" id="analysis-view" href="#">View Investigation Report</a>
           </div>
-          <button type="button" class="btn-small" id="analysis-confirm">Generate Analysis Report</button>
+          <button type="button" class="btn-small" id="analysis-confirm">Generate Investigation Report</button>
           {% endif %}
           {% else %}
           <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
@@ -199,19 +202,6 @@
 
       <script>
       (function () {
-        var actionsBtn = document.getElementById('actions-btn');
-        var actionsMenu = document.getElementById('actions-menu');
-        function closeActionsMenu() {
-          if (actionsMenu) { actionsMenu.style.display = 'none'; }
-          if (actionsBtn) { actionsBtn.setAttribute('aria-expanded', 'false'); }
-        }
-        if (actionsBtn && actionsMenu) {
-          actionsBtn.addEventListener('click', function () {
-            var open = actionsMenu.style.display === 'block';
-            actionsMenu.style.display = open ? 'none' : 'block';
-            actionsBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
-          });
-        }
         var modal = document.getElementById('ss-confirm');
         var text = document.getElementById('ss-confirm-text');
         var pending = null;
@@ -363,7 +353,6 @@
             });
         }
         document.getElementById('share-btn').addEventListener('click', function () {
-          closeActionsMenu();
           refreshShareButtonsForSelectedFormat();
           shareModal.style.display = 'flex';
         });
@@ -448,7 +437,6 @@
         var analysisBtn = document.getElementById('analysis-btn');
         if (analysisBtn && analysisModal) {
           analysisBtn.addEventListener('click', function () {
-            closeActionsMenu();
             analysisModal.style.display = 'flex';
           });
           document.getElementById('analysis-close').addEventListener('click', function () {
@@ -468,7 +456,7 @@
                 .then(function (d) {
                   var msg = document.getElementById('analysis-msg');
                   if (d.report_url) {
-                    msg.textContent = 'Analysis Report ready.';
+                    msg.textContent = 'Investigation Report ready.';
                     var row = document.getElementById('analysis-link-row');
                     var link = document.getElementById('analysis-view');
                     link.href = d.report_url;
@@ -487,11 +475,11 @@
                         else { msg.textContent = c.error || 'Checkout is not available yet.'; analysisConfirm.disabled = false; }
                       }, function () { analysisConfirm.disabled = false; });
                   } else {
-                    msg.textContent = d.error || 'Analysis Report generation failed.';
+                    msg.textContent = d.error || 'Investigation Report generation failed.';
                     analysisConfirm.disabled = false;
                   }
                 }, function () {
-                  document.getElementById('analysis-msg').textContent = 'Analysis Report generation failed.';
+                  document.getElementById('analysis-msg').textContent = 'Investigation Report generation failed.';
                   analysisConfirm.disabled = false;
                 });
             });
@@ -503,10 +491,10 @@
     {% endif %}
   </section>
 
-  {% if complexity_truncated %}
-  <div class="complexity-notice">
-    <strong>⚠️ Analysis limited:</strong> {{ complexity_notice }}
-  </div>
+  {# Fidelity G13: log-window label above the stats, built from the
+     existing timeline bounds (first/last seen already in context). #}
+  {% if first_seen and last_seen %}
+  <div class="s1-window" data-s1-window>Log window {{ first_seen }} – {{ last_seen }}</div>
   {% endif %}
 
   {# Issue #170 S1 (Decision 13): tile notes are computed from the
@@ -532,7 +520,13 @@
      button forwards to the existing #analysis-btn so the charge
      point, confirm copy and POST route are unchanged. #}
   <div class="s1-premium-card" data-s1-premium-card>
-    <h3>Investigation Report</h3>
+    {# Fidelity G3: design composition (gold card, icon, h2 with
+       price, pitch line, gold CTA with price). The #164
+       purchase-terms CONTENT below stays verbatim — composition
+       only. Rename S1-N1 lands here: CTA = Investigation Report. #}
+    <div class="s1-premium-icon" aria-hidden="true">✦</div>
+    <h2 class="s1-premium-title">Get the Investigation Report — $9</h2>
+    <p class="s1-premium-pitch">A client-ready brief with the investigation lead, prioritized checks, and a shareable summary.</p>
     {% if product_ready is defined and not product_ready and not (entitlement_available is defined and entitlement_available) %}
     <p>Investigation Report: <span class="pack-soon">Coming soon</span> — purchases are not available yet. Please check back later.</p>
     {% else %}
@@ -541,7 +535,7 @@
     {% else %}
     <p>Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
     {% endif %}
-    <button type="button" class="btn-small" id="premium-upsell-btn">Get the Analysis Report</button>
+    <button type="button" class="s1-btn-gold" id="premium-upsell-btn">Get the Investigation Report — $9</button>
     {% endif %}
     <script>
     (function () {
@@ -558,11 +552,27 @@
   {% endif %}
 
   {% if diagnostic_issue %}
-  <div class="callout">
-    <div class="k">Investigate first — most diagnostic</div>
-    <div class="v">[{{ diagnostic_issue[1].level }}] {{ diagnostic_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ diagnostic_issue[1].count }}</span></div>
+  {# Fidelity G4 + S1-C5: design callout composition — medallion,
+     severity badge + occurrence count, narrative headline +
+     paragraph (live template text only), footer with the lead
+     issue's OWN source + first-seen, projected from its retained
+     issue record; each footer element renders only when the data
+     exists. #}
+  <div class="callout s1-callout" data-s1-callout>
+    <div class="s1-callout-head">
+      <span class="s1-medallion" aria-hidden="true">!</span>
+      <span class="k">Investigate first</span>
+      <span class="s1-callout-meta"><span class="pill {{ diagnostic_issue[1].level }}">{{ diagnostic_issue[1].level }}</span> {{ diagnostic_issue[1].count }} occurrences</span>
+    </div>
+    <h3 class="s1-callout-title">{{ diagnostic_issue[0] }}</h3>
     {% if diagnostic_explanation %}
-    <div class="why">{{ diagnostic_explanation|join(' · ') }}</div>
+    <p class="why">{{ diagnostic_explanation|join(' · ') }}</p>
+    {% endif %}
+    {% if (diagnostic_issue[1].services is defined and diagnostic_issue[1].services) or diagnostic_issue[1].first_seen is defined and diagnostic_issue[1].first_seen %}
+    <div class="s1-callout-foot">
+      {% if diagnostic_issue[1].services is defined and diagnostic_issue[1].services %}<span class="s1-source-chip" data-callout-source>{{ diagnostic_issue[1].services[0] }}</span>{% endif %}
+      {% if diagnostic_issue[1].first_seen is defined and diagnostic_issue[1].first_seen %}<span data-callout-first-seen>First seen {{ diagnostic_issue[1].first_seen }}</span>{% endif %}
+    </div>
     {% endif %}
     {% if top_issue and top_issue[0] != diagnostic_issue[0] %}
     <div class="k" style="margin-top:10px">Most frequent warning/error</div>
@@ -570,9 +580,19 @@
     {% endif %}
   </div>
   {% elif top_issue %}
-  <div class="callout">
-    <div class="k">Investigate first</div>
-    <div class="v">[{{ top_issue[1].level }}] {{ top_issue[0] }} <span style="color:var(--muted);font-weight:400">× {{ top_issue[1].count }}</span></div>
+  <div class="callout s1-callout" data-s1-callout>
+    <div class="s1-callout-head">
+      <span class="s1-medallion" aria-hidden="true">!</span>
+      <span class="k">Investigate first</span>
+      <span class="s1-callout-meta"><span class="pill {{ top_issue[1].level }}">{{ top_issue[1].level }}</span> {{ top_issue[1].count }} occurrences</span>
+    </div>
+    <h3 class="s1-callout-title">{{ top_issue[0] }}</h3>
+    {% if (top_issue[1].services is defined and top_issue[1].services) or top_issue[1].first_seen is defined and top_issue[1].first_seen %}
+    <div class="s1-callout-foot">
+      {% if top_issue[1].services is defined and top_issue[1].services %}<span class="s1-source-chip" data-callout-source>{{ top_issue[1].services[0] }}</span>{% endif %}
+      {% if top_issue[1].first_seen is defined and top_issue[1].first_seen %}<span data-callout-first-seen>First seen {{ top_issue[1].first_seen }}</span>{% endif %}
+    </div>
+    {% endif %}
   </div>
   {% endif %}
 
@@ -589,27 +609,39 @@
   <div class="card" data-s1-incident-none><p>{{ incident_section.message }}</p></div>
   {% elif incident_section %}
   {% if incident_section.headline %}<p style="font-weight:700">{{ incident_section.headline }}</p>{% endif %}
-  {% if incident_section.investigate_first %}<p>Investigate first: {{ incident_section.investigate_first }}</p>{% endif %}
-  {% if incident_section.starting_point %}<p style="color:var(--muted)">Starting point: {{ incident_section.starting_point }}</p>{% endif %}
+  {# Fidelity G5: incident-start two-field panel (data already
+     present — pure presentation). #}
+  {% if incident_section.investigate_first or incident_section.starting_point %}
+  <div class="s1-incident-start" data-s1-incident-start>
+    {% if incident_section.investigate_first %}<div class="s1-start-field"><span class="s1-start-label">Investigate first</span><span>{{ incident_section.investigate_first }}</span></div>{% endif %}
+    {% if incident_section.starting_point %}<div class="s1-start-field"><span class="s1-start-label">Starting point</span><span>{{ incident_section.starting_point }}</span></div>{% endif %}
+  </div>
+  {% endif %}
   {% if incident_section.timing_note %}<p style="color:var(--muted)"><em>{{ incident_section.timing_note }}</em></p>{% endif %}
   {% set se = incident_section.supporting_evidence if incident_section.supporting_evidence is defined and incident_section.supporting_evidence else {} %}
+  {# Fidelity G6: design group markers + bullet layout. Live
+     template text only — the design's prose sentences are
+     mock-authored and are NOT adopted. S1-C3: the Observed group
+     embeds retained log excerpts, projected server-side ONLY
+     after the redaction pass (app.fidelity.observed_excerpts);
+     no excerpt key in context = no block renders. #}
   <div class="s1-evidence-grid">
     <div class="s1-evidence-group" data-s1-group="observed">
-      <h4>Observed</h4>
+      <h4><span class="s1-marker s1-marker-observed" aria-hidden="true"></span>Observed</h4>
       <p class="s1-evidence-caption">Shares infrastructure with the lead issue.</p>
-      {% for item in se.get('observed', []) %}<div class="s1-evidence-item"><span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
+      {% for item in se.get('observed', []) %}<div class="s1-evidence-item">• <span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span>{% if observed_excerpts is defined and observed_excerpts and item[0] in observed_excerpts %}{% for excerpt in observed_excerpts[item[0]] %}<div class="s1-excerpt" data-s1-excerpt>{% if excerpt.analysis_line_number is defined and excerpt.analysis_line_number %}<span class="s1-excerpt-ref">analysis line {{ excerpt.analysis_line_number }}</span>{% endif %}<pre class="s1-excerpt-text"><code>{{ excerpt.text if excerpt.text is defined else excerpt }}</code></pre></div>{% endfor %}{% endif %}</div>{% endfor %}
       {% if se.get('observed_total', 0) > se.get('observed', [])|length %}<div class="s1-evidence-more">{{ se.get('observed_total', 0) - se.get('observed', [])|length }} more not shown</div>{% endif %}
     </div>
     <div class="s1-evidence-group" data-s1-group="correlated">
-      <h4>Correlated</h4>
+      <h4><span class="s1-marker s1-marker-correlated" aria-hidden="true"></span>Correlated</h4>
       <p class="s1-evidence-caption">Aligned with the degradation window, or persistent across the observation window; no shared cause is established.</p>
-      {% for item in se.get('correlated', []) %}<div class="s1-evidence-item"><span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
+      {% for item in se.get('correlated', []) %}<div class="s1-evidence-item">• <span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
       {% if se.get('correlated_total', 0) > se.get('correlated', [])|length %}<div class="s1-evidence-more">{{ se.get('correlated_total', 0) - se.get('correlated', [])|length }} more not shown</div>{% endif %}
     </div>
     <div class="s1-evidence-group" data-s1-group="hypothesized">
-      <h4>Hypothesized</h4>
+      <h4><span class="s1-marker s1-marker-hypothesized" aria-hidden="true"></span>Hypothesized</h4>
       <p class="s1-evidence-caption">Shares infrastructure with the lead issue and shows a possible contributor signal — unproven.</p>
-      {% for item in se.get('hypothesized', []) %}<div class="s1-evidence-item"><span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
+      {% for item in se.get('hypothesized', []) %}<div class="s1-evidence-item">• <span class="pill {{ item[2] }}">{{ item[2] }}</span> {{ item[0] }} <span style="color:var(--muted)">× {{ item[1] }}</span></div>{% endfor %}
       {% if se.get('hypothesized_total', 0) > se.get('hypothesized', [])|length %}<div class="s1-evidence-more">{{ se.get('hypothesized_total', 0) - se.get('hypothesized', [])|length }} more not shown</div>{% endif %}
     </div>
   </div>
@@ -623,24 +655,23 @@
 
   {% if notable_events %}
   <div class="s1-section-head"><span class="s1-section-num">02</span><h3 class="section-title">Notable events</h3></div>
+  {# Fidelity G8: design event rows — badge, pattern, source
+     subline (projected from the issue's retained services; the row
+     omits it when no source was recorded), count + "occurrences". #}
   <div class="card" style="padding:0 20px">
-    <table class="issues">
-      <thead><tr><th>Severity</th><th>Message</th><th style="text-align:right">Count</th></tr></thead>
-      <tbody>
-      {% for event in notable_events %}
-        <tr>
-          <td><span class="pill {{ event.level }}">{{ event.level }}</span></td>
-          <td>{{ event.template }}</td>
-          <td style="text-align:right;color:var(--muted)">× {{ event.count }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
+    {% for event in notable_events %}
+    <div class="s1-event-row" data-s1-event>
+      <span class="pill {{ event.level }}">{{ event.level }}</span>
+      <span class="s1-event-main">{{ event.template }}{% if event.source is defined and event.source %}<span class="s1-event-source">{{ event.source }}</span>{% endif %}</span>
+      <span class="s1-event-count">{{ event.count }} occurrences</span>
+    </div>
+    {% endfor %}
   </div>
   {% endif %}
 
   {% if timeline and timeline|length > 1 %}
-  <div class="s1-section-head"><span class="s1-section-num">03</span><h3 class="section-title">Incident timeline <span class="s1-section-sub">— warnings + errors per 5 min</span></h3></div>
+  {# Fidelity G10: section-head aside per design (§03 buckets note). #}
+  <div class="s1-section-head"><span class="s1-section-num">03</span><h3 class="section-title">Incident timeline</h3><span class="s1-section-aside">5-minute buckets · UTC</span></div>
   {% if first_seen and last_seen %}
   <div class="meta" style="margin-bottom:8px">First event: {{ first_seen }} · Last event: {{ last_seen }}</div>
   {% endif %}
@@ -669,49 +700,38 @@
       <span><i class="sw seg-error"></i>Error</span>
       <span><i class="sw seg-warn"></i>Warning</span>
     </div>
+    {# Fidelity S1-C4: templated caption derived from bucket data
+       only (projected in app.fidelity.timeline_caption); absent
+       for legacy payloads that carry no caption. #}
+    {% if timeline_caption is defined and timeline_caption %}<p class="s1-timeline-caption" data-s1-timeline-caption>{{ timeline_caption }}</p>{% endif %}
   </div>
   {% endif %}
 
-  <h3 class="section-title">Severity breakdown</h3>
-  {% set max_count = [results.level_counts.get("CRITICAL",0), results.level_counts.get("ERROR",0), results.level_counts.get("WARN",0), results.level_counts.get("INFO",0)]|max %}
-  {% for level, cls in [("CRITICAL","critical"),("ERROR","error"),("WARN","warn"),("INFO","info")] %}
-  {% set count = results.level_counts.get(level, 0) %}
-  <div class="sev-row">
-    <div class="name">{{ level }}</div>
-    <div class="bar-wrap"><div class="bar {{ cls }}" style="width: {{ (count / max_count * 100) if max_count else 0 }}%"></div></div>
-    <div class="count">{{ count }}</div>
-  </div>
-  {% endfor %}
+  {# Fidelity G7: the two un-numbered port-only sections ("Severity
+     breakdown", "By service") are removed so the numbered flow is
+     exactly 01–05. Verified before removal: level counts remain in
+     the TXT render path (render_text_report "Log Levels") and the
+     standard PDF summary; per-issue services/counts remain in §04
+     below and in the JSON export — no data is stranded. #}
 
-  {% if results.service_counts %}
-  <h3 class="section-title">By service</h3>
-  <div class="card">
-    {% for svc, count in results.service_counts|dictsort(by='value')|reverse %}
-    <div class="sev-row">
-      <div class="name">{{ svc }}</div>
-      <div class="bar-wrap"><div class="bar info" style="width: {{ (count / results.total_lines * 100) }}%"></div></div>
-      <div class="count">{{ count }}</div>
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  <div class="s1-section-head"><span class="s1-section-num">04</span><h3 class="section-title">All issues <span class="s1-section-sub">— sorted by severity, then frequency</span></h3></div>
+  {# Fidelity G9+G10: §04 head aside with pattern/occurrence counts;
+     3-column table (source as subline), plain counts, footer
+     "Total issue occurrences". #}
+  <div class="s1-section-head"><span class="s1-section-num">04</span><h3 class="section-title">All issues</h3>{% if sorted_issues %}<span class="s1-section-aside">{{ sorted_issues|length }} patterns · {{ sorted_issues|map(attribute='1.count')|sum }} occurrences</span>{% endif %}</div>
   {% if sorted_issues %}
   <div class="card" style="padding:0 20px">
     <table class="issues">
-      <thead><tr><th>Severity</th><th>Message</th><th>Source</th><th style="text-align:right">Count</th></tr></thead>
+      <thead><tr><th>Severity</th><th>Issue pattern</th><th style="text-align:right">Occurrences</th></tr></thead>
       <tbody>
       {% for issue, data in sorted_issues %}
         <tr>
           <td><span class="pill {{ data.level }}">{{ data.level }}</span></td>
-          <td>{{ issue }}</td>
-          <td style="color:var(--muted)">{{ data.services[0] if data.services is defined and data.services else '' }}</td>
-          <td style="text-align:right;color:var(--muted)">× {{ data.count }}</td>
+          <td>{{ issue }}{% if data.services is defined and data.services %}<span class="s1-issue-source">{{ data.services[0] }}</span>{% endif %}</td>
+          <td style="text-align:right;color:var(--muted)">{{ data.count }}</td>
         </tr>
       {% endfor %}
       </tbody>
-      <tfoot><tr><td colspan="3" style="text-align:right;color:var(--muted);padding:10px 12px">Total occurrences</td><td style="text-align:right;color:var(--muted);padding:10px 12px">× {{ sorted_issues|map(attribute='1.count')|sum }}</td></tr></tfoot>
+      <tfoot><tr><td colspan="2" style="text-align:right;color:var(--muted);padding:10px 12px">Total issue occurrences</td><td style="text-align:right;color:var(--muted);padding:10px 12px">{{ sorted_issues|map(attribute='1.count')|sum }}</td></tr></tfoot>
     </table>
   </div>
   {% else %}
@@ -720,13 +740,24 @@
 
   {# Issue #170 S1 §05 Analysis notices (Decision 9 as amended by A6):
      the remake's notice LAYOUT only — every string below is the live
-     ruled copy, byte-identical to the base tree. The complexity
-     notice above the stats row is likewise unmoved in text. #}
+     ruled copy, byte-identical to the base tree.
+     Fidelity G14: §05 summary tags per design — "Partial coverage"
+     (only when truncated), the parsed-% tag (only with malformed
+     lines and a nonzero total), "Redaction applied" on the privacy
+     row — and the coverage/complexity notice renders INSIDE §05
+     (moved from above the stats row; text unmoved). #}
   <div class="s1-section-head"><span class="s1-section-num">05</span><h3 class="section-title">Analysis notices</h3></div>
+
+  {% if complexity_truncated %}
+  <div class="notice s1-notice-row complexity-notice">
+    <span class="s1-tag">Partial coverage</span>
+    <span><strong>⚠️ Analysis limited:</strong> {{ complexity_notice }}</span>
+  </div>
+  {% endif %}
 
   {% if results.malformed_lines > 0 %}
   <div class="notice s1-notice-row">
-    <span class="s1-tag">Parsing</span>
+    <span class="s1-tag">{% if results.total_lines %}{{ "%.2f"|format(results.parsed_lines / results.total_lines * 100) }}% parsed{% else %}Parsing{% endif %}</span>
     <span>⚠️ <strong>{{ results.malformed_lines }}</strong> line{{ "s" if results.malformed_lines != 1 }} couldn't be parsed and {{ "was" if results.malformed_lines == 1 else "were" }} excluded.
     <br><small>StackSift reads lines shaped like <code>2026-10-10 09:15:22 ERROR something broke</code> or JSON-lines with level/message fields. Multiline stack traces count here too — each continuation line is one malformed line.</small></span>
   </div>
@@ -745,10 +776,21 @@
   </div>
 
   <div class="notice s1-notice-row">
-    <span class="s1-tag">Privacy</span>
+    <span class="s1-tag">Redaction applied</span>
     <p class="privacy" style="margin:0;text-align:left">Uploads may be spooled to disk before redaction. Temporary files are cleaned up during normal processing. Redaction may miss sensitive data; review this report before sharing.</p>
   </div>
+  {# Fidelity G11: footer band composition — brand lockup left,
+     "INVESTIGATION REPORT" label (2026-11-09 naming ruling) + the
+     SS-format ID right (S1-C2). A5 still bars a generated timestamp
+     on this free template, so the band carries NO generated stamp;
+     the internal ID stays underneath, unchanged. #}
+  <div class="s1-footer-band" data-s1-footer-band>
+    <span class="logo">stacksift<span>.</span></span>
+    <span class="s1-footer-meta">INVESTIGATION REPORT{% if ss_id is defined and ss_id %} · {{ ss_id }}{% endif %}</span>
+  </div>
   {% if report_id %}<div class="s1-report-foot" data-s1-report-foot>Report {{ report_id }}</div>{% endif %}
+  {# Fidelity G12: privacy tagline under the article. #}
+  <p class="s1-tagline" data-s1-tagline>Your logs. Your insights. Your control.</p>
 
   <footer>
     StackSift · a Goodfolk Digital project · <a href="https://github.com/MadeByGFK/StackSift">CLI on GitHub</a>

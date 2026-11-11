@@ -15,6 +15,7 @@ import re
 import signal
 import tempfile
 import time
+from datetime import datetime, timezone
 
 from app.vendor.analyzer import analyze_log_file
 from app.redact import redact_secrets, REDACTED, _PATTERNS as _REDACT_PATTERNS
@@ -1363,6 +1364,18 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
         notable_events = build_notable_events(
             ranked, results["issues"], incident_templates
         )
+        # Issue #170 fidelity projections (display only, from data
+        # already retained above): S1-C4 templated timeline caption,
+        # S1-C3 redacted Observed-group excerpts, S1-C1 analysis
+        # timestamp for the report head meta.
+        from app import fidelity as _fidelity
+        _timeline_caption = _fidelity.timeline_caption(timeline)
+        _observed_templates = [
+            item[0] for item in
+            (incident_section.get("supporting_evidence") or {}).get(
+                "observed", [])]
+        _observed_excerpts = _fidelity.observed_excerpts(
+            results, _observed_templates)
     except AnalysisTimeout:
         return {
             "error": "analysis_timeout",
@@ -1398,6 +1411,12 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
         "first_seen": results.get("first_seen"),
         "last_seen": results.get("last_seen"),
         "elapsed": elapsed,
+        # Fidelity: analysis wall-clock at generation (head meta,
+        # S1-C1 timestamp half) + C4 caption + C3 excerpts.
+        "analysis_timestamp": _fidelity.analysis_timestamp_label(
+            datetime.now(timezone.utc)),
+        "timeline_caption": _timeline_caption,
+        "observed_excerpts": _observed_excerpts,
     }
 
 

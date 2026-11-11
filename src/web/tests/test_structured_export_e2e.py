@@ -252,8 +252,10 @@ def test_report_page_shows_priced_forms_and_download_link(auth_env):
     assert f"/reports/{rid}/exports/csv" in page.text
     assert f"/reports/{rid}/exports/json" in page.text
     assert f"/reports/{rid}/pdf" in page.text
-    assert ">Actions</button>" in page.text
-    assert ">Export PDF</button>" in page.text
+    # PREMISE CHANGED AGAIN (fidelity G1, 2026-11-10): direct
+    # export controls replace the Actions menu.
+    assert 'data-s1-actions' in page.text
+    assert ">Export PDF" in page.text
     assert ">Share</button>" in page.text
     assert "Export CSV (" not in page.text
     assert "Export JSON (" not in page.text

@@ -136,6 +136,8 @@ def finish_free(db, key, data=None, failure=None):
             ready_at=C._utcnow(), expires_at=C._utcnow()+timedelta(days=7))
         db.add(result)
         db.flush()
+        C.assign_ss_id(db, result, result.ready_at)
+        db.flush()
         fr.status, fr.result_id = 'completed', result.id
     db.flush()
     return result

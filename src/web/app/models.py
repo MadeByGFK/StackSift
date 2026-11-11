@@ -308,6 +308,12 @@ class Result(Base):
     # product entitlement redemption.
     product_redemption_id = Column(GUID(), ForeignKey("entitlement_redemptions.id", use_alter=True, name="fk_results_product_redemption_id"), nullable=True, unique=True)
     type = Column(String(30), nullable=False)  # 'analysis' | 'pdf' | 'batch'
+    # Issue #170 fidelity (S1-C2): SS-format display ID,
+    # SS-<analysis date YYYYMMDD>-<4-digit daily sequence>, assigned
+    # at store time for report rows (analysis/comparison/deep_dive);
+    # NULL on non-report rows and on pre-migration rows (display
+    # derives deterministically — see app.fidelity.derive_ss_id).
+    ss_id = Column(String(20), nullable=True, unique=True, index=True)
     # Analysis outcome severity at store time: 'ok' | 'warnings' | 'errors'.
     # NULL = stored before severity existed (renders as the neutral dot).
     severity = Column(String(10), nullable=True)
