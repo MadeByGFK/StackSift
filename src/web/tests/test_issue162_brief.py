@@ -755,7 +755,14 @@ def test_route_version_bump_old_view_free_then_confirm_new_purchase(
     assert source_page.status_code == 200
     assert "Generating a new Investigation Report is a new $9 purchase" \
         in source_page.text
-    assert 'id="analysis-btn"' in source_page.text
+    # PREMISE CHANGED (report follow-up, 2026-11-11): the cluster
+    # "Analysis" button that used to be this state's only modal
+    # entry is removed (founder ruling 2026-11-10); the premium
+    # card now renders for prior-exists too and its CTA opens the
+    # modal carrying the disclosure above.
+    assert 'id="analysis-btn"' not in source_page.text
+    assert "data-s1-premium-card" in source_page.text
+    assert 'id="premium-upsell-btn"' in source_page.text
 
     confirm = _generate(auth_env, rid, csrf)
     assert confirm.status_code == 200, confirm.text[:300]

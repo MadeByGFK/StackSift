@@ -1415,6 +1415,11 @@ def analyze_upload(filename: str, content: bytes, *, allow_oversize: bool = Fals
         # S1-C1 timestamp half) + C4 caption + C3 excerpts.
         "analysis_timestamp": _fidelity.analysis_timestamp_label(
             datetime.now(timezone.utc)),
+        # Fidelity G13 completion (2026-11-11): formatted log-window
+        # label from the same first/last-seen bounds; None when the
+        # bounds do not parse, so the template falls back to raw.
+        "log_window_label": _fidelity.log_window_label(
+            results.get("first_seen"), results.get("last_seen")),
         "timeline_caption": _timeline_caption,
         "observed_excerpts": _observed_excerpts,
     }

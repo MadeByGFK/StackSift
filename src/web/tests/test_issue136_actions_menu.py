@@ -90,13 +90,17 @@ def test_report_page_single_actions_menu_holds_all_actions(auth_env):
     assert 'id="actions-menu"' not in text
     assert 'data-s1-actions' in text
     cluster = text[text.index('data-s1-actions'):text.index('id="analysis-modal"')]
-    # Same actions, same order: Export PDF/CSV/JSON, Analysis, Share.
+    # Same export actions, same order, then Share. PREMISE CHANGED
+    # (report follow-up, founder ruling 2026-11-10): the cluster's
+    # bare "Analysis" button is removed — the premium card CTA is
+    # the Investigation Report purchase entry.
     pdf_at = cluster.index(f'action="/reports/{rid}/pdf"')
     csv_at = cluster.index(f'action="/reports/{rid}/exports/csv"')
     json_at = cluster.index(f'action="/reports/{rid}/exports/json"')
-    analysis_at = cluster.index('id="analysis-btn"')
     share_at = cluster.index('id="share-btn"')
-    assert pdf_at < csv_at < json_at < analysis_at < share_at
+    assert pdf_at < csv_at < json_at < share_at
+    assert 'id="analysis-btn"' not in cluster
+    assert ">Analysis</button>" not in cluster
     assert ">Export PDF" in cluster and ">Export CSV" in cluster
     assert ">Export JSON" in cluster
     # Gold PDF control + unlock-state tag (locked here: 2 credits).
@@ -124,7 +128,10 @@ def test_report_page_actions_menu_links_to_existing_analysis(auth_env):
     assert page.status_code == 200
     cluster = page.text[page.text.index('data-s1-actions'):]
     assert f'href="/reports/{analysis_id}"' in cluster
-    assert ">Analysis</a>" in cluster
+    # PREMISE CHANGED (report follow-up State C rename, 2026-11-11):
+    # the view link carries the deliverable's ruled name.
+    assert ">Investigation Report</a>" in cluster
+    assert ">Analysis</a>" not in cluster
     assert 'id="analysis-btn"' not in page.text
     assert 'id="share-btn"' in cluster
 
@@ -326,8 +333,14 @@ def _menu_script(template_name):
 
 @pytestmark_js
 def test_direct_controls_open_existing_modals():
-    # REWRITTEN for fidelity G1: no menu to toggle — Share/Analysis
-    # direct controls open their existing modals immediately.
+    # REWRITTEN for fidelity G1: no menu to toggle — the Share
+    # direct control opens its existing modal immediately.
+    # PREMISE CHANGED (report follow-up, founder ruling 2026-11-10):
+    # the cluster "Analysis" button is removed, so nothing in this
+    # script opens the analysis modal — clicking the (now absent)
+    # analysis-btn stub must leave it closed. The modal's real
+    # opener is the premium card CTA, covered by the runtime tests
+    # in test_issue170_report_followup.py.
     out = _run_js(_menu_script("report.html"), """
       await click(byId('share-btn'));
       out.afterShareModal = byId('share-modal').style.display || '';
@@ -335,7 +348,7 @@ def test_direct_controls_open_existing_modals():
       out.afterAnalysisModal = byId('analysis-modal').style.display || '';
     """)
     assert out["afterShareModal"] == "flex", out
-    assert out["afterAnalysisModal"] == "flex", out
+    assert out["afterAnalysisModal"] != "flex", out
 
 
 _PDF_HARNESS = r"""
