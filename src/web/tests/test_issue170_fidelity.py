@@ -367,7 +367,8 @@ def test_s4_page_head_and_field_rows_plan_deferred():
     html = templates.env.get_template("settings.html").render(
         user=user, current_user=user, sessions=[],
         current_session_id="s1", csrf_token="t",
-        linked_providers=set(), balance_summary={"balance": 7},
+        linked_providers=set(),
+        balance_summary={"balance": 7, "eligible": 7},
         purchases=[], pack_names={}, share_links=[])
     assert 'data-s4-page-head' in html
     assert '<p class="s4-eyebrow">Settings</p>' in html
@@ -403,3 +404,99 @@ def test_s3_subline_ss_id_and_format():
         retention_extension_days=90, retention_extension_cost=1)
     assert 'data-s3-report-sub' in html
     assert "SS-20261110-0003 · JSON-lines" in html
+
+
+# --- PR #178 remediation (Codex round 1: F1 SS-ID lock, F2 Plan row) -------
+#
+# Teeth: the F1 lock-row contract test and the F2 eligible-render test
+# FAIL on the pre-remediation tree and pass post-fix (verified by
+# running them before the fix was applied). The sequential-SS-ID test
+# is a regression guard: it passes on both trees on SQLite (single
+# connection), exactly as the brief records — the PG race itself is
+# NOT reproduced here; the pinned evidence is the lock-row contract,
+# with PG behaviour following the established share-bucket /
+# _ensure_capacity_scope precedent.
+
+
+def _ss_id_session():
+    import uuid as _uuid  # noqa: F401  (parity with the helper below)
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app import models
+    from app.db import Base
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    user = models.User(email="ss178@example.com", email_verified=True)
+    db.add(user)
+    db.flush()
+    return db, user
+
+
+def _ss_result(db, user, when):
+    import uuid as _uuid
+    from datetime import timedelta
+    from app import models
+    r = models.Result(
+        user_id=user.id, free_request_id=_uuid.uuid4().hex,
+        type="analysis", storage_manifest="{}",
+        integrity_digest="x" * 64, byte_count=2,
+        ready_at=when, expires_at=when + timedelta(days=7))
+    db.add(r)
+    db.flush()
+    return r
+
+
+def test_pr178_assign_ss_id_creates_global_ss_id_lock_row():
+    # F1 teeth: assign_ss_id must create (and, on PG, lock FOR UPDATE)
+    # the dedicated global:ss_id CapacityScope row BEFORE reading the
+    # existing SS-IDs, serializing assignment across all writers.
+    from app import credits, models
+    db, user = _ss_id_session()
+    try:
+        assert db.query(models.CapacityScope).filter_by(
+            scope_key="global:ss_id").one_or_none() is None
+        when = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+        r = _ss_result(db, user, when)
+        assert credits.assign_ss_id(db, r, when) == "SS-20261110-0001"
+        db.flush()
+        scope = db.query(models.CapacityScope).filter_by(
+            scope_key="global:ss_id").one_or_none()
+        assert scope is not None
+        assert scope.max_limit == 1
+    finally:
+        db.close()
+
+
+def test_pr178_two_results_same_day_distinct_sequential_ss_ids():
+    # F1 regression guard: two results stored back-to-back for the
+    # same day receive distinct, sequential SS-IDs.
+    from app import credits
+    db, user = _ss_id_session()
+    try:
+        when = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+        r1 = _ss_result(db, user, when)
+        r2 = _ss_result(db, user, when)
+        first = credits.assign_ss_id(db, r1, when)
+        second = credits.assign_ss_id(db, r2, when)
+        assert first == "SS-20261110-0001"
+        assert second == "SS-20261110-0002"
+        assert first != second
+    finally:
+        db.close()
+
+
+def test_pr178_settings_plan_row_shows_eligible_not_balance():
+    # F2 teeth: where balance != eligible (e.g. a spend-restricted
+    # account or a grant queued for revocation), the Plan row's
+    # "credits available" claim must show the ELIGIBLE number.
+    user = SimpleNamespace(email="owner@example.com",
+                           display_name=None, email_verified=True)
+    html = templates.env.get_template("settings.html").render(
+        user=user, current_user=user, sessions=[],
+        current_session_id="s1", csrf_token="t",
+        linked_providers=set(),
+        balance_summary={"balance": 10, "eligible": 3},
+        purchases=[], pack_names={}, share_links=[])
+    assert "Credit packs — 3 credits available" in html
+    assert "Credit packs — 10 credits available" not in html

@@ -53,8 +53,23 @@ def assign_ss_id(db: Session, result, when: datetime) -> str:
     stored for the analysis date, so values are unique per day and
     stable once flushed. Called inside the store transaction, after
     the Result row exists; the column's unique index is the backstop.
+
+    PR #178 remediation (F1): assignment is serialized BEFORE the
+    existing IDs are read by taking the dedicated ``global:ss_id``
+    capacity-scope row lock (the _ensure_capacity_scope /
+    lock_share_rate_bucket precedent: upsert-then-SELECT FOR UPDATE).
+    All three writers (store_result, store_product_result,
+    finish_free) funnel through this function, so the central lock
+    serializes every assignment with no call-site changes; without
+    it, concurrent completions on PostgreSQL could read the same
+    maximum and collide on the unique index. The scope's limit is 1
+    (a single serialized assignment stream; ``used`` is never
+    incremented — the row exists purely as the lock). On SQLite
+    FOR UPDATE is a no-op, so single-connection tests pin the
+    lock-row contract.
     """
     from app.fidelity import format_ss_id
+    _ensure_capacity_scope(db, "global:ss_id", 1)
     prefix = f"SS-{when.strftime('%Y%m%d')}-"
     existing = db.execute(
         select(models.Result.ss_id).where(

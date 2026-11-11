@@ -53,7 +53,7 @@ def _ctx(**overrides):
         "current_session_id": "sess-1",
         "csrf_token": "csrf-test",
         "linked_providers": set(),
-        "balance_summary": {"balance": 7},
+        "balance_summary": {"balance": 7, "eligible": 7},
         "purchases": [SimpleNamespace(
             pack_id="starter", credits=10,
             completed_at=datetime(2026, 1, 3, 4, 5,

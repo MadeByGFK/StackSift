@@ -69,7 +69,7 @@
          Phase C). Connected accounts + Active sessions below stay
          (ruled content) — composition only. #}
       <div class="s4-field-row"><span class="s4-field-label">Email</span><span class="s4-field-value"><strong style="color:#fff">{{ user.email }}</strong>{% if user.display_name %} · {{ user.display_name }}{% endif %} · {% if user.email_verified %}✓ verified{% else %}not verified{% endif %}</span></div>
-      <div class="s4-field-row"><span class="s4-field-label">Plan</span><span class="s4-field-value">Credit packs — {{ balance_summary.balance }} credits available</span></div>
+      <div class="s4-field-row"><span class="s4-field-label">Plan</span><span class="s4-field-value">Credit packs — {{ balance_summary.eligible }} credits available</span></div>
       <div class="s4-field-row"><span class="s4-field-label">Log out</span><span class="s4-field-value"><form method="post" action="/auth/logout" style="display:inline;margin:0"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="btn-small">Log out</button></form></span></div>
     </div>
     <div class="settings-card">
