@@ -111,7 +111,7 @@ def test_header_nav_anonymous_mobile_and_desktop(auth_env, tmp_path, monkeypatch
             toggle.click()
             expect(nav).to_be_visible()
             assert toggle.get_attribute("aria-expanded") == "true"
-            expect(nav.get_by_role("link", name="Credits")).to_be_visible()
+            expect(nav.get_by_role("link", name="Pricing")).to_be_visible()
             expect(nav.get_by_role("link", name="Sign up")).to_be_visible()
             # Escape closes and restores aria state.
             page.keyboard.press("Escape")
