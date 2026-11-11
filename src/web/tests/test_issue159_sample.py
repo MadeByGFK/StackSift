@@ -384,7 +384,9 @@ def test_credits_faq_sample_link_exactly_one_and_pricing_redirect(
     assert r.status_code == 200
     body = r.text
     assert body.count('href="/sample-report"') == 1
-    anchor = body.index("What does the Analysis Report include?")
+    # PREMISE CHANGED (#170 S5a, naming ruling 2026-11-09): the FAQ
+    # heading was renamed "Analysis Report" -> "Investigation Report".
+    anchor = body.index("What does the Investigation Report include?")
     entry = body[anchor:body.index("<h3", anchor + 1)]
     assert 'href="/sample-report"' in entry
     assert "See a sample Investigation Report" in entry
