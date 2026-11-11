@@ -254,16 +254,21 @@ def test_s2_live_copy_verbatim_and_rejected_framings_absent():
 
 def test_s2_header_nav_unchanged_from_base():
     """Decision 4 gate: canonical lockup, mobile toggle + nav_script
-    preserved; no Pricing label is introduced early (S5, Decision
-    11) and no header markup was redone."""
+    preserved and no header markup was redone.
+
+    PREMISE CHANGED (#170 S5a, founder ruling 2026-11-11 splitting
+    S5; Decisions 4/11 staged the label to S5): the signed-out nav
+    label is now "Pricing" — the /credits href is unchanged. The
+    original S2-era assertions (Credits label present, no Pricing
+    anywhere) pinned the pre-S5 staging, not a permanent rule."""
     html = _render_index()
     assert '<a href="/" class="logo">stacksift<span>.</span></a>' in html
     assert 'class="nav-toggle"' in html
     assert 'aria-controls="site-nav"' in html
     assert 'id="site-nav"' in html
     assert "nav_script.html" in INDEX  # include preserved in source
-    assert '<a href="/credits">Credits</a>' in html
-    assert ">Pricing<" not in html
+    assert '<a href="/credits">Pricing</a>' in html
+    assert '<a href="/credits">Credits</a>' not in html
 
 
 # --- Live route: structure (teeth) + no-charging (gate) ---------------------

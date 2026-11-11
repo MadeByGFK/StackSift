@@ -821,15 +821,23 @@ def test_s3_retention_cell_matches_actual_state():
 
 
 def test_s3_header_nav_unchanged():
-    """Gate: canonical lockup, mobile toggle + nav_script preserved;
-    no Pricing label is introduced early (S5, Decision 11)."""
+    """Gate: canonical lockup, mobile toggle + nav_script preserved.
+
+    PREMISE CHANGED (#170 S5a, founder ruling 2026-11-11 splitting
+    S5; Decision 11 staged the label to S5): the signed-out nav
+    label is now "Pricing" — the /credits href is unchanged. The
+    original S3-era assertion (no Pricing label) pinned the pre-S5
+    staging, not a permanent rule."""
     html = _render([])
     assert '<a href="/" class="logo">stacksift<span>.</span></a>' in html
     assert 'class="nav-toggle"' in html
     assert 'aria-controls="site-nav"' in html
     assert '<a href="/reports" class="active">My Reports</a>' in html
     assert "nav_script.html" in REPORTS
-    assert ">Pricing<" not in html
+    # _render is always signed-in, so the signed-out label lives in
+    # the template source (REPORTS), not in this render.
+    assert '<a href="/credits">Pricing</a>' in REPORTS
+    assert '<a href="/credits">Credits</a>' not in REPORTS
 
 
 # --- Live route: structure (teeth) + no-charging (gate) ---------------------
