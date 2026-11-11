@@ -402,7 +402,9 @@ def test_report_page_analysis_action_after_export(auth_env, monkeypatch):
     # Analysis · Share button row collapsed into ONE "Actions" menu.
     # PREMISE CHANGED AGAIN (fidelity G1, 2026-11-10): the menu is
     # retired for direct controls; the placement rule survives in
-    # the cluster: Export forms first, then Analysis, then Share.
+    # the cluster: Export forms first, then Share (the Analysis
+    # cluster button was later removed by the 2026-11-10 follow-up
+    # ruling — the premium card CTA is the purchase entry).
     # #164: the dollar copy renders when the product Price is
     # configured (this fixture env does not set it by default).
     monkeypatch.setenv("STRIPE_PRICE_INVESTIGATION_REPORT",
@@ -414,9 +416,14 @@ def test_report_page_analysis_action_after_export(auth_env, monkeypatch):
     assert 'data-s1-actions' in page.text
     assert 'id="export-btn"' not in page.text
     export_at = page.text.index(f'action="/reports/{rid}/pdf"')
-    analysis_at = page.text.index('id="analysis-btn"')
     share_at = page.text.index('id="share-btn"')
-    assert export_at < analysis_at < share_at
+    assert export_at < share_at
+    # PREMISE CHANGED (report follow-up, founder ruling 2026-11-10):
+    # the cluster "Analysis" button after the Export controls is
+    # removed — the Investigation Report purchase entry is the
+    # premium card CTA, which renders after the action cluster.
+    assert 'id="analysis-btn"' not in page.text
+    assert page.text.index('id="premium-upsell-btn"') > share_at
     # PREMISE CHANGED (#164): dollar copy replaces the credit copy;
     # the legacy "charged only if generation succeeds" phrase must
     # NOT appear on the dollar path (A6(3) — payment is captured at

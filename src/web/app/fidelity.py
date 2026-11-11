@@ -70,6 +70,72 @@ def analysis_timestamp_label(value) -> str | None:
     return when.astimezone(timezone.utc).strftime("%b %d, %Y · %H:%M UTC")
 
 
+def _parse_window_datetime(value):
+    """Parse a log-window bound as a full datetime, or return None.
+
+    Strings must actually carry a time component (a bare date would
+    fabricate a midnight bound). Naive values are read as UTC, per
+    the analysis_timestamp_label precedent."""
+    if isinstance(value, datetime):
+        when = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if ":" not in text:
+            return None
+        try:
+            when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
+def _parse_window_time(value):
+    """Parse a time-only log-window bound ('09:00:00'), or None."""
+    from datetime import time as _time
+    if isinstance(value, _time):
+        return value
+    if isinstance(value, str):
+        text = value.strip().rstrip("Zz")
+        try:
+            return _time.fromisoformat(text)
+        except ValueError:
+            return None
+    return None
+
+
+def log_window_label(first_seen, last_seen) -> str | None:
+    """G13 log-window label from the retained first/last-seen bounds.
+
+    Full form (both bounds parse as datetimes):
+    'Log window HH:MM–HH:MM UTC · Mon D, YYYY · N minutes analyzed'
+    — 24h UTC, seconds dropped; N = round(duration seconds / 60),
+    omitted when end < start; singular '1 minute analyzed'.
+    Degraded form (both bounds are time-only): 'Log window
+    HH:MM–HH:MM UTC' — no invented date or duration.
+    Anything else returns None so the template falls back to the
+    raw bounds (never fabricate a date or duration)."""
+    start = _parse_window_datetime(first_seen)
+    end = _parse_window_datetime(last_seen)
+    if start is not None and end is not None:
+        label = (f"Log window {start:%H:%M}–{end:%H:%M} UTC"
+                 f" · {start:%b} {start.day}, {start:%Y}")
+        seconds = (end - start).total_seconds()
+        if seconds >= 0:
+            minutes = int(round(seconds / 60))
+            unit = "minute" if minutes == 1 else "minutes"
+            label += f" · {minutes} {unit} analyzed"
+        return label
+    start_t = _parse_window_time(first_seen)
+    end_t = _parse_window_time(last_seen)
+    if start_t is not None and end_t is not None:
+        return f"Log window {start_t:%H:%M}–{end_t:%H:%M} UTC"
+    return None
+
+
 def timeline_caption(timeline) -> str | None:
     """S1-C4: templated caption from bucket data only.
 

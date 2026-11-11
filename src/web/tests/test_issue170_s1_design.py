@@ -362,12 +362,16 @@ def test_s1_premium_card_only_for_owned_eligible_standard():
     # Already purchased -> the card never re-offers.
     assert "data-s1-premium-card" not in _owned(
         analysis_result_id="derived-1")
-    # PR #171 Codex P2-2 / A5: an older-generator prior purchase
-    # (analysis_prior_exists, result id cleared by report_view for
-    # the disclosed modal upgrade path) is still an already-purchased
-    # report — the card must not render; the upgrade stays available
-    # through the Actions modal, which carries the disclosure copy.
-    assert "data-s1-premium-card" not in _owned(
+    # PREMISE CHANGED (report follow-up, 2026-11-11; supersedes the
+    # PR #171 Codex P2-2 / A5 exclusion): an older-generator prior
+    # purchase (analysis_prior_exists, result id cleared by
+    # report_view) now DOES render the card — the 2026-11-10 ruling
+    # removed the cluster "Analysis" button that was this state's
+    # only modal entry, so the card CTA is the entry and the modal
+    # still carries the prior-exists disclosure copy.
+    assert "data-s1-premium-card" in _owned(
+        analysis_prior_exists=True)
+    assert 'id="premium-upsell-btn"' in _owned(
         analysis_prior_exists=True)
     # Not eligible (e.g. legacy/insufficient evidence) -> no card.
     assert "data-s1-premium-card" not in _owned(analysis_eligible=False)

@@ -163,6 +163,9 @@ def _ctx(**overrides):
         "timeline_caption": ("3 warnings + errors across the window "
                              "09:00–09:05 UTC; peak of 2 at 09:05."),
         "first_seen": "09:00:00", "last_seen": "09:59:00",
+        # G13 completion (2026-11-11): the label service.py computes
+        # from the time-only bounds above (degraded form).
+        "log_window_label": "Log window 09:00–09:59 UTC",
         "complexity_truncated": False, "complexity_notice": None,
         "current_user": None, "csrf_token": "t", "report_id": None,
         "ss_id": "SS-20261110-0007",
@@ -203,7 +206,11 @@ def test_g1_direct_controls_replace_actions_menu():
     assert 'action="/reports/r1/exports/json"' in cluster
     assert cluster.count("data-confirm") == 3
     assert 'class="s1-btn-gold" data-export="pdf"' in cluster
-    assert 'id="analysis-btn"' in cluster
+    # PREMISE CHANGED (report follow-up, founder ruling 2026-11-10):
+    # the bare "Analysis" cluster button is removed — the premium
+    # card CTA is the purchase entry; no analysis-btn remains.
+    assert 'id="analysis-btn"' not in cluster
+    assert ">Analysis</button>" not in cluster
     assert 'id="share-btn"' in cluster
     # Unlocked state flips the tags to Free.
     unlocked = _owned(export_unlocked=True)
@@ -296,7 +303,11 @@ def test_g11_footer_band_and_g12_tagline_and_g13_window():
     assert "Generated" not in band
     assert "Your logs. Your insights. Your control." in html
     assert 'data-s1-window' in html
-    assert "Log window 09:00:00 – 09:59:00" in html
+    # PREMISE CHANGED (G13 completion, 2026-11-11): the time-only
+    # fixture bounds render the degraded formatted label, not the
+    # raw bounds strip.
+    assert "Log window 09:00–09:59 UTC" in html
+    assert "Log window 09:00:00 – 09:59:00" not in html
 
 
 def test_g14_notice_tags_and_coverage_inside_05():

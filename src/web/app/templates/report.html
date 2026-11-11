@@ -53,11 +53,11 @@
         .then(function (r) { if (!r.ok) throw new Error("status unavailable"); return r.json(); })
         .then(function (d) {
           if (d.entitlement_status === "available" || d.entitlement_status === "reserved") {
-            banner.textContent = "Payment complete — your Investigation Report is ready to generate. Use Analysis on this report.";
+            banner.textContent = "Payment complete — your Investigation Report is ready to generate. Use Get the Investigation Report on this report.";
             return;
           }
           if (d.purchase_status === "failed" || d.purchase_status === "refunded") {
-            banner.textContent = "That purchase did not complete — no entitlement was granted. You can try again from Analysis on this report.";
+            banner.textContent = "That purchase did not complete — no entitlement was granted. You can try again from Get the Investigation Report on this report.";
             return;
           }
           if (tries < max) setTimeout(tick, 2500);
@@ -95,17 +95,22 @@
     </div>
     {% if current_user and report_id and not is_demo %}
     {# Issue #129 + founder UI amendments (2026-11-03): the report page
-       action row is Export · Analysis · Share. Extend moved to the
+       action row is Export · Share, plus the Investigation Report
+       view link once a report exists. Extend moved to the
        My Reports row. Every charged action is confirmed in a popup
        BEFORE any charge.
        Issue #170 fidelity G1 (founder ruling 2026-11-10, superseding
        the #136 Actions menu): DIRECT controls per the design — gold
        Export PDF button + CSV/JSON outline chips, tags following the
-       per-report unlock state, with Analysis and Share as quiet
-       direct controls beside them. Same forms, endpoints, order and
+       per-report unlock state, with Share as a quiet direct control
+       beside them. Same forms, endpoints, order and
        data-confirm gating as the retired menu; no menu remains.
        (No TXT chip: no per-report TXT export endpoint exists — the
-       old menu's format set was PDF/CSV/JSON.) #}
+       old menu's format set was PDF/CSV/JSON.)
+       Report follow-up (founder ruling 2026-11-10): the bare
+       "Analysis" cluster button is REMOVED — the premium card's
+       "Get the Investigation Report" CTA is the purchase entry and
+       opens #analysis-modal directly. #}
     <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
           <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -121,14 +126,16 @@
             <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
           </form>
           {% endif %}
-          {# Issue #106 Stage 2: Analysis sits AFTER the Export
-             controls — the click only opens the popup;
-             Cancel/Escape changes no state; Confirm is the charge
-             point and results show in page. #}
+          {# Issue #106 Stage 2, as amended by the 2026-11-10
+             follow-up ruling: a completed Investigation Report is
+             linked AFTER the Export controls (renamed from the
+             retired bare "Analysis" per the 2026-11-09 naming
+             ruling); with no result yet there is NO cluster purchase
+             button — the premium card CTA opens the popup, whose
+             Cancel changes no state and whose Confirm is the charge
+             point, with results shown in page. #}
           {% if analysis_result_id %}
-          <a href="/reports/{{ analysis_result_id }}" class="s1-chip" style="text-decoration:none">Analysis</a>
-          {% else %}
-          <button type="button" class="s1-chip" id="analysis-btn">Analysis</button>
+          <a href="/reports/{{ analysis_result_id }}" class="s1-chip" style="text-decoration:none">Investigation Report</a>
           {% endif %}
           <button type="button" class="s1-chip" id="share-btn">Share</button>
 
@@ -434,11 +441,7 @@
           if (navigator.clipboard) { navigator.clipboard.writeText(linkBox.value); }
         });
         var analysisModal = document.getElementById('analysis-modal');
-        var analysisBtn = document.getElementById('analysis-btn');
-        if (analysisBtn && analysisModal) {
-          analysisBtn.addEventListener('click', function () {
-            analysisModal.style.display = 'flex';
-          });
+        if (analysisModal) {
           document.getElementById('analysis-close').addEventListener('click', function () {
             analysisModal.style.display = 'none';
           });
@@ -492,9 +495,12 @@
   </section>
 
   {# Fidelity G13: log-window label above the stats, built from the
-     existing timeline bounds (first/last seen already in context). #}
+     existing timeline bounds (first/last seen already in context).
+     G13 completion (2026-11-11): render the formatted
+     log_window_label computed in service.py when present; fall
+     back to the raw bounds when it is not (never fabricate). #}
   {% if first_seen and last_seen %}
-  <div class="s1-window" data-s1-window>Log window {{ first_seen }} – {{ last_seen }}</div>
+  <div class="s1-window" data-s1-window>{% if log_window_label is defined and log_window_label %}{{ log_window_label }}{% else %}Log window {{ first_seen }} – {{ last_seen }}{% endif %}</div>
   {% endif %}
 
   {# Issue #170 S1 (Decision 13): tile notes are computed from the
@@ -507,18 +513,20 @@
     <div class="stat"><div class="num">{{ sorted_issues|length }}</div><div class="lbl">Unique issues</div>{% set occ_total = sorted_issues|map(attribute='1.count')|sum %}{% if occ_total %}<div class="s1-stat-note">{{ occ_total }} total occurrences</div>{% endif %}</div>
   </div>
 
-  {% if current_user and report_id and analysis_eligible and not analysis_result_id and not analysis_prior_exists and not is_demo %}
-  {# Issue #170 S1 (Decision 6 as amended by A5; PR #171 Codex P2-2):
-     the premium upsell card renders ONLY for an owned, standard,
-     analysis-eligible source report with no Brief and no
-     already-purchased derived artifact — including an
-     older-generator prior purchase (analysis_prior_exists, whose
-     disclosed upgrade path stays in the Actions modal) — never on
-     anonymous/demo/sample/legacy-paid surfaces.
-     Interim credit-era copy + the existing Analysis purchase flow
-     (the Actions-menu modal) only; no dollar copy pre-#164A. The
-     button forwards to the existing #analysis-btn so the charge
-     point, confirm copy and POST route are unchanged. #}
+  {% if current_user and report_id and analysis_eligible and not analysis_result_id and not is_demo %}
+  {# Issue #170 S1 (Decision 6 as amended by A5; PR #171 Codex P2-2),
+     as amended by the report follow-up slice (2026-11-11):
+     the premium upsell card renders for an owned, standard,
+     analysis-eligible source report with no current-version
+     derived artifact — INCLUDING an older-generator prior purchase
+     (analysis_prior_exists): the 2026-11-10 ruling removed the
+     cluster "Analysis" button that was that state's only modal
+     entry, so the card now renders for prior-exists too and its
+     CTA opens the modal, whose copy carries the prior-exists
+     disclosure. Never on anonymous/demo/sample/legacy-paid
+     surfaces. The card's terms paragraph stays verbatim. The CTA
+     opens #analysis-modal directly so the charge point, confirm
+     copy and POST route are unchanged. #}
   <div class="s1-premium-card" data-s1-premium-card>
     {# Fidelity G3: design composition (gold card, icon, h2 with
        price, pitch line, gold CTA with price). The #164
@@ -542,8 +550,8 @@
       var cardBtn = document.getElementById('premium-upsell-btn');
       if (cardBtn) {
         cardBtn.addEventListener('click', function () {
-          var btn = document.getElementById('analysis-btn');
-          if (btn) { btn.click(); }
+          var modal = document.getElementById('analysis-modal');
+          if (modal) { modal.style.display = 'flex'; }
         });
       }
     })();
