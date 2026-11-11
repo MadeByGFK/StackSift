@@ -263,6 +263,41 @@ const radios = ['txt','pdf','json','csv'].map(function (v) {
   const r = new El('radio-' + v); r.value = v; r.name = 'share-format'; return r;
 });
 radios[0].checked = true;
+const EXPORT_CONFIRM_TEXT = 'Export costs 2 credits and unlocks PDF, CSV and JSON for this report.';
+function fireSubmit(form) {
+  const ev = {
+    defaultPrevented: false,
+    preventDefault: function () { this.defaultPrevented = true; },
+    stopImmediatePropagation: function () {},
+  };
+  (form.listeners.submit || []).slice().forEach(function (fn) { fn(ev); });
+  if (!ev.defaultPrevented) { form.submittedCount = (form.submittedCount || 0) + 1; }
+  return ev;
+}
+const exportForm = {
+  id: 'export-form',
+  style: {},
+  textContent: '',
+  value: '',
+  href: '',
+  dataset: {},
+  attrs: { 'data-confirm': EXPORT_CONFIRM_TEXT },
+  listeners: {},
+  checked: false,
+  disabled: false,
+  submittedCount: 0,
+  addEventListener: function (ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); },
+  setAttribute: function (k, v) { this.attrs[k] = String(v); },
+  getAttribute: function (k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; },
+  select: function () {},
+  appendChild: function () {},
+  remove: function () {},
+  click: function () {},
+  requestSubmit: function () { fireSubmit(this); },
+};
+globalThis.exportForm = exportForm;
+globalThis.fireSubmit = fireSubmit;
+globalThis.EXPORT_CONFIRM_TEXT = EXPORT_CONFIRM_TEXT;
 const requested = [];
 const docListeners = {};
 const fetchCalls = [];
@@ -279,6 +314,7 @@ globalThis.document = {
   getElementById: function (id) { requested.push(id); return byId(id); },
   addEventListener: function (ev, fn) { (docListeners[ev] = docListeners[ev] || []).push(fn); },
   querySelectorAll: function (sel) {
+    if (sel === 'form[data-confirm]') { return [exportForm]; }
     if (sel === 'input[name="share-format"]') { return radios; }
     return [];
   },
@@ -439,8 +475,30 @@ def test_runtime_5_export_share_unaffected_after_modal_open_close():
       out.shareClosed = byId('share-modal').style.display || '';
       await click(byId('premium-upsell-btn'));
       out.reopened = byId('analysis-modal').style.display || '';
-      out.confirmModal = byId('ss-confirm').style.display || '';
+      out.confirmModalBeforeExport = byId('ss-confirm').style.display || '';
       out.fetchCount = fetchCalls.length;
+      // Export confirm flow, driven through the REAL ss-confirm
+      // handlers registered on the fake form[data-confirm] form:
+      // (a) a direct submit is intercepted — modal opens with the
+      // form's data-confirm text and nothing is submitted.
+      fireSubmit(exportForm);
+      out.exportModalAfterSubmit = byId('ss-confirm').style.display || '';
+      out.exportConfirmText = byId('ss-confirm-text').textContent || '';
+      out.exportSubmittedAfterSubmit = exportForm.submittedCount;
+      // (b) Cancel closes the modal and still submits nothing.
+      await click(byId('ss-confirm-no'));
+      out.exportModalAfterNo = byId('ss-confirm').style.display || '';
+      out.exportSubmittedAfterNo = exportForm.submittedCount;
+      // (c) Submit again, then Yes: the confirmed re-submit passes
+      // through the handler exactly once, the modal does not
+      // re-open, and dataset.confirmed is consumed/cleared.
+      fireSubmit(exportForm);
+      out.exportModalAfterResubmit = byId('ss-confirm').style.display || '';
+      out.exportSubmittedBeforeYes = exportForm.submittedCount;
+      await click(byId('ss-confirm-yes'));
+      out.exportSubmittedAfterYes = exportForm.submittedCount;
+      out.exportModalAfterYes = byId('ss-confirm').style.display || '';
+      out.exportConfirmedCleared = !('confirmed' in exportForm.dataset);
     """)
     assert out["opened"] == "flex", out
     assert out["closed"] == "none", out
@@ -449,7 +507,24 @@ def test_runtime_5_export_share_unaffected_after_modal_open_close():
     assert out["shareMsg"] == "", out
     assert out["shareClosed"] == "none", out
     # Card CTA still works after the share cycle; the export
-    # data-confirm modal was never triggered; nothing was fetched.
+    # data-confirm modal was not triggered by that cycle alone;
+    # nothing was fetched.
     assert out["reopened"] == "flex", out
-    assert out["confirmModal"] != "flex", out
+    assert out["confirmModalBeforeExport"] != "flex", out
     assert out["fetchCount"] == 0, out
+    # (a) Export submit is gated by the real confirm handler.
+    assert out["exportModalAfterSubmit"] == "flex", out
+    assert out["exportConfirmText"] == (
+        "Export costs 2 credits and unlocks PDF, CSV and JSON "
+        "for this report."), out
+    assert out["exportSubmittedAfterSubmit"] == 0, out
+    # (b) Cancel: modal closes, no submission.
+    assert out["exportModalAfterNo"] == "none", out
+    assert out["exportSubmittedAfterNo"] == 0, out
+    # (c) Yes: exactly one real submission, modal stays closed,
+    # and the one-shot confirmed flag is cleared by the handler.
+    assert out["exportModalAfterResubmit"] == "flex", out
+    assert out["exportSubmittedBeforeYes"] == 0, out
+    assert out["exportSubmittedAfterYes"] == 1, out
+    assert out["exportModalAfterYes"] == "none", out
+    assert out["exportConfirmedCleared"] is True, out
