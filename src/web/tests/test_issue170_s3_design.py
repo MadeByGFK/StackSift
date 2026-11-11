@@ -104,6 +104,44 @@ his phone — the S3 hand-check was NOT a pass):
   The Batch entry card under the table (founder ruling
   2026-11-09) was checked on the base head for this slice
   (5c780b17) and is ALREADY present — no change needed.
+
+Founder desktop addendum (2026-11-10 21:57 ET, PR #179 fold-in):
+  M3  ROW-UNDER at ALL widths: the seven row actions leave the
+      side ACTIONS column entirely and sit in their own full-width
+      row UNDER each report's main row (a second <tr> per report
+      whose single cell spans all four remaining columns). The
+      thead loses the "Actions" header. Desktop and mobile share
+      this one structure; on mobile the actions row IS line 3 of
+      the three-line sketch (data-s3-line="3" now sits on the
+      actions <tr>; main-row cells keep lines 1/2). The Date cell
+      renders as two clean lines (date / time UTC) with no
+      word-by-word wrap (white-space:nowrap on the cell + spans).
+      Premise-changed tests (named in advance, A8): the table
+      columns test (Actions column gone), the mobile stacked
+      layout hooks test (actions no longer a grid area inside
+      the main row; the main-row grid is two lines and the
+      actions <tr> is the mobile card's lower half), the
+      _row_for helper (a row segment now spans BOTH <tr>s), and
+      the G2/retention state-cell slices (unchanged anchors —
+      the actions cell still follows the state cell, now in the
+      second <tr>). Assertion strength is kept or raised.
+  M4  Codex P2 on PR #179: the export panel was right:0 with
+      min-width:196px; in the row-under structure the Export
+      trigger sits near the LEFT edge at all widths, so the
+      right-aligned panel overhung the viewport's left edge.
+      The panel now anchors to the trigger's left edge
+      (left:0; right:auto) and is capped at
+      max-width:calc(100vw - 24px).
+  M5  Runtime interaction tests (standing rule 2026-11-10): the
+      Node dropdown harness enumerates the mutation sequences
+      (open A -> open B, Escape, outside click) asserting the
+      DISPLAYED state (hidden + aria-expanded) after each step,
+      and a structural test pins the Share control + share-state
+      line to the same row's report id/keys after the move (the
+      share modal JS itself is untouched apart from a guarded
+      previous-sibling fallback in syncShareStateLineFor /
+      updateExtendedRow, needed because closest('.card') now
+      lands on the actions row first).
 """
 
 import json
@@ -178,11 +216,16 @@ def _render(reports, **overrides):
 
 
 def _row_for(html, report_id):
+    # M3 premise change: a report's segment spans BOTH rows — the
+    # main <tr class="card s3-row"> and the row-under actions
+    # <tr class="card s3-actions-tr"> that follows it — up to the
+    # next report's main row (the same slicing the deep-dive row
+    # helpers in other test files already used).
     view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
     rows = html.split('<tr class="card s3-row">')
     matches = [r for r in rows if view_link in r]
     assert len(matches) == 1, report_id
-    return matches[0].split("</tr>")[0]
+    return matches[0].split("</tbody>")[0]
 
 
 # --- New table structure (TEETH) --------------------------------------------
@@ -194,10 +237,13 @@ def test_s3_table_structure_and_columns():
     assert '<div class="s3-table-wrap">' in html
     head = html[html.index("<thead>"):html.index("</thead>")]
     cols = [head.index(f">{name}<") for name in
-            ("Report", "Date", "Severity", "State &amp; retention",
-             "Actions")]
+            ("Report", "Date", "Severity", "State &amp; retention")]
     assert cols == sorted(cols), cols
+    # M3 premise change (founder ruling 2026-11-10 21:57): there
+    # is NO Actions column — the actions live in a row under.
+    assert ">Actions<" not in head
     assert html.count('<tr class="card s3-row">') == 1
+    assert html.count('<tr class="card s3-actions-tr"') == 1
     # The card list is gone (structure teeth, not a copy gate).
     assert '<ul class="list">' not in html
     assert '<li class="card">' not in html
@@ -363,39 +409,55 @@ def test_s3_mobilefix_single_export_button_and_menu():
     assert ".s3-export-menu{position:absolute" in inline
     assert "background:var(--panel)" in inline
     assert ".s3-export-menu[hidden]{display:none}" in inline
+    # M4 (Codex P2 on PR #179): the panel anchors to the trigger's
+    # LEFT edge — in the row-under structure the trigger sits near
+    # the left at all widths, so a right:0 panel overhung the
+    # viewport's left edge and cut off the export controls — and
+    # it can never exceed the viewport width.
+    assert ".s3-export-menu{position:absolute;left:0;right:auto" \
+        in inline
+    assert "max-width:calc(100vw - 24px)" in inline
+    assert ".s3-export-menu{position:absolute;right:0" not in inline
 
 
 def test_s3_mobilefix_mobile_stacked_layout_hooks():
-    """M2 teeth: the three-line mobile structure is pinned in both
-    markup and CSS. Markup: data-s3-line groups the five cells as
-    1 (Report, Severity) / 2 (State, Date) / 3 (Actions). CSS: at
-    max-width 640px the row is a grid with exactly those areas,
-    the thead is hidden, the severity pill cannot wrap/clip, the
-    filename column can shrink (minmax(0,1fr)), the actions row's
-    buttons are compact (flex:none — NOT the full-width stacked
-    buttons Kolby flagged), and the table wrap stops clipping
+    """M2 teeth, as amended by M3 (founder ruling 2026-11-10
+    21:57 — premise changed, named in advance): the three lines
+    are now TWO rows. Markup: data-s3-line groups the main-row
+    cells as 1 (Report, Severity) / 2 (State, Date), and line 3
+    sits on the actions <tr> itself. CSS: at max-width 640px the
+    main row is a grid with exactly the line-1/line-2 areas, the
+    actions <tr> is the card's lower half (display:block, shared
+    panel/border, no separate margin), the thead is hidden, the
+    severity pill cannot wrap/clip, the filename column can
+    shrink (minmax(0,1fr)), the actions row's buttons are compact
+    (flex:none — NOT the full-width stacked buttons Kolby
+    flagged), and the table wrap stops clipping
     (overflow:visible) so the export dropdown panel is not inside
-    an overflow-clipped ancestor at mobile width. Fails on the
-    base tree: no data-s3-line hooks and no grid block exist."""
+    an overflow-clipped ancestor at mobile width."""
     rid = "row-m2"
     row = _row_for(_render([_report(id=rid)]), rid)
     assert row.count('data-s3-line="1"') == 2  # Report + Severity
     assert row.count('data-s3-line="2"') == 2  # State + Date
-    assert row.count('data-s3-line="3"') == 1  # Actions
+    assert row.count('data-s3-line="3"') == 1  # Actions <tr>
     assert 'class="s3-report-cell" data-s3-line="1"' in row
     assert 'class="s3-severity-cell" data-s3-line="1"' in row
     assert 'class="s3-state-cell" data-s3-line="2"' in row
     assert 'class="s3-date-cell" data-s3-line="2"' in row
-    assert 'class="s3-actions-cell" data-s3-line="3"' in row
+    assert '<tr class="card s3-actions-tr" data-s3-line="3">' in row
+    assert 'class="s3-actions-cell" data-s3-line="3"' not in row
     inline = REPORTS[REPORTS.index("Issue #170 S3"):
                      REPORTS.index("</style>")]
     mobile = inline[inline.rindex("@media (max-width:640px)"):]
     assert ".s3-table-wrap{overflow:visible" in mobile
     assert "display:grid" in mobile
-    assert ('grid-template-areas:"report severity" "state date" '
-            '"actions actions"') in mobile
+    assert ('grid-template-areas:"report severity" "state date"'
+            ) in mobile
+    assert '"actions actions"' not in mobile
     assert "grid-template-columns:minmax(0,1fr) auto" in mobile
     assert ".s3-table thead{display:none}" in mobile
+    assert (".s3-table tbody tr.card.s3-actions-tr{display:block"
+            in mobile)
     assert ".s3-severity-cell .s3-pill{white-space:nowrap}" in mobile
     assert ".s3-actions-cell .s3-actions-row .btn{flex:none" in mobile
     assert "height:32px" in mobile
@@ -404,6 +466,91 @@ def test_s3_mobilefix_mobile_stacked_layout_hooks():
     assert inline.index("overflow-x:auto") < \
         mobile.index("overflow:visible") + inline.rindex(
             "@media (max-width:640px)")
+
+
+def test_s3_rowunder_actions_row_structure():
+    """M3 teeth (founder ruling 2026-11-10 21:57, all widths): the
+    seven row actions are NOT in the main row at all — the main
+    <tr> carries only the four content cells — and sit in their
+    own full-width row under it: a second <tr> whose single cell
+    spans all four columns (colspan="4") and carries the actions
+    container. Order inside the actions row is Open / Export /
+    Investigation Report / Share / Extend, every control quiet
+    btn-ghost. The desktop CSS gives the actions row's spanning
+    cell the group separator (the main row's cells carry none).
+    Fails on the pre-addendum tree (e632936c): the actions cell
+    sits inside the main row and the thead has an Actions column.
+    """
+    rid = "row-under"
+    html = _render([_report(id=rid)])
+    assert ">Actions<" not in html
+    main = html[html.index('<tr class="card s3-row">'):]
+    main = main[:main.index("</tr>")]
+    for absent in (">Open</a>", "s3-export", ">Share</button>",
+                   "/retention", 'class="s3-actions-cell"'):
+        assert absent not in main, absent
+    assert main.count("<td") == 4
+    row = _row_for(html, rid)
+    assert '<tr class="card s3-actions-tr" data-s3-line="3">' in row
+    assert '<td class="s3-actions-cell" colspan="4">' in row
+    actions = row[row.index('<tr class="card s3-actions-tr"'):]
+    order = [actions.index(">Open</a>"),
+             actions.index("data-s3-export-btn"),
+             actions.index(">Investigation Report</button>"),
+             actions.index(">Share</button>"),
+             actions.index(">Extend</button>")]
+    assert order == sorted(order), order
+    assert actions.count("btn btn-ghost") == \
+        row.count("btn btn-ghost")  # all quiet controls are here
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    desktop = inline[:inline.rindex("@media (max-width:640px)")]
+    assert ".s3-table tbody tr.s3-row td{border-bottom:none}" \
+        in desktop
+    assert (".s3-table tbody tr.s3-actions-tr td{padding:2px 16px "
+            "16px;border-bottom:1px solid var(--border)}") in desktop
+
+
+def test_s3_rowunder_share_wiring_same_row():
+    """M5(d) structural gate: after the row-under move, the Share
+    control in the actions row and the Turn off control inside
+    the .s3-share-state line (state cell, main row) are still
+    wired to the SAME row's report — both share-open controls
+    carry this row's data-report and byte-identical create /
+    rotate / revoke keys, and no other row's id leaks in. The
+    share modal JS itself is untouched by the move (apart from
+    the guarded sibling fallback), so rendered-page structure is
+    the assertion surface for the wiring."""
+    rid_a, rid_b = "row-share-a", "row-share-b"
+    html = _render([
+        _report(id=rid_a, share_active=True, share_formats=["txt"],
+                share_create_key="create-a",
+                share_rotate_key="rotate-a",
+                share_revoke_key="revoke-a"),
+        _report(id=rid_b, share_active=True, share_formats=["txt"],
+                share_create_key="create-b",
+                share_rotate_key="rotate-b",
+                share_revoke_key="revoke-b"),
+    ])
+    for rid, suffix in ((rid_a, "a"), (rid_b, "b")):
+        row = _row_for(html, rid)
+        # State line lives in the MAIN row; Share in the row under.
+        state = row[:row.index('<tr class="card s3-actions-tr"')]
+        actions = row[row.index('<tr class="card s3-actions-tr"'):]
+        assert 'class="s3-share-state"' in state
+        assert ">Turn off</button>" in state
+        assert ">Share</button>" in actions
+        attrs = re.findall(
+            r'class="btn btn-ghost share-open"([^>]*)>', row)
+        assert len(attrs) == 2, attrs
+        assert attrs[0] == attrs[1], attrs
+        for attr in (f'data-report="{rid}"',
+                     f'data-create-key="create-{suffix}"',
+                     f'data-rotate-key="rotate-{suffix}"',
+                     f'data-revoke-key="revoke-{suffix}"'):
+            assert attr in attrs[0], attr
+        other = "b" if suffix == "a" else "a"
+        assert f"create-{other}" not in row
 
 
 def test_s3_g2_status_word_and_share_state_line():
@@ -465,6 +612,17 @@ def test_s3_g4_date_cell_two_lines():
         assert '<span class="s3-date-sub">12:00 UTC</span>' in cell
         assert "Analyzed" not in cell and "Created" not in cell
         assert "2026-11-04 12:00" not in cell
+    # M3 date premise (founder addendum 2026-11-10 21:57): the two
+    # lines must not wrap word-by-word in a narrow column — the
+    # cell and both spans are white-space:nowrap at ALL widths
+    # (the rules live outside the mobile media block).
+    inline = REPORTS[REPORTS.index("Issue #170 S3"):
+                     REPORTS.index("</style>")]
+    desktop = inline[:inline.rindex("@media (max-width:640px)")]
+    assert ".s3-date-cell{white-space:nowrap}" in desktop
+    assert ".s3-date-line{display:block;white-space:nowrap}" in desktop
+    assert "white-space:nowrap" in desktop.split(
+        ".s3-date-sub{")[1].split("}")[0]
 
 
 def test_s3_unlocked_row_export_confirms_are_free_text():
@@ -831,6 +989,48 @@ def test_s3_mobilefix_export_dropdown_toggle_behaviour():
     assert out["bReclosedAria"] == "false"
     assert out["outsideAHidden"] is True
     assert out["outsideAAria"] == "false"
+
+
+@pytestmark_export_js
+def test_s3_mobilefix_export_dropdown_runtime_sequences():
+    """M5 runtime sequences (standing rule 2026-11-10 — displayed
+    state asserted after EACH mutation, DOM-level, not page
+    contract): (a) open Export on row A, then open Export on
+    row B -> A's panel hidden + A's aria-expanded="false", B's
+    open + "true"; (b) Escape closes the open panel and resets
+    aria-expanded; (c) an outside click closes it and resets
+    aria-expanded. Runs against the real inline dropdown script
+    extracted from reports.html, in the row-under structure."""
+    out = _run_export_js("""
+      // (a) A, then B through the second control sharing state.
+      await click(rowA.btn);
+      out.a1Hidden = rowA.menu.hidden;
+      out.a1Aria = rowA.btn.getAttribute('aria-expanded');
+      await click(rowB.btn);
+      out.aAHidden = rowA.menu.hidden;
+      out.aAAria = rowA.btn.getAttribute('aria-expanded');
+      out.aBHidden = rowB.menu.hidden;
+      out.aBAria = rowB.btn.getAttribute('aria-expanded');
+      // (b) Escape closes B and resets its aria-expanded.
+      docListeners.keydown({ key: 'Escape' });
+      out.bBHidden = rowB.menu.hidden;
+      out.bBAria = rowB.btn.getAttribute('aria-expanded');
+      out.bAHidden = rowA.menu.hidden;
+      out.bAAria = rowA.btn.getAttribute('aria-expanded');
+      // (c) Reopen A, then an outside click closes it.
+      await click(rowA.btn);
+      out.cPreHidden = rowA.menu.hidden;
+      docListeners.click({ target: {} });
+      out.cAHidden = rowA.menu.hidden;
+      out.cAAria = rowA.btn.getAttribute('aria-expanded');
+    """)
+    assert out["a1Hidden"] is False and out["a1Aria"] == "true"
+    assert out["aAHidden"] is True and out["aAAria"] == "false"
+    assert out["aBHidden"] is False and out["aBAria"] == "true"
+    assert out["bBHidden"] is True and out["bBAria"] == "false"
+    assert out["bAHidden"] is True and out["bAAria"] == "false"
+    assert out["cPreHidden"] is False
+    assert out["cAHidden"] is True and out["cAAria"] == "false"
 
 
 # --- A4 browser tests (Node harness over the real inline script) ------------
