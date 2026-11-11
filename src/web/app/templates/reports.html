@@ -586,11 +586,17 @@
     badge.textContent = '\u{1FA99} ' + next + ' credits';
   }
   function updateExtendedRow(form, data) {
-    var card = form.closest ? form.closest('.card') : null;
+    var actionsCard = form.closest ? form.closest('.card') : null;
+    var card = actionsCard;
     // Row-under actions (2026-11-10 21:57): the Extend form now
     // sits in the actions row (.card) UNDER the main row, whose
     // cells carry the expiry date/pill. If the closest .card has
-    // no expiry element, fall back to the previous sibling row.
+    // no expiry element, fall back to the previous sibling row
+    // for the expiry lookups. The retention status element lives
+    // in the ACTIONS row (next to the form), so it is looked up
+    // on actionsCard below, not on the fallen-back main row
+    // (PR #179 Codex P2: looking it up on the main row always
+    // returned null, so "Retention extended." never displayed).
     if (card && typeof card.querySelector === 'function'
         && !card.querySelector('[data-retention-expiry-date]')
         && card.previousElementSibling) {
@@ -614,7 +620,13 @@
         else { pillEl.classList.remove('soon'); }
       }
     }
-    var statusEl = card.querySelector('[data-retention-status]');
+    var statusEl = null;
+    if (actionsCard && typeof actionsCard.querySelector === 'function') {
+      statusEl = actionsCard.querySelector('[data-retention-status]');
+    }
+    if (!statusEl && typeof card.querySelector === 'function') {
+      statusEl = card.querySelector('[data-retention-status]');
+    }
     if (statusEl) {
       statusEl.textContent = 'Retention extended.';
       statusEl.style.display = '';

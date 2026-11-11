@@ -142,6 +142,17 @@ Founder desktop addendum (2026-11-10 21:57 ET, PR #179 fold-in):
       previous-sibling fallback in syncShareStateLineFor /
       updateExtendedRow, needed because closest('.card') now
       lands on the actions row first).
+  M6  PR #179 Codex P2 remediation: that fallback broke the
+      retention STATUS update — updateExtendedRow reassigned its
+      row variable to the main row, then looked
+      [data-retention-status] up there (always null; the status
+      lives in the actions row next to the form), so "Retention
+      extended." was never displayed. The fix keeps a separate
+      actions-row reference for the status lookup (falling back
+      to the main row only if the actions row has none), and the
+      Node harness mock now mirrors the real split-row DOM
+      (expiry in the main row, form + status in the actions-row
+      sibling) so the existing extend test has teeth for it.
 """
 
 import json
@@ -1079,10 +1090,23 @@ function makeRow(prefix, expiryText, pillText) {
   const dateEl = new El(prefix + '-date'); dateEl.textContent = expiryText;
   const pillEl = new El(prefix + '-pill'); pillEl.textContent = pillText;
   const statusEl = new El(prefix + '-status'); statusEl.style.display = 'none';
-  const rowEl = new El(prefix + '-row');
-  rowEl.querySelector = function (sel) {
+  // PR #179 Codex P2 fixture: mirror the REAL row-under DOM — the
+  // expiry date/pill live in the MAIN row, while the retention
+  // form and its [data-retention-status] element live in a
+  // separate ACTIONS row (.card) whose previousElementSibling is
+  // the main row and whose closest('.card') is itself. The old
+  // mock placed all three elements in one row, which hid the bug
+  // where updateExtendedRow fell back to the main row and then
+  // looked the status element up there (always null).
+  const mainRowEl = new El(prefix + '-main-row');
+  mainRowEl.querySelector = function (sel) {
     if (sel === '[data-retention-expiry-date]') { return dateEl; }
     if (sel === '[data-retention-expiry-pill]') { return pillEl; }
+    return null;
+  };
+  const rowEl = new El(prefix + '-row');
+  rowEl.previousElementSibling = mainRowEl;
+  rowEl.querySelector = function (sel) {
     if (sel === '[data-retention-status]') { return statusEl; }
     return null;
   };
@@ -1090,6 +1114,7 @@ function makeRow(prefix, expiryText, pillText) {
   const form = new El(prefix + '-form');
   form.action = '/reports/' + prefix + '/retention';
   form._row = rowEl;
+  form._mainRow = mainRowEl;
   form.getAttribute = function (k) {
     if (k === 'data-confirm') { return "Extend this report's retention by 90 days for 1 credit?"; }
     return El.prototype.getAttribute.call(this, k);
@@ -1097,7 +1122,9 @@ function makeRow(prefix, expiryText, pillText) {
   form.querySelector = function (sel) { return sel.indexOf('submit') !== -1 ? btn : null; };
   form.closest = function (sel) { return sel === '.card' ? rowEl : null; };
   form.requestSubmit = function () { dispatchSubmit(form); };
-  return { form: form, rowEl: rowEl, dateEl: dateEl, pillEl: pillEl, statusEl: statusEl, btn: btn };
+  return { form: form, rowEl: rowEl, mainRowEl: mainRowEl,
+           actionsRowEl: rowEl, dateEl: dateEl, pillEl: pillEl,
+           statusEl: statusEl, btn: btn };
 }
 function dispatchSubmit(form) {
   const ev = {
@@ -1262,9 +1289,16 @@ def test_s3_browser_two_rows_present():
 
 @pytestmark_js
 def test_s3_browser_extend_updates_only_that_row():
-    """A4 browser test: Extend submitted on row A updates ONLY row
-    A's expiry date/pill/status (via form.closest('.card'), the
-    preserved ancestor contract); row B is byte-identical after."""
+    """A4 browser test + PR #179 Codex P2 regression: Extend
+    submitted on row A updates ONLY row A's expiry date/pill (on
+    the MAIN row, reached via the actions row's
+    previousElementSibling fallback) AND its retention status
+    (on the ACTIONS row, where the form lives — text set to
+    "Retention extended." and display cleared so it is shown /
+    announced); row B is byte-identical after. The harness mock
+    mirrors the real split-row DOM, so this fails on the pre-fix
+    template: the fallen-back main-row status lookup returned
+    null and the status was never displayed."""
     out = _run_js("""
       fetchImpl = function () {
         return Promise.resolve({ ok: true, status: 200,
@@ -1279,18 +1313,22 @@ def test_s3_browser_extend_updates_only_that_row():
       out.aDate = rowA.dateEl.textContent;
       out.aPill = rowA.pillEl.textContent;
       out.aStatus = rowA.statusEl.textContent;
+      out.aStatusDisplay = rowA.statusEl.style.display;
       out.bDate = rowB.dateEl.textContent;
       out.bPill = rowB.pillEl.textContent;
       out.bStatus = rowB.statusEl.textContent;
+      out.bStatusDisplay = rowB.statusEl.style.display;
       out.badge = byId('credit-badge').textContent;
     """)
     assert out["modalShown"] == "flex"
     assert out["aDate"] == "Expires 2027-02-09"
     assert out["aPill"] == "Expires in 97 days"
     assert out["aStatus"] == "Retention extended."
+    assert out["aStatusDisplay"] == ""
     assert out["bDate"] == "Expires 2026-11-11"
     assert out["bPill"] == "Expires in 7 days"
     assert out["bStatus"] == ""
+    assert out["bStatusDisplay"] == "none"
     assert "2 credits" in out["badge"]
 
 
