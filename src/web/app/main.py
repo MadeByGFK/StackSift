@@ -969,8 +969,10 @@ async def product_return(request: Request):
     Settlement is webhook-only — this page grants nothing. It reads
     the buyer's own state for the SKU and renders exactly one honest
     state: ``ready`` (a settled entitlement + the still-pending
-    consent for the same files: the Run form, never a second checkout
-    prompt), ``settling`` (payment received, webhook not landed yet:
+    consent for the same files + the pending payload actually
+    loaded: the Run form, never a second checkout prompt — PR #182
+    finding 5: without the payload the Run form would 410, so that
+    case renders ``no_consent`` instead), ``settling`` (payment received, webhook not landed yet:
     check-again link, no checkout prompt), ``no_consent`` (entitlement
     held but the pending upload is gone: re-upload the same files and
     the quote step offers Run), ``cancelled``, or ``missing``.
@@ -1135,8 +1137,16 @@ async def product_return(request: Request):
         # honest "missing" state — never another consent's state,
         # and never a "settling" claim for an unknown purchase.
         context["state"] = "missing"
-    elif entitlement is not None and consent is not None:
+    elif (entitlement is not None and consent is not None
+            and pending_loaded):
         context["state"] = "ready"
+    elif entitlement is not None and consent is not None:
+        # PR #182 finding 5: entitlement + consent exist but the
+        # pending payload did NOT load (temp storage lost) — the Run
+        # form would necessarily 410 at the paid handler, so render
+        # the re-upload recovery state instead of "ready". (Falls
+        # into the no_consent branch below on purpose.)
+        context["state"] = "no_consent"
     elif entitlement is not None:
         context["state"] = "no_consent"
     elif outcome == "cancelled":

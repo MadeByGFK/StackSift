@@ -1503,6 +1503,40 @@ def test_runtime_product_return_unknown_purchase_binds_nothing(p164b_env):
     assert 'action="/compare/paid"' not in r.text
 
 
+def test_runtime_product_return_missing_pending_renders_reupload_not_run(p164b_env):
+    """Finding 5 (P2), DOM-level: entitlement + live consent exist
+    but the pending payload is GONE (temp storage lost) — the landing
+    must render the re-upload recovery state, NOT 'ready' with a Run
+    form that would necessarily 410 at the paid handler. Checked on
+    both the legacy (no purchase param) and purchase-bound URLs."""
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    r = _post_compare(env)
+    assert r.status_code == 402, r.text[:300]
+    from app import main, models as M
+    with env.sessions() as db:
+        consent = db.query(M.Consent).filter(
+            M.Consent.user_id == uid,
+            M.Consent.operation_type == "compare_logs").one()
+        consent_id = str(consent.id)
+    _buy_and_settle(env, csrf, "compare", _compare_digest())
+    with env.sessions() as db:
+        purchase_id = str(db.query(M.ProductPurchase).filter(
+            M.ProductPurchase.user_id == uid).one().id)
+    # The pending payload is lost after settlement.
+    main._delete_paid_pending(consent_id)
+    assert main._load_compare_pending(consent_id) is None
+    for landing in (
+            "/products/return?product_checkout=success&sku=compare",
+            "/products/return?product_checkout=success&sku=compare"
+            f"&purchase={purchase_id}"):
+        r = env.client.get(landing)
+        assert r.status_code == 200, r.text[:300]
+        assert "Upload the same files" in r.text  # re-upload recovery
+        assert 'action="/compare/paid"' not in r.text  # no Run form
+        assert "Run comparison" not in r.text
+
+
 def test_runtime_oversize_cancel_post_on_checkout_branch_releases_lockout(p164b_env):
     """Finding 3 (P2), DOM-level: on the dollar checkout branch the
     oversize consent page renders the CSRF cancel POST (not only a
