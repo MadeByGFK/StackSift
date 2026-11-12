@@ -2412,6 +2412,16 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 if _consent_row.sku is None:
                     db.rollback()
                     return _analysis_response(request, 409, message=LEGACY_CONSENT_MESSAGE)
+                # Consent validation precedes the pending load (the
+                # credit-era order): consumed/expired/owner errors
+                # are 409, a missing pending file is 410.
+                try:
+                    C.validate_consent(db, consent_id, user_id,
+                                       "oversize_analysis", digest, 0,
+                                       sku="large_file_analysis")
+                except C.AdmissionError as exc:
+                    db.rollback()
+                    return _analysis_response(request, 409, message=str(exc))
                 pending = _load_paid_pending(str(consent_id))
                 if pending is None:
                     return _analysis_response(request, 410, message="Upload expired. Please upload the file again.")
@@ -2435,16 +2445,6 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                     # (safe, fail-closed) behavior.
                     if isinstance(meta.get("byte_count"), int):
                         oversize_original_bytes = meta["byte_count"]
-                # Consent validation as its own step (existing
-                # pattern): failures are 409 here; admission
-                # re-validates authoritatively under lock.
-                try:
-                    C.validate_consent(db, consent_id, user_id,
-                                       "oversize_analysis", digest, 0,
-                                       sku="large_file_analysis")
-                except C.AdmissionError as exc:
-                    db.rollback()
-                    return _analysis_response(request, 409, message=str(exc))
                 worker = uuid_module.uuid4().hex
                 try:
                     # Product admission (B-8): the free-quota branch of
@@ -3279,7 +3279,7 @@ def _durable_batch(request, key, *, consent_id, digest):
                 return _batch_response(
                     request, 400,
                     message=f"File {ordinal} ({filename}): {problem}. "
-                            "No files were analyzed and no credits were reserved.")
+                            "No files were analyzed and nothing was charged.")
         # Issue #164 Phase B: billing mode from the consent row.
         if consent_row is not None and consent_row.sku is None:
             # B-12 class 2: unadmitted legacy credit consent refused.
@@ -3485,7 +3485,7 @@ async def batch_intake(request: Request, files: list[UploadFile] = File(...),
             "error": message, "current_user": _user, "csrf_token": _csrf},
             status_code=status)
 
-    no_charge = " No files were analyzed and no credits were reserved."
+    no_charge = " No files were analyzed and nothing was charged."
     if files is None or len(files) < _MIN_BATCH_FILES:
         return error(f"A batch needs at least {_MIN_BATCH_FILES} files. "
                      "For one file, use the single-file upload on the home page." + no_charge)
