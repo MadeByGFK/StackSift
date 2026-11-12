@@ -1,14 +1,17 @@
 """Issue #103: batch analysis (paid) — HTTP + ledger coverage.
 
-Drives the batch journey over HTTP for a real signed-up user:
+PREMISE CHANGED by issue #164 Phase B: batch is a flat $5
+digest-bound product. The journey is now:
 
     signup -> verify (10-credit signup reward) -> login
       -> GET /batch form -> POST /batch (2-5 files, ALL validated first)
-         -> 402 consent page quoting (free-first ? 0 : 1) + (N-1) credits
-      -> POST /batch/paid -> ONE reservation + free-allowance claim in
-         the same transaction -> sequential execution -> ONE combined
-         Result (type "analysis", report_kind "batch") -> history ->
-         ONE 2-credit PDF export for the whole combined report
+         -> 402 quote page: flat $5, zero-cost product consent
+      -> (purchase settles out of band; tests seed the entitlement)
+      -> POST /batch/paid -> ONE zero-cost product-backed Operation,
+         NO free-allowance claim, NO credit movement -> sequential
+         execution -> ONE combined Result (type "analysis",
+         report_kind "batch", 90-day retention) -> history ->
+         FREE PDF export for the whole combined report
 
 Execution is mocked at the main._execute_batch boundary (the mocked-
 execution pattern from #102/#104: HTTP/ledger tests never run the real
@@ -65,6 +68,8 @@ def batch_env(migrated_engine, monkeypatch, tmp_path):
         return [copy.deepcopy(service_analyze(filename, content, use_alarm=False))
                 for _ordinal, filename, content in files]
 
+    monkeypatch.setenv("STRIPE_PRICE_BATCH", "price_test_batch")
+    monkeypatch.setenv("STRIPE_PRICE_COMPARE", "price_test_compare")
     monkeypatch.setattr(main, "_execute_batch", fake_batch)
 
     def fake_compare(filename_a, content_a, filename_b, content_b):
@@ -162,6 +167,57 @@ def _grant(env, uid, n, key):
         db.commit()
 
 
+def _seed_batch_entitlement(env, uid, files):
+    """Seed a settled $5 batch purchase + available entitlement bound
+    to the ordered manifest digest of ``files`` [(name, content)]."""
+    from app.redact import redact_secrets
+    from app import models as _M
+    triples = [(i + 1, name, redact_secrets(content.decode("utf-8", "replace")).encode())
+               for i, (name, content) in enumerate(files)]
+    digest = main._batch_bundle_hash(triples)
+    with env.sessions() as db:
+        purchase = _M.ProductPurchase(
+            user_id=uid, sku="batch", content_digest=digest,
+            status="completed", amount_cents=500, currency="usd",
+            stripe_price_id="price_test_batch", pricing_version=1,
+            completed_at=C._utcnow())
+        db.add(purchase)
+        db.flush()
+        db.add(_M.Entitlement(
+            user_id=uid, sku="batch", product_purchase_id=purchase.id,
+            content_digest=digest, status="available",
+            redemption_deadline=C._utcnow() + timedelta(days=30)))
+        db.commit()
+    return digest
+
+
+def _seed_compare_entitlement(env, uid, content_a, content_b,
+                              name_a="a.log", name_b="b.log"):
+    from app import models as _M
+    digest = main._compare_pair_hash(name_a, content_a, name_b, content_b)
+    with env.sessions() as db:
+        purchase = _M.ProductPurchase(
+            user_id=uid, sku="compare", content_digest=digest,
+            status="completed", amount_cents=500, currency="usd",
+            stripe_price_id="price_test_compare", pricing_version=1,
+            completed_at=C._utcnow())
+        db.add(purchase)
+        db.flush()
+        db.add(_M.Entitlement(
+            user_id=uid, sku="compare", product_purchase_id=purchase.id,
+            content_digest=digest, status="available",
+            redemption_deadline=C._utcnow() + timedelta(days=30)))
+        db.commit()
+    return digest
+
+
+def _entitlement_status(env, uid, sku):
+    with env.sessions() as db:
+        row = db.query(M.Entitlement).filter(
+            M.Entitlement.user_id == uid, M.Entitlement.sku == sku).first()
+        return row.status if row else None
+
+
 def _drain_signup(env, uid, qty):
     """Re-base the 10-credit signup grant (issue #151) to a lower balance:
     reduce the signup grant's remaining and the account balance together
@@ -245,21 +301,22 @@ def test_batch_form_renders_for_user(batch_env):
 
 # --- the full journey ------------------------------------------------------------
 
-def test_full_batch_flow_free_first_quote_2_net_minus_2(batch_env):
+def test_full_batch_flow_dollar_paid(batch_env):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
     assert _http_balance(env) == 10
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:500]
-    # Quote copy: both halves of the failure semantics (trim B8).
-    assert "3 files. First file: free hourly allowance." in r.text
-    assert "2 additional files \u00d7 1 credit. Total: 2 credits." in r.text
-    assert "Analyze 3 files \u2014 use 2 credits" in r.text
-    assert "All credits are released if the batch fails" in r.text
-    assert "is counted even if the batch fails and is not restored" in r.text
+    # Dollar quote copy (Phase B): flat $5, entitlement held -> Run path.
+    assert "3 files. One flat price covers the whole batch." in r.text
+    assert "One flat price covers the whole batch." in r.text
+    assert "No charge if the batch fails" in r.text
+    assert "Analyze 3 files \u2014 already paid" in r.text
+    assert "free hourly allowance" not in r.text
     assert "1. one.log" in r.text and "2. two.log" in r.text and "3. three.log" in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
-    # Consent itself: no debit, no claim, no hit, no operation.
+    # Consent itself: zero-cost — no debit, no claim, no hit, no op.
     assert _http_balance(env) == 10
     assert _ops(env, uid) == [] and _hits(env) == 0
     confirmed = _confirm(env, consent_id, file_hash, csrf)
@@ -267,17 +324,19 @@ def test_full_batch_flow_free_first_quote_2_net_minus_2(batch_env):
     assert "Batch \u2014 3 files" in confirmed.text
     assert "database connection failed" in confirmed.text
     assert "disk full" in confirmed.text
-    assert _http_balance(env) == 8  # 10 - 2 exactly
+    assert _http_balance(env) == 10  # credits never move on the dollar path
     ops = _ops(env, uid)
-    assert len(ops) == 1 and ops[0].cost == 2 and ops[0].status == "completed"
-    assert ops[0].free_allowance_claim is True
-    assert _hits(env) == 1  # one shared-system claim for the first file only
+    assert len(ops) == 1 and ops[0].cost == 0 and ops[0].status == "completed"
+    assert ops[0].entitlement_redemption_id is not None
+    assert ops[0].free_allowance_claim is False  # B-19: no claim
+    assert _hits(env) == 0  # B-19: no RateLimitHit
+    assert _entitlement_status(env, uid, "batch") == "redeemed"
     with env.sessions() as db:
         assert db.query(M.FreeRequest).count() == 0  # no second FreeRequest
         result = db.get(M.Result, ops[0].result_id)
         assert result is not None and result.type == "analysis"
         assert (C._as_aware(result.expires_at) - C._as_aware(result.created_at)
-                ) <= timedelta(days=7, minutes=1)
+                ) >= timedelta(days=89)  # 90-day paid retention
         import json as _json
         manifest = _json.loads(result.storage_manifest)
         assert manifest["report_kind"] == "batch"
@@ -297,21 +356,22 @@ def test_full_batch_flow_free_first_quote_2_net_minus_2(batch_env):
     assert _pending_files(env) == []  # pending bundle consumed/cleaned
 
 
-def test_batch_allowance_exhausted_quote_3_no_claim(batch_env):
+def test_batch_dollar_ignores_free_allowance(batch_env):
+    """B-19: an exhausted free allowance changes nothing on the
+    dollar path — flat $5, no claim, no hit, balance untouched."""
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
     _seed_free(env, uid, 10)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:300]
-    assert "First file: 1 credit (free allowance used)" in r.text
-    assert "Total: 3 credits" in r.text
-    assert "5 credits" not in r.text  # never the obsolete COST_BATCH
+    assert "One flat price covers the whole batch." in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 7  # 10 - 3 (no free allowance)
+    assert _http_balance(env) == 10
     ops = _ops(env, uid)
-    assert len(ops) == 1 and ops[0].cost == 3
+    assert len(ops) == 1 and ops[0].cost == 0
     assert ops[0].free_allowance_claim is False
     assert _hits(env) == 0
     _invariants_ok(env, uid)
@@ -339,7 +399,7 @@ def test_invalid_file_rejects_whole_batch(batch_env, monkeypatch, files, fragmen
     r = _post_batch(env, files)
     assert r.status_code == 400, r.text[:400]
     assert fragment in r.text
-    assert "No files were analyzed and no credits were reserved." in r.text
+    assert "No files were analyzed and nothing was charged." in r.text
     assert calls == []  # zero analyzer calls
     assert _http_balance(env) == 10
     assert _ops(env, uid) == []
@@ -359,12 +419,11 @@ def test_batch_count_limits(batch_env):
     r = _post_batch(env, [(f"f{i}.log", SMALL) for i in range(6)])
     assert r.status_code == 400, r.text[:300]
     assert "at most 5 files" in r.text
-    # N=2 and N=5 pass validation (fund the 5-file quote first).
-    _grant(env, uid, 5, "count-topup")
+    # N=2 and N=5 pass validation at the same flat $5 (Decision 3).
     r = _post_batch(env, [("a.log", LOG_1), ("b.log", LOG_2)])
-    assert r.status_code == 402 and "Total: 1 credits" in r.text, r.text[:300]
+    assert r.status_code == 402 and "One flat price covers the whole batch." in r.text, r.text[:300]
     r = _post_batch(env, [(f"f{i}.log", SMALL) for i in range(5)])
-    assert r.status_code == 402 and "Total: 4 credits" in r.text, r.text[:300]
+    assert r.status_code == 402 and "One flat price covers the whole batch." in r.text, r.text[:300]
 
 
 def test_batch_boundary_equality_50000_lines_passes(batch_env):
@@ -373,14 +432,15 @@ def test_batch_boundary_equality_50000_lines_passes(batch_env):
     exact = b"2024-01-01 10:00:00 INFO heartbeat ok\n" * 50000
     r = _post_batch(env, [("big.log", exact), ("small.log", SMALL)])
     assert r.status_code == 402, r.text[:300]
-    assert "Total: 1 credits" in r.text
+    assert "One flat price covers the whole batch." in r.text
 
 
 # --- failure release ---------------------------------------------------------------
 
-def test_execution_failure_releases_all_credits_but_not_free_attempt(batch_env, monkeypatch):
+def test_execution_failure_releases_entitlement_no_claim(batch_env, monkeypatch):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, csrf = _consent_fields(r.text)
 
@@ -395,12 +455,14 @@ def test_execution_failure_releases_all_credits_but_not_free_attempt(batch_env, 
     failed = _confirm(env, consent_id, file_hash, csrf)
     assert failed.status_code == 400, failed.text[:400]
     assert "File 2 (two.log)" in failed.text
-    assert _http_balance(env) == 10  # FULL reservation released
+    assert _http_balance(env) == 10  # credits never moved
     ops = _ops(env, uid)
     assert len(ops) == 1 and ops[0].status == "failed" and ops[0].result_id is None
-    # B8: the admitted free attempt is NOT restored.
-    assert ops[0].free_allowance_claim is True
-    assert _hits(env) == 1
+    # F2/B-19: no allowance claim, no hit; the entitlement is
+    # released back to available for a retry.
+    assert ops[0].free_allowance_claim is False
+    assert _hits(env) == 0
+    assert _entitlement_status(env, uid, "batch") == "available"
     with env.sessions() as db:
         assert db.query(M.Result).count() == 0
     assert _pending_files(env) == []
@@ -414,6 +476,7 @@ def test_execution_failure_releases_all_credits_but_not_free_attempt(batch_env, 
 def test_execution_exception_releases_all(batch_env, monkeypatch):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, csrf = _consent_fields(r.text)
 
@@ -425,127 +488,95 @@ def test_execution_exception_releases_all(batch_env, monkeypatch):
     assert r.status_code == 503, r.text[:300]
     assert _http_balance(env) == 10
     assert _ops(env, uid)[0].status == "failed"
+    assert _entitlement_status(env, uid, "batch") == "available"  # F2
     _invariants_ok(env, uid)
 
 
 # --- insufficient credits ------------------------------------------------------------
 
-def test_insufficient_at_quotation_402_exact_total_and_cta(batch_env):
+def test_batch_no_entitlement_quote_offers_checkout_and_confirm_402(batch_env):
+    """Dollar analog of insufficient-at-quotation: without a settled
+    entitlement the quote page offers Stripe checkout (never a
+    credit purchase), and confirming anyway is a 402 naming the $5
+    price — no operation, no claim."""
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
-    # Re-base the 10-credit signup balance to 3 (issue #151), then spend
-    # it on a first batch (free-first N=3 -> 2), leaving a genuine 1.
-    _drain_signup(env, uid, 7)
-    assert _http_balance(env) == 3
-    r = _post_batch(env, _three())
-    consent_id, file_hash, csrf = _consent_fields(r.text)
-    assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
-    assert _http_balance(env) == 1
-    # Second batch: total 2 (allowance still available) > eligible 1.
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:400]
-    assert "This 3-file batch costs 2 credits. Insufficient eligible credits." in r.text
-    assert "/credits" in r.text
-    assert len(_ops(env, uid)) == 1  # no new reservation
-
-
-def test_insufficient_at_confirmation_402_no_claim(batch_env):
-    env = batch_env
-    _, uid, csrf = _signup_verify_login(env)
-    # Re-base the 10-credit signup balance to 3 (issue #151) so the PDF
-    # drain below genuinely leaves less than the batch quote.
-    _drain_signup(env, uid, 7)
-    assert _http_balance(env) == 3
-    r = _post_batch(env, _three())
-    assert r.status_code == 402, r.text[:300]
-    consent_id, file_hash, _ = _consent_fields(r.text)
-    # Drain 2 credits via a PDF export of a free single-file report.
-    single = env.client.post(
-        "/analyze",
-        files={"file": ("test.log", LOG_1, "text/plain")},
-        data={"output": "html", "request_id": ""})
-    assert single.status_code == 200, single.text[:300]
-    rid = _report_id_from(single.text)
-    pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert pdf.status_code == 200, pdf.text[:300]
-    assert _http_balance(env) == 1
-    hits_before = _hits(env)
+    assert "product-checkout-form" in r.text  # buy path, not credits
+    assert "Buy \u2014 $5" in r.text
+    assert "/credits" not in r.text
+    # The checkout variant renders no consent form; the zero-cost
+    # consent exists server-side — take its id/hash from the DB.
+    with env.sessions() as db:
+        consent = db.query(M.Consent).filter(
+            M.Consent.user_id == uid).one()
+        consent_id, file_hash = str(consent.id), consent.input_hash
+    csrf = env.client.get("/auth/csrf").json()["csrf_token"]
     denied = _confirm(env, consent_id, file_hash, csrf)
     assert denied.status_code == 402, denied.text[:400]
-    assert "This 3-file batch costs 2 credits." in denied.text
-    assert "/credits" in denied.text
-    assert _http_balance(env) == 1
-    assert _ops(env, uid) == []  # no partial reservation
-    assert _hits(env) == hits_before  # claim rolled back with the denial
+    assert "Batch analysis costs $5." in denied.text
+    assert _ops(env, uid) == []
+    assert _http_balance(env) == 10
 
 
-# --- quote changes between quote and confirm -------------------------------------------
-
-def test_quote_change_up_requotes_never_silent_reprice(batch_env):
+def test_batch_entitlement_consumed_before_confirmation_402(batch_env):
+    """Dollar analog of insufficient-at-confirmation: the entitlement
+    is redeemed by a first run between quote and confirm; the second
+    confirm is a 402 with no partial state."""
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
-    assert "Total: 2 credits" in r.text
+    c1, h1, csrf = _consent_fields(r.text)
+    r2 = _post_batch(env, _three())
+    c2, h2, _ = _consent_fields(r2.text)
+    assert _confirm(env, c2, h2, csrf).status_code == 200
+    denied = _confirm(env, c1, h1, csrf)
+    assert denied.status_code == 402, denied.text[:400]
+    assert "Batch analysis costs $5." in denied.text
+    assert len(_ops(env, uid)) == 1  # only the first run
+    assert _http_balance(env) == 10
+
+
+# --- price stability: no requote on the dollar path -----------------------------
+
+def test_batch_quote_stable_across_allowance_change(batch_env):
+    """Premise retired (B-12/B-15): a product consent never requotes.
+    The free allowance being consumed between quote and confirm
+    changes nothing — the run proceeds at the flat $5 with no claim."""
+    env = batch_env
+    _, uid, _ = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
+    r = _post_batch(env, _three())
+    assert "One flat price covers the whole batch." in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
     _seed_free(env, uid, 10)  # allowance consumed elsewhere
-    requote = _confirm(env, consent_id, file_hash, csrf)
-    assert requote.status_code == 402, requote.text[:400]
-    assert "Total: 3 credits" in requote.text
-    assert _http_balance(env) == 10  # nothing charged by the re-quote
-    assert _ops(env, uid) == []
-    consent2, hash2, csrf2 = _consent_fields(requote.text)
-    assert consent2 != consent_id
-    confirmed = _confirm(env, consent2, hash2, csrf2)
-    assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 7  # 10 - 3 requoted cost
-    assert _ops(env, uid)[0].free_allowance_claim is False
-
-
-def test_quote_change_down_requotes(batch_env):
-    env = batch_env
-    _, uid, _ = _signup_verify_login(env)
-    _seed_free(env, uid, 10)
-    r = _post_batch(env, _three())
-    assert "Total: 3 credits" in r.text
-    consent_id, file_hash, csrf = _consent_fields(r.text)
-    # The old free requests age out of the rolling hour.
-    with env.sessions() as db:
-        for fr in db.query(M.FreeRequest).all():
-            fr.created_at = C._utcnow() - timedelta(hours=3)
-        db.commit()
-    requote = _confirm(env, consent_id, file_hash, csrf)
-    assert requote.status_code == 402, requote.text[:400]
-    assert "Total: 2 credits" in requote.text
+    confirmed = _confirm(env, consent_id, file_hash, csrf)
+    assert confirmed.status_code == 200, confirmed.text[:400]
     assert _http_balance(env) == 10
-    assert _ops(env, uid) == []
-    consent2, hash2, csrf2 = _consent_fields(requote.text)
-    confirmed = _confirm(env, consent2, hash2, csrf2)
-    assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 8  # 10 - 2 requoted cost
-    assert _ops(env, uid)[0].free_allowance_claim is True
+    ops = _ops(env, uid)
+    assert len(ops) == 1 and ops[0].cost == 0
+    assert ops[0].free_allowance_claim is False
+    assert _hits(env) == 0
 
 
-def test_second_batch_cannot_claim_tenth_allowance_again(batch_env):
-    """Sequential form of the B2 race: 9 free used, two batch quotes at
-    total 1; the first confirm claims the tenth, the second re-quotes."""
+def test_second_batch_same_digest_cannot_double_redeem(batch_env):
+    """One entitlement redeems exactly once: a second consent for the
+    same digest confirms to a 402, never a second run."""
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
-    _grant(env, uid, 5, "tenth-topup")
-    _seed_free(env, uid, 9)
-    _seed_hits(env, 9)
-    two = [("a.log", LOG_1), ("b.log", LOG_2)]
+    _seed_batch_entitlement(env, uid, _three())
+    two = _three()
     r1 = _post_batch(env, two)
-    assert "Total: 1 credits" in r1.text, r1.text[:300]
     c1, h1, csrf = _consent_fields(r1.text)
     r2 = _post_batch(env, two)
-    assert "Total: 1 credits" in r2.text, r2.text[:300]
     c2, h2, _ = _consent_fields(r2.text)
     assert _confirm(env, c1, h1, csrf).status_code == 200
-    requote = _confirm(env, c2, h2, csrf)
-    assert requote.status_code == 402, requote.text[:300]
-    assert "Total: 2 credits" in requote.text
-    claims = [op for op in _ops(env, uid) if op.free_allowance_claim]
-    assert len(claims) == 1
+    second = _confirm(env, c2, h2, csrf)
+    assert second.status_code == 402, second.text[:300]
+    assert len(_ops(env, uid)) == 1
+    assert _http_balance(env) == 10
 
 
 # --- order / duplicates ------------------------------------------------------------------
@@ -553,11 +584,11 @@ def test_second_batch_cannot_claim_tenth_allowance_again(batch_env):
 def test_order_duplicates_and_identical_files(batch_env):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
-    _grant(env, uid, 3, "dup-topup")
     files = [("same.log", LOG_1), ("same.log", LOG_1), ("other.log", LOG_2)]
+    _seed_batch_entitlement(env, uid, files)
     r = _post_batch(env, files)
     assert r.status_code == 402, r.text[:300]
-    assert "Total: 2 credits" in r.text  # identical files separately billable
+    assert "One flat price covers the whole batch." in r.text  # flat price regardless of duplicates
     consent_id, file_hash, csrf = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:400]
@@ -565,7 +596,7 @@ def test_order_duplicates_and_identical_files(batch_env):
     i2 = confirmed.text.index("File 2: same.log")
     i3 = confirmed.text.index("File 3: other.log")
     assert i1 < i2 < i3  # upload order preserved, duplicates distinct by ordinal
-    assert _http_balance(env) == 11  # 10 + 3 granted - 2
+    assert _http_balance(env) == 10  # credits never move
 
 
 # --- forgery / replay -----------------------------------------------------------------------
@@ -573,6 +604,7 @@ def test_order_duplicates_and_identical_files(batch_env):
 def test_batch_forgery_csrf_and_cross_user(batch_env):
     env = batch_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, _ = _consent_fields(r.text)
     bad_csrf = _confirm(env, consent_id, file_hash, "bogus")
@@ -589,6 +621,7 @@ def test_batch_forgery_csrf_and_cross_user(batch_env):
 def test_batch_content_substitution_409(batch_env):
     env = batch_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, _ = _consent_fields(r.text)
     pending = _pending_files(env)
@@ -605,6 +638,7 @@ def test_batch_content_substitution_409(batch_env):
 def test_batch_expired_consent_and_missing_pending(batch_env):
     env = batch_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, _ = _consent_fields(r.text)
     with env.sessions() as db:
@@ -624,6 +658,7 @@ def test_batch_expired_consent_and_missing_pending(batch_env):
 def test_batch_completed_replay_no_recharge(batch_env):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, csrf = _consent_fields(r.text)
     first = _confirm(env, consent_id, file_hash, csrf)
@@ -632,39 +667,38 @@ def test_batch_completed_replay_no_recharge(batch_env):
     replay = _confirm(env, consent_id, file_hash, csrf)
     assert replay.status_code == 200, replay.text[:300]
     assert _report_id_from(replay.text) == rid
-    assert _http_balance(env) == 8  # 10 - 2, replay free
+    assert _http_balance(env) == 10  # replay free, credits never moved
     assert len(_ops(env, uid)) == 1
-    assert _hits(env) == 1  # replay does not recount quota
+    assert _hits(env) == 0  # no quota accounting on the dollar path
 
 
-# --- PDF: one 2-credit charge for the whole artifact -------------------------------------------
+# --- PDF: free for dollar-paid batch artifacts (B-9) -----------------------------------
 
-def test_batch_pdf_one_charge_and_free_redownload(batch_env):
+def test_batch_pdf_free_for_dollar_paid(batch_env):
     env = batch_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, _ = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     rid = _report_id_from(confirmed.text)
-    _grant(env, uid, 5, "pdf-topup")
-    assert _http_balance(env) == 13  # 10 - 2 batch + 5 granted
     pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200, pdf.text[:300]
     assert pdf.content.startswith(b"%PDF")
     assert b"database connection failed" in pdf.content
     assert b"File 2: two.log" in pdf.content
     assert b"File 3: three.log" in pdf.content
-    assert _http_balance(env) == 11  # exactly -2 ONCE, not per file
+    assert _http_balance(env) == 10  # no export charge at all
     again = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert again.status_code == 200
-    assert _http_balance(env) == 11  # re-download free
+    assert _http_balance(env) == 10
     _invariants_ok(env, uid)
 
 
-def test_batch_pdf_failure_releases_charge(batch_env, monkeypatch):
+def test_batch_pdf_failure_no_charge(batch_env, monkeypatch):
     env = batch_env
     _, uid, csrf = _signup_verify_login(env)
-    _grant(env, uid, 5, "pdf-fail-topup")
+    _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     consent_id, file_hash, _ = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
@@ -704,19 +738,20 @@ def test_single_file_paths_unchanged(batch_env):
 def test_compare_still_works(batch_env):
     env = batch_env
     _, uid, _ = _signup_verify_login(env)
+    _seed_compare_entitlement(env, uid, LOG_1, LOG_2)
     r = env.client.post(
         "/compare",
         files={"file_a": ("a.log", LOG_1, "text/plain"),
                "file_b": ("b.log", LOG_2, "text/plain")})
     assert r.status_code == 402, r.text[:300]
-    assert "3 credits" in r.text
+    assert "$5" in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
     confirmed = env.client.post(
         "/compare/paid",
         data={"consent_id": consent_id, "file_hash": file_hash,
               "idempotency_key": consent_id, "csrf_token": csrf})
     assert confirmed.status_code == 200, confirmed.text[:300]
-    assert _http_balance(env) == 7  # 10 - 3 compare
+    assert _http_balance(env) == 10  # dollar compare; credits untouched
 
 
 def test_paid_batch_rate_limit_is_five_per_hour(batch_env):

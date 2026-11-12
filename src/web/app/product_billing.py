@@ -58,11 +58,13 @@ class SettlementError(ProductError):
 # Purchases
 # ---------------------------------------------------------------------------
 
-def admission_lock_key(user_id, source_result_id, sku) -> str:
-    return f"product-admission:{user_id}:{source_result_id}:{sku}"
+def admission_lock_key(user_id, binding, sku) -> str:
+    """B-4: the binding segment is a source Result id (Phase A) or a
+    content digest (Phase B) — one generalized key shape for both."""
+    return f"product-admission:{user_id}:{binding}:{sku}"
 
 
-def lock_product_admission(db: Session, user_id, source_result_id, sku):
+def lock_product_admission(db: Session, user_id, binding, sku):
     """Stable shared lock serialising checkout admission vs settlement
     (remediation2 P1-C).
 
@@ -81,7 +83,7 @@ def lock_product_admission(db: Session, user_id, source_result_id, sku):
     """
     from app import credits as credits_helpers
     return credits_helpers._ensure_capacity_scope(
-        db, admission_lock_key(user_id, source_result_id, sku), 1)
+        db, admission_lock_key(user_id, binding, sku), 1)
 
 
 def _session_conclusively_expired(purchase) -> bool:
@@ -112,19 +114,32 @@ def _session_conclusively_expired(purchase) -> bool:
     return _as_aware(purchase.created_at) <= _utcnow() - timedelta(hours=25)
 
 
-def live_entitlement(db: Session, user_id, source_result_id, sku, *, for_update: bool = False):
-    """An available|reserved entitlement for (buyer, source, sku), or None.
+def _binding_clause(binding, content_digest):
+    """B-10: one binding key — source XOR digest. A digest lookup
+    never matches a source row and vice versa."""
+    if content_digest is not None:
+        return models.Entitlement.content_digest == content_digest
+    return models.Entitlement.source_result_id == binding
+
+
+def live_entitlement(db: Session, user_id, source_result_id=None, sku=None, *,
+                     for_update: bool = False, content_digest=None):
+    """An available|reserved entitlement for (buyer, binding, sku), or None.
+
+    The binding is ``source_result_id`` (Phase A) XOR ``content_digest``
+    (Phase B, B-10) — pass exactly one.
 
     ``for_update`` takes a row lock where the caller is about to act on
     the check (checkout creation, P2-1): on PostgreSQL this serialises
     concurrent checkouts against an existing live entitlement. The
     hard guarantee against two live entitlements is the partial unique
-    index ``ix_entitlements_live_unique`` (models/migration 0017);
+    index ``ix_entitlements_live_unique`` (models/migration 0017) and
+    its digest mirror ``ix_entitlements_live_digest_unique`` (0023);
     the lock narrows the window, the index closes it.
     """
     stmt = select(models.Entitlement).where(
         models.Entitlement.user_id == user_id,
-        models.Entitlement.source_result_id == source_result_id,
+        _binding_clause(source_result_id, content_digest),
         models.Entitlement.sku == sku,
         models.Entitlement.status.in_(("available", "reserved")),
     ).order_by(models.Entitlement.created_at.desc())
@@ -133,7 +148,8 @@ def live_entitlement(db: Session, user_id, source_result_id, sku, *, for_update:
     return db.execute(stmt).scalars().first()
 
 
-def available_entitlement(db: Session, user_id, source_result_id, sku):
+def available_entitlement(db: Session, user_id, source_result_id=None, sku=None,
+                          *, content_digest=None):
     """A live entitlement that can be redeemed RIGHT NOW, or None.
 
     Remediation4 (fixes 1+7): 'available' status inside the F5
@@ -143,7 +159,8 @@ def available_entitlement(db: Session, user_id, source_result_id, sku):
     built on this helper must not offer a redemption that cannot
     proceed.
     """
-    ent = live_entitlement(db, user_id, source_result_id, sku)
+    ent = live_entitlement(db, user_id, source_result_id, sku,
+                           content_digest=content_digest)
     if ent is None or ent.status != "available":
         return None
     if ent.redemption_deadline is not None and \
@@ -152,30 +169,43 @@ def available_entitlement(db: Session, user_id, source_result_id, sku):
     return ent
 
 
-def create_pending_product_purchase(db: Session, user_id, sku: str, source_result_id):
+def create_pending_product_purchase(db: Session, user_id, sku: str,
+                                    source_result_id=None, *,
+                                    content_digest=None):
     """Create/reuse the pending product purchase (A7) with F1 blocking.
 
-    Returns (purchase, reused). A retry of the same (user, source, sku)
+    Returns (purchase, reused). A retry of the same (user, binding, sku)
     while a pending purchase with a live session exists returns that
     purchase. While a live entitlement exists, NO new purchase is
     created (F1) — DuplicateEntitlement is raised.
+
+    The binding is ``source_result_id`` (Phase A) XOR ``content_digest``
+    (Phase B, B-5a/B-10) — exactly one must be given.
     """
     from app import stripe_billing
     entry = stripe_billing.get_product_sku(sku)
     if entry is None:
         raise ProductError(f"unknown product sku: {sku}")
+    if (source_result_id is None) == (content_digest is None):
+        raise ProductError("exactly one binding (source or digest) is required")
+    binding = content_digest if content_digest is not None else source_result_id
+    if content_digest is not None:
+        binding_clause = models.ProductPurchase.content_digest == content_digest
+    else:
+        binding_clause = models.ProductPurchase.source_result_id == source_result_id
     # P1-C: the stable admission lock is taken BEFORE either lookup,
     # and held (by the caller's transaction) across lookup + insert,
     # so settlement cannot commit an entitlement in between.
-    lock_product_admission(db, user_id, source_result_id, sku)
+    lock_product_admission(db, user_id, binding, sku)
     existing_ent = live_entitlement(db, user_id, source_result_id, sku,
-                                    for_update=True)
+                                    for_update=True,
+                                    content_digest=content_digest)
     if existing_ent is not None:
         raise DuplicateEntitlement(existing_ent)
     pending = db.execute(
         select(models.ProductPurchase).where(
             models.ProductPurchase.user_id == user_id,
-            models.ProductPurchase.source_result_id == source_result_id,
+            binding_clause,
             models.ProductPurchase.sku == sku,
             models.ProductPurchase.status == "pending",
         ).order_by(models.ProductPurchase.created_at.desc()).with_for_update()
@@ -204,6 +234,7 @@ def create_pending_product_purchase(db: Session, user_id, sku: str, source_resul
     from app import credits as credits_helpers
     purchase = models.ProductPurchase(
         user_id=user_id, sku=sku, source_result_id=source_result_id,
+        content_digest=content_digest,
         amount_cents=entry["amount_cents"], currency=entry["currency"],
         stripe_price_id=stripe_billing.product_price_id(sku),
         pricing_version=credits_helpers.PRICING_VERSION, status="pending",
@@ -225,7 +256,7 @@ def create_pending_product_purchase(db: Session, user_id, sku: str, source_resul
         winner = db.execute(
             select(models.ProductPurchase).where(
                 models.ProductPurchase.user_id == user_id,
-                models.ProductPurchase.source_result_id == source_result_id,
+                binding_clause,
                 models.ProductPurchase.sku == sku,
                 models.ProductPurchase.status == "pending",
             ).order_by(models.ProductPurchase.created_at.desc())
@@ -277,8 +308,11 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
     # BEFORE the purchase row lock (shared lock order), so a grant
     # cannot commit between a concurrent checkout's entitlement and
     # pending lookups.
-    lock_product_admission(db, purchase.user_id, purchase.source_result_id,
-                           purchase.sku)
+    lock_product_admission(
+        db, purchase.user_id,
+        purchase.content_digest if purchase.content_digest is not None
+        else purchase.source_result_id,
+        purchase.sku)
     # Remediation3 P1: populate_existing=True — without it the
     # re-select returns the caller-loaded identity-map instance
     # WITHOUT refreshing its attributes, so a purchase whose row was
@@ -320,6 +354,14 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
             return "metadata kind is not product"
         if event_metadata.get("sku") != locked.sku:
             return "metadata sku does not match purchase"
+        # B-10 binding agreement: a digest-bound purchase settles ONLY
+        # against a session whose metadata carries the same digest; a
+        # source-bound purchase must carry none.
+        if locked.content_digest is not None:
+            if event_metadata.get("content_digest") != locked.content_digest:
+                return "metadata content_digest does not match purchase"
+        elif event_metadata.get("content_digest"):
+            return "metadata content_digest present on a source-bound purchase"
         if str(event_metadata.get("user_id", "")) != str(locked.user_id):
             return "metadata user_id does not match purchase"
         try:
@@ -430,15 +472,24 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
     if _anchor is not None:
         locked.stripe_charge_created_at = _anchor
 
-    source = db.get(models.Result, locked.source_result_id)
-    deadline = None
-    if source is not None and source.expires_at is not None:
-        deadline = _as_aware(source.expires_at) + timedelta(days=REDEMPTION_WINDOW_DAYS)
+    if locked.content_digest is not None:
+        # B-11: digest-bound deadline is settlement time + 30 days
+        # EXACTLY, derived from this purchase's own completed_at
+        # (written above in this same transaction) — never the
+        # source-missing +37d fallback.
+        deadline = _as_aware(locked.completed_at) + timedelta(
+            days=REDEMPTION_WINDOW_DAYS)
     else:
-        deadline = _utcnow() + timedelta(days=REDEMPTION_WINDOW_DAYS + 7)
+        source = db.get(models.Result, locked.source_result_id)
+        deadline = None
+        if source is not None and source.expires_at is not None:
+            deadline = _as_aware(source.expires_at) + timedelta(days=REDEMPTION_WINDOW_DAYS)
+        else:
+            deadline = _utcnow() + timedelta(days=REDEMPTION_WINDOW_DAYS + 7)
     entitlement = models.Entitlement(
         user_id=locked.user_id, product_purchase_id=locked.id, sku=locked.sku,
-        source_result_id=locked.source_result_id, status="available",
+        source_result_id=locked.source_result_id,
+        content_digest=locked.content_digest, status="available",
         redemption_deadline=deadline,
     )
     db.add(entitlement)
@@ -815,11 +866,16 @@ def reserve_redemption(db: Session, entitlement, *, request_hash: str, worker_id
     )
     if result.rowcount != 1:
         raise AdmissionError("entitlement reservation lost the CAS race")
+    # B-10 binding agreement: the redemption copies the entitlement's
+    # binding exactly (source XOR digest); a disagreement fails closed.
     redemption = models.EntitlementRedemption(
         entitlement_id=locked.id, source_result_id=locked.source_result_id,
+        content_digest=locked.content_digest,
         request_hash=request_hash, worker_id=worker_id, lease_generation=1,
         lease_expires_at=now + LEASE_TTL, status="reserved",
     )
+    assert redemption.content_digest == locked.content_digest
+    assert redemption.source_result_id == locked.source_result_id
     db.add(redemption)
     db.flush()
     db.refresh(locked)
@@ -886,6 +942,14 @@ def release_redemption(db: Session, redemption_id, worker_id: str, failure_code:
     return red
 
 
+def _operation_linked_redemption_ids(db: Session):
+    """B-18: redemptions owned by the Operation recovery path — any
+    redemption an Operation row references via its
+    ``entitlement_redemption_id`` FK."""
+    return select(models.Operation.entitlement_redemption_id).where(
+        models.Operation.entitlement_redemption_id.isnot(None))
+
+
 def recover_expired_redemptions(db: Session, batch_size: int = 100, *, executor_stopped=None) -> int:
     """Restart recovery mirroring recover_expired_operations (A1).
 
@@ -893,12 +957,19 @@ def recover_expired_redemptions(db: Session, batch_size: int = 100, *, executor_
     stop evidence releases it back to available; without evidence the
     redemption is marked 'stopped' and the entitlement stays out of
     circulation until retry_stopped_redemption gets evidence.
+
+    B-18 (single recovery owner): Operation-linked redemptions
+    (Phase B) are EXCLUDED here — credits.recover_expired_operations
+    owns them exclusively; this path keeps Phase A source-bound
+    behavior unchanged.
     """
     candidates = db.execute(
         select(models.EntitlementRedemption.id, models.EntitlementRedemption.worker_id,
                models.EntitlementRedemption.lease_generation).where(
             models.EntitlementRedemption.status == "reserved",
             models.EntitlementRedemption.lease_expires_at < _utcnow(),
+            models.EntitlementRedemption.id.notin_(
+                _operation_linked_redemption_ids(db)),
         ).order_by(models.EntitlementRedemption.lease_expires_at).limit(batch_size)
     ).all()
     db.rollback()
@@ -946,7 +1017,17 @@ def recover_expired_redemptions(db: Session, batch_size: int = 100, *, executor_
 
 def retry_stopped_redemption(db: Session, redemption_id, *, executor_stopped) -> bool:
     """Retry-after-stopped path (A1): with executor-stop evidence for
-    the stopped generation, release the entitlement back to available."""
+    the stopped generation, release the entitlement back to available.
+
+    B-18: a no-op for Operation-linked redemptions — the Operation
+    recovery path owns their outcome exclusively.
+    """
+    linked = db.execute(
+        select(models.Operation.id).where(
+            models.Operation.entitlement_redemption_id == redemption_id)
+    ).scalar_one_or_none()
+    if linked is not None:
+        return False
     red, ent = lock_redemption(db, redemption_id)
     if red.status != "stopped":
         return False
@@ -960,6 +1041,163 @@ def retry_stopped_redemption(db: Session, redemption_id, *, executor_stopped) ->
         ent.version += 1
     db.flush()
     return True
+
+
+class EntitlementRequired(ProductError):
+    """No live entitlement for (user, sku, digest): the caller must
+    direct the buyer to the $5 checkout — never a credit charge."""
+
+
+def admit_product_operation(db: Session, user_id, operation_type: str,
+                            sku: str, idempotency_key: str,
+                            content_digest: str, consent_id,
+                            worker_id: str,
+                            input_manifest: str | None = None,
+                            extra_scopes=None):
+    """Phase B product-backed admission (B-8). One transaction.
+
+    Lock order (B-4, stated here per house discipline — no endpoint
+    may take the digest admission scope after a global scope):
+      (1) digest product-admission scope
+          ``product-admission:{user}:{digest}:{sku}`` FIRST;
+      (2) the flow's capacity first-scope pre-lock, then the
+          authoritative find_operation replay check (an existing
+          operation is returned and replayed by the caller; its
+          redemption is already linked and never re-reserved);
+      (3) capacity acquisition with the flow's existing scope set;
+      (4) spend-restriction check;
+      (5) validate_consent(..., sku=sku) — zero-cost product consent;
+      (6) reserve_redemption CAS on the (user, sku, digest)
+          entitlement;
+      (7) Operation (cost=0, consent_id, entitlement_redemption_id)
+          + Permit + PermitScopes; consent consumed by the operation.
+
+    NO grant allocation, NO ledger rows, NO credit-account creation,
+    NO free-allowance claim, NO RateLimitHit (B-19). Batch burst
+    protection comes from the durable Operation-row counts plus the
+    paid-rate policy consumed at step (8), exactly as B-19 enumerates.
+    """
+    from app import credits as C
+    # (1) digest admission scope first.
+    lock_product_admission(db, user_id, content_digest, sku)
+    wanted = {
+        "global:paid": C.DEFAULT_GLOBAL_CONCURRENT_LIMIT,
+        f"user:{user_id}:paid": C.DEFAULT_USER_CONCURRENT_LIMIT,
+    }
+    for scope_key, limit in (extra_scopes or []):
+        wanted[scope_key] = limit
+    # (2) capacity first-scope pre-lock, then replay check.
+    first_scope = sorted(wanted)[0]
+    C._ensure_capacity_scope(db, first_scope, wanted[first_scope])
+    existing = C.find_operation(db, user_id, operation_type,
+                                idempotency_key, content_digest)
+    if existing is not None:
+        return existing
+    if operation_type == "batch":
+        # B-19: burst/abuse protection from durable counts (all batch
+        # attempts regardless of billing mode) — no RateLimitHit is
+        # written and no free allowance is claimed for a dollar batch.
+        from datetime import timedelta as _td
+        from app import batch_admission as _ba
+        ip = input_manifest or ""
+        now = C._utcnow()
+        minute = now - _td(minutes=1)
+        burst = (_ba._count_free_requests(db, ip, minute)
+                 + _ba._count_additional_attempts(db, ip, minute)
+                 + _ba._count_batch_attempts(db, ip, minute))
+        shared_burst = _ba._count_rate_hits(db, ip, minute)
+        if burst >= _ba.BURST_LIMIT or shared_burst >= _ba.BURST_LIMIT:
+            raise C.AdmissionError(
+                "Too many requests. Please wait a minute and try again.")
+    # (3) capacity.
+    acquired_scopes = C._acquire_capacity(db, user_id,
+                                          extra_scopes=extra_scopes)
+    # (4) spend restriction.
+    if C.has_active_restriction(db, user_id, "spend"):
+        raise C.AdmissionError("account spending restricted")
+    # (5) zero-cost product consent, SKU-bound (B-7).
+    consent = C.validate_consent(db, consent_id, user_id, operation_type,
+                                 content_digest, 0, sku=sku)
+    # (6) entitlement + reserve CAS. DeadlineLapsed propagates (the
+    # entitlement has transitioned to refund_eligible; endpoints
+    # answer 410). No entitlement at all -> EntitlementRequired (402).
+    entitlement = live_entitlement(db, user_id, None, sku,
+                                   content_digest=content_digest)
+    if entitlement is None:
+        raise EntitlementRequired(
+            "no live entitlement for this purchase")
+    entitlement_id = entitlement.id
+    try:
+        redemption = reserve_redemption(
+            db, entitlement, request_hash=content_digest, worker_id=worker_id)
+    except DeadlineLapsed:
+        # Capacity-leak fix (PR #182 Codex P1): capacity was acquired
+        # at step (3), BEFORE reserve_redemption could lapse the
+        # entitlement here. The endpoints answer DeadlineLapsed with
+        # db.commit() to preserve the refund_eligible transition —
+        # which would also commit the orphaned CapacityScope.used
+        # increments (no Operation/Permit exists to release them;
+        # the single-slot global:batch / global:oversize scopes were
+        # permanently exhausted by one lapsed attempt). Roll the
+        # whole admission transaction back — discarding every
+        # capacity increment and any other admission side effect —
+        # then re-apply ONLY the lapse transition in the fresh
+        # transaction the caller's commit will persist. B-11
+        # semantics are unchanged: refund_eligible + 410, and
+        # settlement/redelivery paths never resurrect the row.
+        db.rollback()
+        locked = db.execute(
+            select(models.Entitlement).where(
+                models.Entitlement.id == entitlement_id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if locked is not None and locked.status == "available" \
+                and locked.redemption_deadline is not None \
+                and _as_aware(locked.redemption_deadline) < _utcnow():
+            locked.status = "refund_eligible"
+            locked.version += 1
+            db.flush()
+        raise
+    # (7) Operation + permit. cost=0 is enforced by the billing-mode
+    # CHECK together with the redemption FK (B-16).
+    now = _utcnow()
+    operation = models.Operation(
+        user_id=user_id,
+        type=operation_type,
+        idempotency_key=idempotency_key,
+        request_hash=content_digest,
+        input_manifest=input_manifest,
+        cost=0,
+        free_allowance_claim=False,
+        pricing_version=C.PRICING_VERSION,
+        consent_id=consent.id,
+        entitlement_redemption_id=redemption.id,
+        status="reserved",
+        worker_id=worker_id,
+        lease_generation=1,
+        lease_expires_at=now + C.LEASE_TTL,
+    )
+    db.add(operation)
+    db.flush()
+    consent.consumed_by_operation_id = operation.id
+    permit = models.Permit(
+        operation_id=operation.id,
+        worker_id=worker_id,
+        lease_generation=1,
+        heartbeat_at=now,
+        expires_at=now + C.LEASE_TTL,
+    )
+    db.add(permit)
+    db.flush()
+    for scope_key in acquired_scopes:
+        db.add(models.PermitScope(permit_id=permit.id,
+                                   scope_key=scope_key, quantity=1))
+    db.flush()
+    # (8) explicit paid-rate policy (B-19) — RateBucket consumption,
+    # as in credit admission; never a RateLimitHit.
+    C._consume_rate(db, f"paid:{operation_type}", str(user_id))
+    db.flush()
+    return operation
 
 
 def lapse_expired_entitlements(db: Session) -> int:

@@ -346,7 +346,36 @@ PRODUCT_SKUS: dict[str, dict] = {
         "price_label": "$9",
         "price_env": "STRIPE_PRICE_INVESTIGATION_REPORT",
     },
+    # Issue #164 Phase B: upload-first SKUs, flat $5 per run, bound to
+    # a content digest (no retained source Result). An unset price env
+    # fails closed — the feature is unavailable, never re-priced in
+    # credits (Phase B Decision 4).
+    "compare": {
+        "name": "Compare",
+        "amount_cents": 500,
+        "currency": "usd",
+        "price_label": "$5",
+        "price_env": "STRIPE_PRICE_COMPARE",
+    },
+    "batch": {
+        "name": "Batch Analysis",
+        "amount_cents": 500,
+        "currency": "usd",
+        "price_label": "$5",
+        "price_env": "STRIPE_PRICE_BATCH",
+    },
+    "large_file_analysis": {
+        "name": "Large-File Analysis",
+        "amount_cents": 500,
+        "currency": "usd",
+        "price_label": "$5",
+        "price_env": "STRIPE_PRICE_LARGE_FILE",
+    },
 }
+
+# Phase B digest-bound SKUs (binding is a content digest, not a
+# source Result).
+DIGEST_SKUS = frozenset({"compare", "batch", "large_file_analysis"})
 
 # Pay-now promise (F2), pinned verbatim for every dollar-path surface.
 PAY_NOW_PROMISE = (
@@ -495,6 +524,7 @@ def create_product_checkout_session(
     purchase_id,
     success_url: str,
     cancel_url: str,
+    content_digest: str | None = None,
 ) -> tuple[str, str]:
     """Create a Stripe Checkout Session for a product purchase (A7).
 
@@ -533,6 +563,12 @@ def create_product_checkout_session(
         "payment_intent_data[metadata][pricing_version]": str(
             credits_helpers.PRICING_VERSION),
     }
+    if content_digest is not None:
+        # Phase B: the digest binding travels in BOTH metadata sets so
+        # settlement can assert the session was created for exactly
+        # the content the buyer paid to run (B-10 binding agreement).
+        data["metadata[content_digest]"] = content_digest
+        data["payment_intent_data[metadata][content_digest]"] = content_digest
     try:
         resp = httpx.post(
             f"{STRIPE_API_BASE}/checkout/sessions",

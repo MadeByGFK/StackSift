@@ -812,6 +812,350 @@ async def investigation_status(request: Request, result_id: str, db=Depends(get_
     })
 
 
+# Issue #164 Phase B: operation type <-> digest SKU mapping. The
+# three migrated flows are dollar-only for new runs from ship
+# (Decision 1); their SKUs bind to a content digest, not a source.
+PRODUCT_SKU_BY_OPERATION = {
+    "oversize_analysis": "large_file_analysis",
+    "compare_logs": "compare",
+    "batch": "batch",
+}
+
+
+@app.post("/products/checkout")
+async def product_checkout(
+    request: Request,
+    sku: str = Form(...),
+    content_digest: str = Form(...),
+    csrf_token: str = Form(...),
+    db=Depends(get_db),
+):
+    """Issue #164 Phase B: product checkout for the digest-bound SKUs
+    (compare / batch / large_file_analysis), started from the flow's
+    quote/consent step on the Analyze surface.
+
+    Mirrors the Phase A investigation checkout gates (auth, CSRF,
+    rate limit, fail-closed price env, F1 duplicate block, pending
+    row BEFORE the session, session idempotency bound to the row).
+    Settlement is webhook-only; success/cancel URLs grant nothing.
+    """
+    import hmac
+    import os as _os
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+    from app import auth as auth_helpers
+    from app import stripe_billing
+    from app import product_billing as pb
+
+    if not _os.environ.get("DATABASE_URL"):
+        raise HTTPException(503, "Purchases are unavailable right now.")
+    _user, _ = _get_current_user_optional(request)
+    if not _user:
+        return JSONResponse({"error": "Log in or sign up to continue."}, status_code=401)
+    session = auth_helpers.get_session_from_cookie(db, request)
+    expected = session.csrf_token if session else None
+    if not expected or not isinstance(csrf_token, str) or not hmac.compare_digest(csrf_token, expected):
+        raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
+    if sku not in stripe_billing.DIGEST_SKUS:
+        return JSONResponse({"error": "Unknown product."}, status_code=400)
+    if not isinstance(content_digest, str) or len(content_digest) != 64:
+        return JSONResponse({"error": "Invalid content digest."}, status_code=400)
+    from app import d2_attribution as _d2
+    _d2.emit_premium_intent(request, _user.id, "checkout_start")
+    ip = _client_ip(request)
+    if _use_shared_limiter():
+        try:
+            rl_db = _db_session()
+            try:
+                checkout_limiter.admit(rl_db, f"c:{ip}")
+            finally:
+                rl_db.close()
+        except (BurstLimited, HourlyLimited):
+            raise HTTPException(429, "Too many attempts. Please try again later.")
+        except Exception:
+            raise HTTPException(503, "Rate limiting is temporarily unavailable. Please try again shortly.")
+    else:
+        auth_helpers.check_rate_limit("checkout", ip)
+
+    entry = stripe_billing.get_product_sku(sku)
+    origin = str(request.base_url).rstrip("/")
+    try:
+        stripe_billing._secret_key()
+        if stripe_billing.product_price_id(sku) is None:
+            raise stripe_billing.CheckoutNotConfigured(f"price not configured for product {sku}")
+        purchase, reused = pb.create_pending_product_purchase(
+            db, _user.id, sku, content_digest=content_digest)
+        db.commit()
+        # PR #182 finding 4: bind the return landing to THIS checkout's
+        # purchase. The success/cancel URLs are built only once the
+        # pending purchase row exists, and carry its id so
+        # /products/return resolves consent/purchase/entitlement by
+        # the purchase's content_digest — never by whatever consent
+        # happens to be the buyer's latest (a newer quote opened in
+        # another tab must not hijack the landing). An env override
+        # still wins as the base URL; the purchase parameter is
+        # appended query-string-aware (any stale purchase parameter
+        # on the override is replaced, not duplicated).
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+        def _purchase_bound_url(override, default_query):
+            base = override or f"{origin}/products/return?{default_query}"
+            parts = urlsplit(base)
+            query = [(k, v) for k, v in
+                     parse_qsl(parts.query, keep_blank_values=True)
+                     if k != "purchase"]
+            query.append(("purchase", str(purchase.id)))
+            return urlunsplit(parts._replace(query=urlencode(query)))
+
+        # PR #182 finding 2: the return landing is the settlement-aware
+        # /products/return surface, NOT the plain home page (which
+        # ignored the parameter and dead-ended a buyer who had paid).
+        success_url = _purchase_bound_url(
+            _os.environ.get("STRIPE_SUCCESS_URL"),
+            f"product_checkout=success&sku={sku}")
+        cancel_url = _purchase_bound_url(
+            _os.environ.get("STRIPE_CANCEL_URL"),
+            f"product_checkout=cancelled&sku={sku}")
+        try:
+            checkout_url, session_id = stripe_billing.create_product_checkout_session(
+                user_id=_user.id, sku=sku, purchase_id=purchase.id,
+                success_url=success_url, cancel_url=cancel_url,
+                content_digest=content_digest)
+        except Exception:
+            db.rollback()
+            raise
+        if not purchase.stripe_session_id:
+            purchase.stripe_session_id = session_id
+        if not purchase.stripe_price_id:
+            purchase.stripe_price_id = stripe_billing.product_price_id(sku)
+        db.commit()
+    except pb.DuplicateEntitlement as dup:
+        db.rollback()
+        return JSONResponse({
+            "error": f"You already hold an entitlement for this {entry['name']}.",
+            "existing_entitlement_id": str(dup.entitlement.id),
+            "entitlement_status": dup.entitlement.status,
+        }, status_code=409)
+    except stripe_billing.CheckoutNotConfigured:
+        db.rollback()
+        return JSONResponse({"error": f"{entry['name']} purchases are not available yet. Please try again later."}, status_code=503)
+    except stripe_billing.CheckoutError:
+        raise HTTPException(503, "Purchases are temporarily unavailable. Please try again shortly.")
+    from app import funnel as funnel_helpers
+    funnel_helpers.emit_standalone(funnel_helpers.PURCHASE_START, user_id=_user.id,
+                                   meta={"sku": sku, "kind": "product"})
+    # No redemption_deadline is quoted here: the digest window runs
+    # 30 days from SETTLEMENT (B-11), which has not happened yet.
+    return JSONResponse({
+        "checkout_url": checkout_url, "purchase_id": str(purchase.id),
+        "promise": stripe_billing.PAY_NOW_PROMISE,
+    })
+
+
+PRODUCT_OPERATION_BY_SKU = {sku: op for op, sku in PRODUCT_SKU_BY_OPERATION.items()}
+
+_PRODUCT_RETURN_ACTIONS = {
+    "compare_logs": ("/compare/paid", "Run comparison — already paid", "/compare"),
+    "batch": ("/batch/paid", "Run batch analysis — already paid", "/batch"),
+    "oversize_analysis": ("/analyze/paid", "Run oversize analysis — already paid", "/"),
+}
+
+
+@app.get("/products/return", response_class=HTMLResponse)
+async def product_return(request: Request):
+    """Issue #164 Phase B (PR #182 finding 2): settlement-aware
+    landing for a digest-SKU checkout return.
+
+    Settlement is webhook-only — this page grants nothing. It reads
+    the buyer's own state for the SKU and renders exactly one honest
+    state: ``ready`` (a settled entitlement + the still-pending
+    consent for the same files + the pending payload actually
+    loaded: the Run form, never a second checkout prompt — PR #182
+    finding 5: without the payload the Run form would 410, so that
+    case renders ``no_consent`` instead), ``settling`` (payment received, webhook not landed yet:
+    check-again link, no checkout prompt), ``no_consent`` (entitlement
+    held but the pending upload is gone: re-upload the same files and
+    the quote step offers Run), ``cancelled``, or ``missing``.
+    The pending consent identity (consent_id + file_hash) is resolved
+    server-side from the buyer's latest unconsumed consent for the
+    SKU's operation, so the Run form re-confirms the SAME files the
+    buyer paid for.
+
+    PR #182 finding 4: when the return URL carries a ``purchase``
+    parameter (minted by /products/checkout since that fix), the
+    landing binds STRICTLY to that purchase: the purchase must belong
+    to this buyer and SKU, and consent/entitlement are resolved by
+    the purchase's content_digest — never by the latest-consent pick
+    (a newer quote in another tab must not hijack the landing). A
+    purchase parameter that does not resolve to such a purchase
+    binds to NOTHING: the landing renders ``missing`` rather than
+    falling back to some other consent on the account. URLs without
+    the parameter (minted before the fix) keep the latest-consent
+    behaviour above.
+    """
+    from fastapi.responses import RedirectResponse
+    from app import stripe_billing as _sb
+    sku = request.query_params.get("sku", "")
+    outcome = request.query_params.get("product_checkout", "success")
+    if sku not in _sb.DIGEST_SKUS:
+        return HTMLResponse(
+            content="<h1>Unknown product</h1><p>This checkout link is not valid.</p>",
+            status_code=400)
+    _user, _csrf = _get_current_user_optional(request)
+    if not _user:
+        return RedirectResponse("/login", status_code=303)
+    operation = PRODUCT_OPERATION_BY_SKU[sku]
+    confirm_action, run_label, start_path = _PRODUCT_RETURN_ACTIONS[operation]
+    entry = _sb.get_product_sku(sku) or {}
+    context = {
+        "current_user": _user, "csrf_token": _csrf,
+        "product_name": entry.get("name", sku),
+        "state": "missing", "filename": None,
+        "consent_id": None, "file_hash": None,
+        "confirm_action": confirm_action, "run_label": run_label,
+        "start_path": start_path,
+        "return_url": f"/products/return?product_checkout=success&sku={sku}",
+    }
+    from app.db import SessionLocal
+    from app import models as _M
+    from app import product_billing as _pb
+
+    def _load_pending_filename(consent):
+        """Fill the display filename from the consent's pending
+        payload. Returns True only when the payload actually loaded
+        (a loader returning None, or raising, counts as NOT loaded —
+        PR #182 finding 5 gates the Run action on this)."""
+        try:
+            if operation == "compare_logs":
+                pair = _load_compare_pending(str(consent.id))
+                if pair is not None:
+                    context["filename"] = f"{pair[0]} → {pair[2]}"
+                    return True
+            elif operation == "batch":
+                bundle = _load_batch_pending(str(consent.id))
+                if bundle is not None:
+                    context["filename"] = f"Batch — {len(bundle)} files"
+                    return True
+            else:
+                pending = _load_paid_pending(str(consent.id))
+                if pending is not None:
+                    context["filename"] = pending[0]
+                    return True
+        except Exception:
+            context["filename"] = None
+        return False
+
+    # PR #182 finding 4: a purchase-bound return URL keeps its
+    # binding in the settling state's Check-again link.
+    purchase_param = request.query_params.get("purchase", "")
+    if purchase_param:
+        from urllib.parse import quote as _urlquote
+        context["return_url"] = (
+            f"/products/return?product_checkout=success&sku={sku}"
+            f"&purchase={_urlquote(purchase_param, safe='')}")
+    pending_loaded = False
+    with SessionLocal() as db:
+        consent = None
+        entitlement = None
+        purchase = None
+        if purchase_param:
+            # Finding 4, bound branch: resolve ONLY the named
+            # purchase (this buyer, this SKU) and bind strictly to
+            # its content_digest. No latest-consent fallback here —
+            # that fallback is exactly the hijack being fixed. An
+            # unresolvable parameter leaves consent/entitlement/
+            # purchase all None, so the landing renders "missing":
+            # the safest honest state (it neither claims a payment is
+            # settling nor offers another purchase's files to run).
+            import uuid as _uuid
+            try:
+                purchase_id = _uuid.UUID(purchase_param)
+            except (ValueError, AttributeError, TypeError):
+                purchase_id = None
+            if purchase_id is not None:
+                purchase = db.query(_M.ProductPurchase).filter(
+                    _M.ProductPurchase.id == purchase_id,
+                    _M.ProductPurchase.user_id == _user.id,
+                    _M.ProductPurchase.sku == sku,
+                ).first()
+            if purchase is not None:
+                digest = purchase.content_digest
+                consent = db.query(_M.Consent).filter(
+                    _M.Consent.user_id == _user.id,
+                    _M.Consent.operation_type == operation,
+                    _M.Consent.sku == sku,
+                    _M.Consent.input_hash == digest,
+                    _M.Consent.consumed_by_operation_id.is_(None),
+                    _M.Consent.consumed_by_free_request_id.is_(None),
+                    _M.Consent.expires_at > datetime.now(timezone.utc),
+                ).order_by(_M.Consent.created_at.desc()).first()
+                entitlement = _pb.available_entitlement(
+                    db, _user.id, None, sku, content_digest=digest)
+                if consent is not None:
+                    context["consent_id"] = str(consent.id)
+                    context["file_hash"] = consent.input_hash
+                    pending_loaded = _load_pending_filename(consent)
+        else:
+            consent = db.query(_M.Consent).filter(
+                _M.Consent.user_id == _user.id,
+                _M.Consent.operation_type == operation,
+                _M.Consent.sku == sku,
+                _M.Consent.consumed_by_operation_id.is_(None),
+                _M.Consent.consumed_by_free_request_id.is_(None),
+                _M.Consent.expires_at > datetime.now(timezone.utc),
+            ).order_by(_M.Consent.created_at.desc()).first()
+            if consent is not None:
+                context["consent_id"] = str(consent.id)
+                context["file_hash"] = consent.input_hash
+                entitlement = _pb.available_entitlement(
+                    db, _user.id, None, sku,
+                    content_digest=consent.input_hash)
+                purchase = db.query(_M.ProductPurchase).filter(
+                    _M.ProductPurchase.user_id == _user.id,
+                    _M.ProductPurchase.sku == sku,
+                    _M.ProductPurchase.content_digest == consent.input_hash,
+                ).order_by(_M.ProductPurchase.created_at.desc()).first()
+                pending_loaded = _load_pending_filename(consent)
+            else:
+                # No live consent: an entitlement for ANY digest of
+                # this SKU still means "already paid — re-upload".
+                entitlement = db.query(_M.Entitlement).filter(
+                    _M.Entitlement.user_id == _user.id,
+                    _M.Entitlement.sku == sku,
+                    _M.Entitlement.status == "available",
+                ).order_by(_M.Entitlement.created_at.desc()).first()
+                if entitlement is not None and not _pb.available_entitlement(
+                        db, _user.id, None, sku,
+                        content_digest=entitlement.content_digest):
+                    entitlement = None  # lapsed window: not redeemable
+                purchase = db.query(_M.ProductPurchase).filter(
+                    _M.ProductPurchase.user_id == _user.id,
+                    _M.ProductPurchase.sku == sku,
+                ).order_by(_M.ProductPurchase.created_at.desc()).first()
+    if purchase_param and purchase is None:
+        # Finding 4: an unresolvable purchase binding renders the
+        # honest "missing" state — never another consent's state,
+        # and never a "settling" claim for an unknown purchase.
+        context["state"] = "missing"
+    elif (entitlement is not None and consent is not None
+            and pending_loaded):
+        context["state"] = "ready"
+    elif entitlement is not None and consent is not None:
+        # PR #182 finding 5: entitlement + consent exist but the
+        # pending payload did NOT load (temp storage lost) — the Run
+        # form would necessarily 410 at the paid handler, so render
+        # the re-upload recovery state instead of "ready". (Falls
+        # into the no_consent branch below on purpose.)
+        context["state"] = "no_consent"
+    elif entitlement is not None:
+        context["state"] = "no_consent"
+    elif outcome == "cancelled":
+        context["state"] = "cancelled"
+    elif purchase is not None or consent is not None:
+        context["state"] = "settling"
+    return templates.TemplateResponse(request, "product_return.html", context)
+
+
 # ISSUE-69 + #164 (A3): Stripe webhook — family dispatch by kind.
 # Server-to-server: no user session and no CSRF token. The Stripe-Signature
 # HMAC is the authentication; unsigned or mis-signed deliveries are answered
@@ -1242,6 +1586,19 @@ async def health():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    # PR #182 finding 2 (legacy landings): checkout sessions created
+    # before the /products/return surface existed still carry the old
+    # "/?product_checkout=...&sku=..." success URL — consume the
+    # parameter here by handing off to that surface instead of
+    # dead-ending the buyer on the plain home page.
+    _pc = request.query_params.get("product_checkout")
+    _sku = request.query_params.get("sku", "")
+    if _pc in ("success", "cancelled") and _sku:
+        from fastapi.responses import RedirectResponse
+        from urllib.parse import quote as _q
+        return RedirectResponse(
+            f"/products/return?product_checkout={_pc}&sku={_q(_sku)}",
+            status_code=303)
     _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
         request, "index.html", {"error": None, "remaining": _remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
@@ -1611,7 +1968,8 @@ _PENDING_LOCK = _threading.RLock()
 # Issue #104: exact insufficient-credits message (spec §4), with the
 # /credits CTA rendered by _analysis_response(buy_credits=True).
 OVERSIZE_INSUFFICIENT_MESSAGE = (
-    "Oversize analysis costs 3 credits. You do not have enough eligible credits."
+    "Oversize analysis costs $5. Complete the purchase from the "
+    "quote step to run this file."
 )
 
 
@@ -1787,6 +2145,108 @@ def _compare_pair_hash(filename_a: str, content_a: bytes, filename_b: str, conte
          + _fingerprint(filename_b, content_b)).encode("utf-8"))
 
 
+def _product_quote(request, *, operation: str, sku: str, file_hash: str, user,
+                     store_pending):
+    """Issue #164 Phase B: the dollar quote step for a migrated flow.
+
+    Returns (consent_id, entitlement) on success — entitlement is the
+    buyer's live available entitlement for (user, sku, digest) when
+    one exists (the page then renders the redemption "Run" path,
+    B-7's F1 surface), else None (the page renders the $5 checkout
+    path). Returns an HTMLResponse when the SKU's price env is unset:
+    the fail-closed "Coming soon" pattern (Decision 4) — no consent,
+    no pending store, no purchase row, no Stripe call, and NO credit
+    fallback. ``store_pending(consent_id)`` persists the pending
+    upload inside the same transaction as consent creation.
+    """
+    import os as _os
+    if not _os.environ.get("DATABASE_URL"):
+        raise RuntimeError("no database")
+    from fastapi.responses import HTMLResponse
+    from app.db import SessionLocal
+    from app import credits as credits_helpers
+    from app import models as _models
+    from app import product_billing as _pb
+    from app import stripe_billing as _sb
+
+    if _sb.product_price_id(sku) is None:
+        return HTMLResponse(
+            content=("<h1>Coming soon</h1><p>This feature is not "
+                     "available yet. Please check back shortly.</p>"),
+            status_code=503)
+    db = SessionLocal()
+    try:
+        with _PENDING_LOCK:
+            if operation == "oversize_analysis":
+                # One live oversize pending per user (existing rule);
+                # a re-quote of the SAME digest is not a second
+                # pending — it is the redemption route after checkout.
+                now = datetime.now(timezone.utc)
+                live = db.query(_models.Consent).filter(
+                    _models.Consent.user_id == user.id,
+                    _models.Consent.operation_type == "oversize_analysis",
+                    _models.Consent.input_hash != file_hash,
+                    _models.Consent.consumed_by_operation_id.is_(None),
+                    _models.Consent.consumed_by_free_request_id.is_(None),
+                    _models.Consent.expires_at > now,
+                ).first()
+                if live is not None:
+                    raise credits_helpers.AdmissionError(
+                        "You already have an oversize upload awaiting confirmation. "
+                        "Confirm or wait for it to expire before uploading another oversize file.")
+            entitlement = _pb.available_entitlement(
+                db, user.id, None, sku, content_digest=file_hash)
+            consent = credits_helpers.create_product_consent(
+                db, user.id, operation, file_hash, sku)
+            db.flush()
+            consent_id = str(consent.id)
+            try:
+                store_pending(consent_id)
+            except Exception:
+                db.rollback()
+                raise
+            db.commit()
+    finally:
+        db.close()
+    return consent_id, entitlement
+
+
+def _product_consent_context(*, user, csrf_token, filename, file_hash,
+                             consent_id, entitlement, sku, heading, intro,
+                             size_line, limits_line, cost_sentence,
+                             confirm_action, run_label, note_extra=""):
+    """Shared dollar consent-page context (Decision 9 copy rules):
+    $5, success-only, exports included, 90-day retention, and the
+    Phase A PAY_NOW_PROMISE pinned verbatim on the checkout path."""
+    from app import stripe_billing as _sb
+    redeem = entitlement is not None
+    return {
+        "current_user": user,
+        "csrf_token": csrf_token,
+        "filename": filename,
+        "file_hash": file_hash,
+        "consent_id": consent_id,
+        "cost": 0,
+        "balance": None,
+        "eligible": None,
+        "product_mode": True,
+        "product_checkout": not redeem,
+        "product_sku": sku,
+        "promise": _sb.PAY_NOW_PROMISE,
+        "heading": heading,
+        "intro": intro,
+        "size_line": size_line,
+        "limits_line": limits_line,
+        "cost_label": "$5",
+        "cost_sentence": cost_sentence,
+        "confirm_label": run_label if redeem else "Buy — $5",
+        "confirm_action": confirm_action,
+        "cancel_label": "Cancel",
+        "note": ("Exports are included. Results are available for 90 days. "
+                 + note_extra),
+    }
+
+
 def _paid_consent_page(request: Request, filename: str, content: bytes, user, csrf_token: str, ip: str,
                        *, operation: str = "additional_analysis",
                        byte_count: int | None = None, line_count: int | None = None,
@@ -1841,6 +2301,61 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
         file_hash = _compare_pair_hash(filename, content, filename_b, content_b)
     else:
         file_hash = fingerprint(filename, content)
+    _sku = PRODUCT_SKU_BY_OPERATION.get(operation)
+    if _sku is not None:
+        # Issue #164 Phase B (Decisions 1/5, B-7): migrated flows
+        # quote in dollars only — a zero-cost product consent, never
+        # a credit consent, and no balance check.
+        def _store(consent_id):
+            if operation == "compare_logs":
+                _store_compare_pending(consent_id, filename, content,
+                                       filename_b, content_b)
+            else:
+                meta = None
+                if operation == "oversize_analysis":
+                    meta = {"operation_type": operation,
+                            "byte_count": byte_count,
+                            "line_count": line_count,
+                            "user_id": str(user.id)}
+                _store_paid_pending(consent_id, filename, content, meta=meta)
+        quoted = _product_quote(request, operation=operation, sku=_sku,
+                                file_hash=file_hash, user=user,
+                                store_pending=_store)
+        if not isinstance(quoted, tuple):
+            return quoted  # fail-closed response (price env unset)
+        consent_id, entitlement = quoted
+        if operation == "oversize_analysis":
+            size_mb = (byte_count or 0) / (1024 * 1024)
+            context = _product_consent_context(
+                user=user, csrf_token=csrf_token, filename=filename,
+                file_hash=file_hash, consent_id=consent_id,
+                entitlement=entitlement, sku=_sku,
+                heading="Oversize analysis",
+                intro="This file exceeds the free limits.",
+                size_line=f"{byte_count:,} bytes ({size_mb:.1f} MB) · {line_count:,} lines",
+                limits_line="Analyze up to 100 MB / 500,000 lines.",
+                cost_sentence="This run costs $5. No charge if the analysis fails.",
+                confirm_action="/analyze/paid",
+                run_label="Run oversize analysis — already paid")
+            context["operation_type"] = operation
+        else:  # compare_logs
+            context = _product_consent_context(
+                user=user, csrf_token=csrf_token,
+                filename=f"{filename} → {filename_b}",
+                file_hash=file_hash, consent_id=consent_id,
+                entitlement=entitlement, sku=_sku,
+                heading="Compare two logs",
+                intro="Compare A (before) against B (after).",
+                size_line=None,
+                limits_line="Free limits apply to both files (10 MB / 50,000 lines each).",
+                cost_sentence=("This comparison costs $5 — even if the logs are "
+                               "identical or show no material differences. "
+                               "No charge if the comparison fails."),
+                confirm_action="/compare/paid",
+                run_label="Run comparison — already paid")
+            context["operation_type"] = operation
+        return templates.TemplateResponse(
+            request, "paid_consent.html", context, status_code=402)
     if operation == "oversize_analysis":
         cost = credits_helpers.COST_OVERSIZE_ANALYSIS
     elif operation == "compare_logs":
@@ -2134,9 +2649,21 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                     if status == 200 and data is not None and getattr(_existing_op, "result_id", None):
                         rid = str(_existing_op.result_id)
                     return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
+                # Issue #164 Phase B: billing mode from the consent
+                # row — a product consent admits via the entitlement
+                # engine; an unadmitted legacy credit consent is
+                # refused (B-12 class 2). Replay above still serves
+                # admitted pre-ship runs on their original terms.
+                if _consent_row.sku is None:
+                    db.rollback()
+                    return _analysis_response(request, 409, message=LEGACY_CONSENT_MESSAGE)
+                # Consent validation precedes the pending load (the
+                # credit-era order): consumed/expired/owner errors
+                # are 409, a missing pending file is 410.
                 try:
-                    C.validate_consent(db, consent_id, user_id, "oversize_analysis", digest,
-                                       C.COST_OVERSIZE_ANALYSIS)
+                    C.validate_consent(db, consent_id, user_id,
+                                       "oversize_analysis", digest, 0,
+                                       sku="large_file_analysis")
                 except C.AdmissionError as exc:
                     db.rollback()
                     return _analysis_response(request, 409, message=str(exc))
@@ -2165,19 +2692,29 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                         oversize_original_bytes = meta["byte_count"]
                 worker = uuid_module.uuid4().hex
                 try:
-                    # Direct admit_paid_operation: the free-quota branch
-                    # of analysis_admission.admit() must NEVER convert an
-                    # oversize run into a free run. Slice 1 (T3): worker
-                    # pool size 1 via the global:oversize scope, existing
-                    # user/global permits, explicit 30/hour rate policy.
-                    item = C.admit_paid_operation(db, user_id, "oversize_analysis", key, digest,
-                                                  C.COST_OVERSIZE_ANALYSIS, consent_id, worker,
-                                                  input_manifest=_client_ip(request),
-                                                  extra_scopes=[("global:oversize", 1)])
-                except C.InsufficientCredits:
+                    # Product admission (B-8): the free-quota branch of
+                    # analysis_admission.admit() must NEVER convert an
+                    # oversize run into a free run. Lock order (B-4):
+                    # digest product-admission scope first (inside
+                    # admit_product_operation), then this flow's
+                    # capacity scopes (global:oversize before
+                    # global:paid, sorted), then the entitlement row.
+                    # Worker pool size 1 via the global:oversize scope,
+                    # existing user/global permits, explicit 30/hour
+                    # rate policy (consumed inside admission).
+                    from app import product_billing as _pb_over
+                    item = _pb_over.admit_product_operation(
+                        db, user_id, "oversize_analysis",
+                        "large_file_analysis", key, digest,
+                        consent_id, worker,
+                        input_manifest=_client_ip(request),
+                        extra_scopes=[("global:oversize", 1)])
+                except _pb_over.EntitlementRequired:
                     db.rollback()
-                    return _analysis_response(request, 402, message=OVERSIZE_INSUFFICIENT_MESSAGE,
-                                              buy_credits=True)
+                    return _analysis_response(request, 402, message=OVERSIZE_INSUFFICIENT_MESSAGE)
+                except _pb_over.DeadlineLapsed:
+                    db.commit()  # refund_eligible transition stands (B-11)
+                    return _analysis_response(request, 410, message="This purchase's 30-day redemption window has lapsed. It is now refund-eligible — contact disputes@goodfolkdigital.com.")
                 except C.AdmissionError as exc:
                     db.rollback()
                     return _analysis_response(request, 409 if "409" in str(exc) else 429, message=str(exc))
@@ -2315,7 +2852,7 @@ async def analyze_paid(request: Request, consent_id: str = Form(...), file_hash:
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _analysis_response(request, 401, message="Please log in to use credits.")
+            return _analysis_response(request, 401, message="Please log in to continue.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _analysis_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -2388,8 +2925,36 @@ async def analyze_paid_cancel(request: Request, consent_id: str = Form(...),
 # ---------------------------------------------------------------------------
 
 COMPARE_INSUFFICIENT_MESSAGE = (
-    "Comparing two logs costs 3 credits. You do not have enough eligible credits."
+    "Comparing two logs costs $5. Complete the purchase from the "
+    "quote step to run this comparison."
 )
+
+LEGACY_CONSENT_MESSAGE = (
+    "This confirmation was created under the previous credit pricing "
+    "and can no longer be used. Upload the files again to see the "
+    "current $5 price — no credits were charged."
+)
+
+
+def _export_unlocked_for(user, report_id) -> bool:
+    """Export-unlock display state for a fresh compare/batch render:
+    unlocked by a prior credit unlock OR product-paid (B-9 — exports
+    are free for dollar-paid artifacts, decided by the B-8 helper)."""
+    if user is None or report_id is None:
+        return False
+    try:
+        import uuid as _uuid
+        from app.db import SessionLocal
+        from app import credits as _C
+        from app import models as _M
+        with SessionLocal() as db:
+            result = db.get(_M.Result, _uuid.UUID(str(report_id)))
+            if result is None:
+                return False
+            return bool(_C.is_export_unlocked(db, user.id, result.id)
+                        or _C.is_product_paid_result(db, result))
+    except Exception:
+        return False
 
 
 def _comparison_response(request, status, data=None, message=None, *, report_id=None):
@@ -2403,6 +2968,7 @@ def _comparison_response(request, status, data=None, message=None, *, report_id=
     data = dict(data, current_user=user, csrf_token=csrf)
     if report_id is not None:
         data["report_id"] = report_id
+        data.setdefault("export_unlocked", _export_unlocked_for(user, report_id))
     data.setdefault("elapsed", 0.0)
     return templates.TemplateResponse(request, "compare_report.html", data, status_code=status)
 
@@ -2453,27 +3019,65 @@ def _durable_compare(request, key, *, consent_id, digest):
             status, data, message = A.replay(db, existing, user_id)
             rid = str(existing.result_id) if (status == 200 and existing.result_id) else None
             return _comparison_response(request, status, data, message, report_id=rid)
-        try:
-            C.validate_consent(db, consent_id, user_id, "compare_logs", digest, C.COST_COMPARE)
-        except C.AdmissionError as exc:
+        # Issue #164 Phase B: billing mode is decided by the consent
+        # row. A product consent (sku set) admits through the
+        # entitlement engine; an unadmitted legacy CREDIT consent is
+        # refused (B-12 class 2) — no charge, no run, route to the
+        # dollar quote. Replay above still serves admitted runs.
+        _consent_row = db.get(M.Consent, consent_id, populate_existing=True)
+        if _consent_row is not None and _consent_row.sku is None:
             db.rollback()
-            return _comparison_response(request, 409, message=str(exc))
+            return _comparison_response(request, 409, message=LEGACY_CONSENT_MESSAGE)
         pair = _load_compare_pending(str(consent_id))
         if pair is None:
             return _comparison_response(request, 410, message="Upload expired. Please upload the files again.")
         filename_a, content_a, filename_b, content_b = pair
         if _compare_pair_hash(filename_a, content_a, filename_b, content_b) != digest:
             return _comparison_response(request, 409, message="Upload does not match your consent.")
-        try:
-            item = C.admit_paid_operation(db, user_id, "compare_logs", key, digest,
-                                          C.COST_COMPARE, consent_id, worker,
-                                          input_manifest=_client_ip(request))
-        except C.InsufficientCredits:
-            db.rollback()
-            return _comparison_response(request, 402, message=COMPARE_INSUFFICIENT_MESSAGE)
-        except C.AdmissionError as exc:
-            db.rollback()
-            return _comparison_response(request, 409 if "409" in str(exc) else 429, message=str(exc))
+        if _consent_row is not None:
+            # Product admission (B-8). Lock order (B-4): digest
+            # product-admission scope first (inside
+            # admit_product_operation), then this flow's capacity
+            # scopes (global:paid + user), then the entitlement row.
+            # Consent validation as its own step first (the oversize
+            # pattern): owner/type/hash/expiry/mode failures are 409
+            # here; admission re-validates authoritatively under lock.
+            try:
+                C.validate_consent(db, consent_id, user_id, "compare_logs",
+                                   digest, 0, sku="compare")
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _comparison_response(request, 409, message=str(exc))
+            from app import product_billing as _pb
+            try:
+                item = _pb.admit_product_operation(
+                    db, user_id, "compare_logs", "compare", key, digest,
+                    consent_id, worker, input_manifest=_client_ip(request))
+            except _pb.EntitlementRequired:
+                db.rollback()
+                return _comparison_response(request, 402, message=COMPARE_INSUFFICIENT_MESSAGE)
+            except _pb.DeadlineLapsed:
+                db.commit()  # refund_eligible transition stands (B-11)
+                return _comparison_response(request, 410, message="This purchase's 30-day redemption window has lapsed. It is now refund-eligible — contact disputes@goodfolkdigital.com.")
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _comparison_response(request, 409 if "409" in str(exc) else 429, message=str(exc))
+        else:
+            try:
+                C.validate_consent(db, consent_id, user_id, "compare_logs", digest, C.COST_COMPARE)
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _comparison_response(request, 409, message=str(exc))
+            try:
+                item = C.admit_paid_operation(db, user_id, "compare_logs", key, digest,
+                                              C.COST_COMPARE, consent_id, worker,
+                                              input_manifest=_client_ip(request))
+            except C.InsufficientCredits:
+                db.rollback()
+                return _comparison_response(request, 402, message=COMPARE_INSUFFICIENT_MESSAGE)
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _comparison_response(request, 409 if "409" in str(exc) else 429, message=str(exc))
         db.commit()
         if item.worker_id != worker:
             status, data, message = A.replay(db, item, user_id)
@@ -2628,7 +3232,7 @@ async def compare_paid(request: Request, consent_id: str = Form(...), file_hash:
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _comparison_response(request, 401, message="Please log in to use credits.")
+            return _comparison_response(request, 401, message="Please log in to continue.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _comparison_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -2674,6 +3278,7 @@ def _batch_response(request, status, data=None, message=None, *, report_id=None,
     data = dict(data, current_user=user, csrf_token=csrf)
     if report_id is not None:
         data["report_id"] = report_id
+        data.setdefault("export_unlocked", _export_unlocked_for(user, report_id))
     data.setdefault("elapsed", 0.0)
     return templates.TemplateResponse(request, "batch_report.html", data, status_code=status)
 
@@ -2798,60 +3403,35 @@ def _batch_consent_page(request: Request, validated, user, csrf_token: str, ip: 
         )
     n = len(files)
     file_hash = _batch_bundle_hash(files)
-    db = SessionLocal()
-    try:
-        if quote is None:
-            total, first_cost, free_available = batch_admission.batch_price(db, ip, n)
-        else:
-            total, first_cost, free_available = quote
-        summary = credits_helpers.get_balance_summary(db, user.id)
-        if summary["eligible"] < total:
-            raise credits_helpers.InsufficientCredits("insufficient credits")
-        with _PENDING_LOCK:
-            consent = credits_helpers.create_consent(
-                db, user.id, "batch", file_hash, total)
-            db.flush()
-            consent_id = str(consent.id)
-            try:
-                _store_batch_pending(consent_id, files, counts)
-            except Exception:
-                db.rollback()
-                raise
-            db.commit()
-    finally:
-        db.close()
-
-    first_line = ("free hourly allowance" if free_available
-                  else "1 credit (free allowance used)")
+    # Issue #164 Phase B (Decision 3, B-7/B-19): flat $5 per batch run
+    # of 2-5 files. No formula quote, no free-first claim, no balance
+    # check — a zero-cost product consent only. (The ``quote`` param
+    # is retained for call-site compatibility and ignored.)
+    quoted = _product_quote(
+        request, operation="batch", sku="batch", file_hash=file_hash,
+        user=user,
+        store_pending=lambda consent_id: _store_batch_pending(
+            consent_id, files, counts))
+    if not isinstance(quoted, tuple):
+        return quoted  # fail-closed response (price env unset)
+    consent_id, entitlement = quoted
     total_bytes = sum(c[0] for c in counts)
-    context = {
-        "current_user": user,
-        "csrf_token": csrf_token,
-        "filename": f"Batch \u2014 {n} files",
-        "file_list": [f"{ordinal}. {filename}" for ordinal, filename, _ in files],
-        "file_hash": file_hash,
-        "consent_id": consent_id,
-        "cost": total,
-        "balance": summary["balance"],
-        "eligible": summary["eligible"],
-        "operation_type": "batch",
-        "heading": "Batch analysis",
-        "intro": (f"{n} files. First file: {first_line}. "
-                  f"{n - 1} additional file{'s' if n - 1 != 1 else ''} "
-                  f"\u00d7 1 credit. Total: {total} credits."),
-        "size_line": f"{total_bytes:,} bytes across {n} files, in upload order",
-        "limits_line": "Free limits apply to every file (10 MB / 50,000 lines each). Duplicate filenames are separate files, told apart by their number.",
-        "cost_label": f"{total} credit{'s' if total != 1 else ''}",
-        "cost_sentence": "This batch produces one combined report.",
-        "confirm_label": f"Analyze {n} files \u2014 use {total} credits",
-        "confirm_action": "/batch/paid",
-        "cancel_label": "Cancel",
-        "note": ("All credits are released if the batch fails, but an admitted "
-                 "first-file free attempt is counted even if the batch fails and "
-                 "is not restored. This consent screen consumes no allowance. "
-                 "Results are available for 7 days. PDF export of the combined "
-                 "report costs 2 credits once, not per file."),
-    }
+    context = _product_consent_context(
+        user=user, csrf_token=csrf_token,
+        filename=f"Batch \u2014 {n} files",
+        file_hash=file_hash, consent_id=consent_id,
+        entitlement=entitlement, sku="batch",
+        heading="Batch analysis",
+        intro=f"{n} files. One flat price covers the whole batch.",
+        size_line=f"{total_bytes:,} bytes across {n} files, in upload order",
+        limits_line="Free limits apply to every file (10 MB / 50,000 lines each). Duplicate filenames are separate files, told apart by their number.",
+        cost_sentence=("This batch produces one combined report. "
+                       "No charge if the batch fails."),
+        confirm_action="/batch/paid",
+        run_label=f"Analyze {n} files \u2014 already paid",
+        note_extra="PDF export of the combined report is included.")
+    context["file_list"] = [f"{ordinal}. {filename}" for ordinal, filename, _ in files]
+    context["operation_type"] = "batch"
     return templates.TemplateResponse(
         request, "paid_consent.html", context, status_code=402)
 
@@ -2900,7 +3480,7 @@ def _durable_batch(request, key, *, consent_id, digest):
     from app import batch_admission, batch_service
     user, csrf = _get_current_user_optional(request)
     if user is None:
-        return _batch_response(request, 401, message="Please log in to use credits.")
+        return _batch_response(request, 401, message="Please log in to continue.")
     user_id = user.id
     ip = _client_ip(request)
     worker = uuid_module.uuid4().hex
@@ -2944,60 +3524,105 @@ def _durable_batch(request, key, *, consent_id, digest):
                 return _batch_response(
                     request, 400,
                     message=f"File {ordinal} ({filename}): {problem}. "
-                            "No files were analyzed and no credits were reserved.")
-        # Consent validation as its own step (the oversize pattern):
-        # owner/type/hash/expiry/consumption failures are 409 here,
-        # before quota or ledger admission maps its own errors.
-        try:
-            C.validate_consent(db, consent_id, user_id, "batch", digest,
-                               quoted_total if quoted_total is not None else 0)
-        except C.AdmissionError as exc:
+                            "No files were analyzed and nothing was charged.")
+        # Issue #164 Phase B: billing mode from the consent row.
+        if consent_row is not None and consent_row.sku is None:
+            # B-12 class 2: unadmitted legacy credit consent refused.
             db.rollback()
-            return _batch_response(request, 409, message=str(exc))
-        try:
-            item = batch_admission.admit_batch_operation(
-                db, user_id, key, digest, consent_id, worker, ip, len(bundle))
-        except batch_admission.RequoteRequired as rq:
-            db.rollback()
-            # Invalidate the old quote, then issue a replacement consent
-            # at the recomputed total for the same bundle; run nothing.
-            with SessionLocal() as db2:
-                stale = db2.get(M.Consent, consent_id)
-                if stale is not None:
-                    stale.expires_at = C._utcnow()
-                    db2.commit()
-            _delete_paid_pending(str(consent_id))
-            validated = [
-                {"ordinal": ordinal, "filename": filename, "content": content,
-                 "byte_count": byte_count, "line_count": line_count}
-                for ordinal, filename, content, byte_count, line_count in bundle
-            ]
+            return _batch_response(request, 409, message=LEGACY_CONSENT_MESSAGE)
+        product_batch = consent_row is not None and consent_row.sku is not None
+        item = None
+        if product_batch:
+            # Consent validation as its own step (the oversize
+            # pattern): failures are 409 here, before admission
+            # re-validates authoritatively under lock.
             try:
-                return _batch_consent_page(request, validated, user, csrf, ip)
+                C.validate_consent(db, consent_id, user_id, "batch",
+                                   digest, 0, sku="batch")
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _batch_response(request, 409, message=str(exc))
+            # Product admission (B-8/B-19). Lock order (B-4): digest
+            # product-admission scope first (inside
+            # admit_product_operation), then this flow's capacity
+            # scopes (global:batch before global:paid, sorted), then
+            # the entitlement row. No requote, no free claim, no
+            # RateLimitHit for a dollar batch.
+            from app import product_billing as _pb
+            try:
+                item = _pb.admit_product_operation(
+                    db, user_id, "batch", "batch", key, digest,
+                    consent_id, worker, input_manifest=ip,
+                    extra_scopes=[("global:batch", 1)])
+            except _pb.EntitlementRequired:
+                db.rollback()
+                return _batch_response(
+                    request, 402,
+                    message="Batch analysis costs $5. Complete the purchase from the quote step to run this batch.")
+            except _pb.DeadlineLapsed:
+                db.commit()  # refund_eligible transition stands (B-11)
+                return _batch_response(
+                    request, 410,
+                    message="This purchase's 30-day redemption window has lapsed. It is now refund-eligible — contact disputes@goodfolkdigital.com.")
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _batch_response(request, 409 if "409" in str(exc) else 429,
+                                       message=str(exc))
+        else:
+            # Consent validation as its own step (the oversize pattern):
+            # owner/type/hash/expiry/consumption failures are 409 here,
+            # before quota or ledger admission maps its own errors.
+            try:
+                C.validate_consent(db, consent_id, user_id, "batch", digest,
+                                   quoted_total if quoted_total is not None else 0)
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _batch_response(request, 409, message=str(exc))
+            try:
+                item = batch_admission.admit_batch_operation(
+                    db, user_id, key, digest, consent_id, worker, ip, len(bundle))
+            except batch_admission.RequoteRequired as rq:
+                db.rollback()
+                # Invalidate the old quote, then issue a replacement consent
+                # at the recomputed total for the same bundle; run nothing.
+                with SessionLocal() as db2:
+                    stale = db2.get(M.Consent, consent_id)
+                    if stale is not None:
+                        stale.expires_at = C._utcnow()
+                        db2.commit()
+                _delete_paid_pending(str(consent_id))
+                validated = [
+                    {"ordinal": ordinal, "filename": filename, "content": content,
+                     "byte_count": byte_count, "line_count": line_count}
+                    for ordinal, filename, content, byte_count, line_count in bundle
+                ]
+                try:
+                    return _batch_consent_page(request, validated, user, csrf, ip)
+                except C.InsufficientCredits:
+                    return _analysis_response(
+                        request, 402,
+                        message=_batch_insufficient_message(len(bundle), rq.new_total),
+                        buy_credits=True)
+                except RuntimeError:
+                    return _batch_response(
+                        request, 503,
+                        message="Pending upload capacity exhausted. Please try again shortly.")
             except C.InsufficientCredits:
+                db.rollback()
                 return _analysis_response(
                     request, 402,
-                    message=_batch_insufficient_message(len(bundle), rq.new_total),
+                    message=_batch_insufficient_message(
+                        len(bundle), quoted_total if quoted_total is not None else 0),
                     buy_credits=True)
-            except RuntimeError:
-                return _batch_response(
-                    request, 503,
-                    message="Pending upload capacity exhausted. Please try again shortly.")
-        except C.InsufficientCredits:
-            db.rollback()
-            return _analysis_response(
-                request, 402,
-                message=_batch_insufficient_message(
-                    len(bundle), quoted_total if quoted_total is not None else 0),
-                buy_credits=True)
-        except C.AdmissionError as exc:
-            db.rollback()
-            return _batch_response(request, 409 if "409" in str(exc) else 429,
-                                   message=str(exc))
-        except Exception:
-            db.rollback()
-            logging.getLogger(__name__).exception("Batch admission failed")
-            return _batch_response(request, 503, message="Could not start the batch. Please try again shortly.")
+            except C.AdmissionError as exc:
+                db.rollback()
+                return _batch_response(request, 409 if "409" in str(exc) else 429,
+                                       message=str(exc))
+            except Exception:
+                db.rollback()
+                logging.getLogger(__name__).exception("Batch admission failed")
+                return _batch_response(request, 503, message="Could not start the batch. Please try again shortly.")
+
         operation_id = item.id
         total_cost = item.cost
         first_cost = 0 if item.free_allowance_claim else C.COST_ADDITIONAL_ANALYSIS
@@ -3027,10 +3652,14 @@ def _durable_batch(request, key, *, consent_id, digest):
                 payload = batch_service.build_batch_payload(
                     [(ordinal, filename, payload)
                      for (ordinal, filename, *_), payload in zip(bundle, payloads)],
-                    pricing={"file_count": len(bundle),
-                             "first_file_cost": first_cost,
-                             "additional_file_cost": C.COST_BATCH_ADDITIONAL_FILE,
-                             "total_cost": total_cost})
+                    # B-15: product-paid batches snapshot a DOLLAR
+                    # pricing shape; legacy snapshots are unchanged.
+                    pricing=({"sku": "batch", "amount_cents": 500}
+                             if product_batch else
+                             {"file_count": len(bundle),
+                              "first_file_cost": first_cost,
+                              "additional_file_cost": C.COST_BATCH_ADDITIONAL_FILE,
+                              "total_cost": total_cost}))
                 result = C.store_result(
                     db, user_id, operation_id, payload, result_type="analysis",
                     severity=batch_service.batch_severity(
@@ -3101,7 +3730,7 @@ async def batch_intake(request: Request, files: list[UploadFile] = File(...),
             "error": message, "current_user": _user, "csrf_token": _csrf},
             status_code=status)
 
-    no_charge = " No files were analyzed and no credits were reserved."
+    no_charge = " No files were analyzed and nothing was charged."
     if files is None or len(files) < _MIN_BATCH_FILES:
         return error(f"A batch needs at least {_MIN_BATCH_FILES} files. "
                      "For one file, use the single-file upload on the home page." + no_charge)
@@ -3179,7 +3808,7 @@ async def batch_paid(request: Request, consent_id: str = Form(...), file_hash: s
     with SessionLocal() as db:
         session = auth.get_session_from_cookie(db, request)
         if not session:
-            return _batch_response(request, 401, message="Please log in to use credits.")
+            return _batch_response(request, 401, message="Please log in to continue.")
         if not csrf_token or not hmac.compare_digest(csrf_token, session.csrf_token):
             return _batch_response(request, 403, message="Invalid request. Please try again.")
     try:
@@ -5130,6 +5759,15 @@ async def report_extend_retention(request: Request, result_id: str, db=Depends(g
         _select(models.Result).where(models.Result.id == source.id)
         .with_for_update().execution_options(populate_existing=True)
     ).scalar_one()
+
+    # Issue #164 Phase B (B-13): product-paid artifacts already carry
+    # 90-day retention and are never sold an extension — server
+    # refusal is the contract (no ReportAction row, no charge).
+    if credits_helpers.is_product_paid_result(db, source):
+        db.rollback()
+        return JSONResponse(
+            {"error": "Paid reports include 90-day retention and can't be extended"},
+            status_code=409)
 
     request_hash = _ra.action_request_hash(source, "retention_extension")
 

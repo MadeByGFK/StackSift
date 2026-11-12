@@ -1,13 +1,21 @@
-"""Issue #102: compare two logs (paid, 3 credits) — HTTP + ledger coverage.
+"""Issue #102: compare two logs — HTTP + ledger coverage.
 
-Drives the comparison journey over HTTP for a real signed-up user:
+PREMISE CHANGED by issue #164 Phase B (dollar-only migration): the
+comparison journey is now paid by a $5 digest-bound product
+entitlement, never by credits. Drives the journey over HTTP for a
+real signed-up user:
 
     signup -> verify (10-credit signup reward) -> login
-      -> POST /compare (two files) -> 402 consent page quoting 3 credits
-         with the identical/no-material-difference disclosure
-      -> POST /compare/paid -> reserve (-3) + settle (-3 net on success,
-         full reversal on failure) -> retrieve (GET /reports/{id})
-      -> separate 2-credit PDF export -> replay (no recharge)
+      -> seed a settled $5 "compare" purchase + entitlement for the
+         pair digest (the webhook-settled state, seeded directly)
+      -> POST /compare (two files) -> 402 consent page quoting $5
+         with the identical/no-material-difference disclosure and the
+         redemption ("already paid") path
+      -> POST /compare/paid -> product-backed Operation (cost 0):
+         entitlement redeemed on success, released back to available
+         on failure; credit balance/ledger untouched throughout
+      -> retrieve (GET /reports/{id}) -> FREE PDF export (dollar-paid
+         artifact, Decision 8) -> replay (no re-consumption)
 
 Execution is mocked at the main._execute_compare boundary (the mocked-
 execution pattern: HTTP/ledger tests never run the real worker); the
@@ -61,6 +69,9 @@ def compare_env(migrated_engine, monkeypatch, tmp_path):
     engine, _ = migrated_engine
     sessions = sessionmaker(bind=engine, autoflush=False)
     monkeypatch.setenv("DATABASE_URL", str(engine.url))
+    # Issue #164 Phase B: the compare SKU must be priced or the quote
+    # step fails closed (503) by design.
+    monkeypatch.setenv("STRIPE_PRICE_COMPARE", "price_test_compare")
     monkeypatch.setattr(DB, "SessionLocal", sessions)
     monkeypatch.setattr(main, "_PAID_PENDING_DIR", str(tmp_path / "pending"))
     monkeypatch.setattr(auth, "auth_limiter", auth.AuthRateLimiter())
@@ -161,6 +172,29 @@ def _report_id_from(html):
     return m.group(1)
 
 
+def _seed_compare_entitlement(env, uid, content_a=LOG_A, content_b=LOG_B):
+    """Seed the webhook-settled state for a $5 compare purchase:
+    a completed purchase + AVAILABLE digest-bound entitlement for
+    the ordered pair (issue #164 Phase B)."""
+    from datetime import datetime, timedelta, timezone
+    digest = main._compare_pair_hash("a.log", content_a, "b.log", content_b)
+    now = datetime.now(timezone.utc)
+    with env.sessions() as db:
+        purchase = M.ProductPurchase(
+            user_id=uid, sku="compare", content_digest=digest,
+            amount_cents=500, currency="usd",
+            stripe_price_id="price_test_compare", pricing_version=1,
+            status="completed", completed_at=now)
+        db.add(purchase)
+        db.flush()
+        db.add(M.Entitlement(
+            user_id=uid, product_purchase_id=purchase.id, sku="compare",
+            content_digest=digest, status="available",
+            redemption_deadline=now + timedelta(days=30)))
+        db.commit()
+    return digest
+
+
 def _grant(env, uid, n):
     # A grant alone is not spendable: settlement also checks the account
     # balance, so top up both (mirrors what a purchase would record).
@@ -182,13 +216,14 @@ def test_compare_requires_login(compare_env):
     assert r.headers["location"] == "/login"
 
 
-def test_full_compare_flow_net_minus_3_and_retrievable(compare_env):
+def test_full_compare_flow_dollar_paid_and_retrievable(compare_env):
     env = compare_env
     _, uid, _ = _signup_verify_login(env)
     assert _http_balance(env) == 10
+    _seed_compare_entitlement(env, uid)
     r = _post_compare(env)
     assert r.status_code == 402, r.text[:300]
-    assert "3 credits" in r.text
+    assert "$5" in r.text
     assert "even if the logs are identical or show no material differences" in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
     assert _http_balance(env) == 10  # consent charges nothing
@@ -198,36 +233,48 @@ def test_full_compare_flow_net_minus_3_and_retrievable(compare_env):
     assert "disk full" in confirmed.text  # resolved
     assert "database connection failed" in confirmed.text  # volume change
     assert "Resolved means the pattern was not observed in B" in confirmed.text
-    assert _http_balance(env) == 7  # 10 signup - 3 compare
+    # Dollar premise: the credit balance and ledger never move.
+    assert _http_balance(env) == 10
+    with env.sessions() as db:
+        ent = db.query(M.Entitlement).filter(
+            M.Entitlement.user_id == uid, M.Entitlement.sku == "compare").one()
+        assert ent.status == "redeemed"
     rid = _report_id_from(confirmed.text)
     view = env.client.get(f"/reports/{rid}")
     assert view.status_code == 200, view.text[:300]
     assert "auth token expired" in view.text
-    # Separate 2-credit PDF export (funded by a top-up grant).
-    _grant(env, uid, 5)
+    # PDF export of a dollar-paid comparison is FREE (Decision 8).
     pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200, pdf.text[:300]
     assert pdf.content.startswith(b"%PDF")
     assert b"auth token expired" in pdf.content
     assert b"database connection failed" in pdf.content
-    assert _http_balance(env) == 10  # 7 + 5 granted - 2 PDF
-    # Replay the same confirmation: no recharge, same report.
+    assert _http_balance(env) == 10
+    # Replay the same confirmation: no re-consumption, same report.
     replay = _confirm(env, consent_id, file_hash, csrf)
     assert replay.status_code == 200, replay.text[:300]
     assert _report_id_from(replay.text) == rid
     assert _http_balance(env) == 10
 
 
-def test_identical_pair_still_costs_3_and_reports_no_material(compare_env):
+def test_identical_pair_still_costs_and_reports_no_material(compare_env):
+    # Success-only semantics preserved in dollar terms (2026-10-24
+    # ruling): an identical pair is a success and consumes the $5
+    # entitlement.
     env = compare_env
-    _, _, _ = _signup_verify_login(env)
+    _, uid, _ = _signup_verify_login(env)
+    _seed_compare_entitlement(env, uid, content_a=LOG_A, content_b=LOG_A)
     r = _post_compare(env, content_a=LOG_A, content_b=LOG_A)
     assert r.status_code == 402, r.text[:300]
     consent_id, file_hash, csrf = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:500]
     assert "No material differences" in confirmed.text
-    assert _http_balance(env) == 7  # 10 signup - 3 compare
+    assert _http_balance(env) == 10  # credits never move on this path
+    with env.sessions() as db:
+        ent = db.query(M.Entitlement).filter(
+            M.Entitlement.user_id == uid, M.Entitlement.sku == "compare").one()
+        assert ent.status == "redeemed"
 
 
 def test_invalid_b_rejected_before_analysis_or_charge(compare_env, monkeypatch):
@@ -250,7 +297,8 @@ def test_invalid_b_rejected_before_analysis_or_charge(compare_env, monkeypatch):
 
 def test_compare_failure_releases_full_reservation(compare_env, monkeypatch):
     env = compare_env
-    _, _, _ = _signup_verify_login(env)
+    _, uid, _ = _signup_verify_login(env)
+    _seed_compare_entitlement(env, uid)
     r = _post_compare(env)
     consent_id, file_hash, csrf = _consent_fields(r.text)
     monkeypatch.setattr(main, "_execute_compare",
@@ -259,15 +307,21 @@ def test_compare_failure_releases_full_reservation(compare_env, monkeypatch):
                                      "message": "Comparison failed."}))
     failed = _confirm(env, consent_id, file_hash, csrf)
     assert failed.status_code == 400, failed.text[:300]
-    assert _http_balance(env) == 10  # full reversal, no report stored
+    assert _http_balance(env) == 10  # credits never move on this path
     with env.sessions() as db:
         assert db.query(M.Result).filter(
             M.Result.type == "comparison").count() == 0
+        # F2: a failed run never consumes the purchase — the
+        # entitlement is back to available.
+        ent = db.query(M.Entitlement).filter(
+            M.Entitlement.user_id == uid, M.Entitlement.sku == "compare").one()
+        assert ent.status == "available"
 
 
 def test_compare_forgery_and_cross_user(compare_env):
     env = compare_env
     _, uid, _ = _signup_verify_login(env)
+    _seed_compare_entitlement(env, uid)
     r = _post_compare(env)
     consent_id, file_hash, csrf = _consent_fields(r.text)
     # Input substitution: a different pair hash does not match the consent.
@@ -283,13 +337,17 @@ def test_compare_forgery_and_cross_user(compare_env):
 def test_compare_rate_policy_explicit_30_per_hour(compare_env):
     env = compare_env
     _, uid, _ = _signup_verify_login(env)
-    _grant(env, uid, 200)
     for _ in range(30):
+        # Each run consumes its entitlement (F1: a redeemed digest
+        # may be purchased again), so each iteration seeds a fresh
+        # settled purchase for the same pair.
+        _seed_compare_entitlement(env, uid)
         r = _post_compare(env)
         assert r.status_code == 402, r.text[:300]
         consent_id, file_hash, csrf = _consent_fields(r.text)
         confirmed = _confirm(env, consent_id, file_hash, csrf)
         assert confirmed.status_code == 200, confirmed.text[:300]
+    _seed_compare_entitlement(env, uid)
     r = _post_compare(env)
     assert r.status_code == 402, r.text[:300]
     consent_id, file_hash, csrf = _consent_fields(r.text)

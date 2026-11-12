@@ -1,12 +1,18 @@
-"""Issue #104: oversize analysis (paid, 3 credits) — HTTP + ledger coverage.
+"""Issue #104: oversize analysis (paid) — HTTP + ledger coverage.
 
-Drives the oversize journey over HTTP for a real signed-up user:
+PREMISE CHANGED by issue #164 Phase B: oversize analysis is the
+flat $5 ``large_file_analysis`` product, digest-bound. The journey:
 
     signup -> verify (10-credit signup reward) -> login
-      -> oversize upload -> 402 consent page quoting 3 credits
-      -> POST /analyze/paid -> reserve (-3) + settle (-3 net on success,
-         full reversal on failure) -> retrieve (GET /reports)
-      -> separate 2-credit PDF export -> replay (no recharge)
+      -> oversize upload -> 402 quote page: flat $5, zero-cost
+         product consent (checkout offered until an entitlement
+         settles; tests seed the entitlement directly)
+      -> POST /analyze/paid -> ONE zero-cost product-backed
+         Operation (no credit movement) -> retrieve (GET /reports),
+         90-day retention -> FREE PDF export -> replay (no recharge)
+
+The DB-level tests at the bottom still exercise the credit
+admission API directly (it remains live for additional_analysis).
 
 Execution is mocked at the main._execute_oversize boundary (the T5
 mocked-execution pattern: HTTP/ledger tests never run the real worker);
@@ -33,8 +39,8 @@ from app.analysis_admission import fingerprint
 from app.sample_data import SAMPLE_LOG
 
 OVERSIZE_402 = (
-    "Oversize analysis costs 3 credits. "
-    "You do not have enough eligible credits."
+    "Oversize analysis costs $5. "
+    "Complete the purchase from the quote step to run this file."
 )
 
 
@@ -68,6 +74,7 @@ def oversize_env(migrated_engine, monkeypatch, tmp_path):
         return copy.deepcopy(report)
 
     monkeypatch.setattr(main, "analyze_upload", fake_analyze)
+    monkeypatch.setenv("STRIPE_PRICE_LARGE_FILE", "price_test_large_file")
     monkeypatch.setattr(main, "_execute_oversize", fake_analyze)
     with TestClient(
         main.app,
@@ -178,6 +185,35 @@ def _ops(env, uid):
             M.Operation.type == "oversize_analysis").all()
 
 
+def _seed_oversize_entitlement(env, uid, content, filename="big.log"):
+    """Seed a settled $5 large_file_analysis purchase + available
+    entitlement bound to the upload's redacted-content fingerprint."""
+    digest = fingerprint(filename, content)
+    with env.sessions() as db:
+        purchase = M.ProductPurchase(
+            user_id=uid, sku="large_file_analysis", content_digest=digest,
+            status="completed", amount_cents=500, currency="usd",
+            stripe_price_id="price_test_large_file", pricing_version=1,
+            completed_at=C._utcnow())
+        db.add(purchase)
+        db.flush()
+        db.add(M.Entitlement(
+            user_id=uid, sku="large_file_analysis",
+            product_purchase_id=purchase.id, content_digest=digest,
+            status="available",
+            redemption_deadline=C._utcnow() + timedelta(days=30)))
+        db.commit()
+    return digest
+
+
+def _entitlement_status(env, uid):
+    with env.sessions() as db:
+        row = db.query(M.Entitlement).filter(
+            M.Entitlement.user_id == uid,
+            M.Entitlement.sku == "large_file_analysis").first()
+        return row.status if row else None
+
+
 # --- free path untouched ---------------------------------------------------
 
 def test_free_size_stays_free(oversize_env):
@@ -195,7 +231,7 @@ def test_free_size_stays_free(oversize_env):
 
 # --- quotation ---------------------------------------------------------------
 
-def test_byte_only_oversize_quotes_3(oversize_env):
+def test_byte_only_oversize_quotes_5_dollars(oversize_env):
     env = oversize_env
     _, uid, _ = _signup_verify_login(env)
     content = _byte_content()
@@ -203,23 +239,25 @@ def test_byte_only_oversize_quotes_3(oversize_env):
     r = _post_oversize(env, content)
     assert r.status_code == 402, r.text[:300]
     assert "Oversize analysis" in r.text
-    assert "Use 3 credits" in r.text
+    assert "Buy \u2014 $5" in r.text  # checkout until an entitlement settles
+    assert "Use 3 credits" not in r.text
     assert "Analyze up to 100 MB / 500,000 lines." in r.text
-    assert "No charge if the analysis fails. Results are available for 7 days." in r.text
+    assert "No charge if the analysis fails." in r.text
+    assert "Results are available for 90 days." in r.text
     # Consent itself changes neither balance nor allocations, and creates
     # no operation.
     assert _http_balance(env) == 10
     assert _ops(env, uid) == []
 
 
-def test_line_only_oversize_quotes_3_with_quota_remaining(oversize_env):
+def test_line_only_oversize_quotes_5_with_quota_remaining(oversize_env):
     env = oversize_env
     _signup_verify_login(env)
-    # Free hourly quota is untouched here, yet oversize still quotes 3:
-    # oversize never converts into a free run.
+    # Free hourly quota is untouched here, yet oversize still quotes
+    # $5: oversize never converts into a free run.
     r = _post_oversize(env, _line_content(50001))
     assert r.status_code == 402, r.text[:300]
-    assert "Use 3 credits" in r.text
+    assert "Buy \u2014 $5" in r.text
 
 
 def test_additional_analysis_wording_unchanged(oversize_env):
@@ -235,33 +273,37 @@ def test_additional_analysis_wording_unchanged(oversize_env):
     assert "Free analyses used up" in r.text
     assert "Use 1 credit" in r.text
     assert "Use 3 credits" not in r.text
+    assert "$5" not in r.text
 
 
 # --- success / settlement ----------------------------------------------------
 
-def test_confirm_success_net_minus_3_and_retrievable(oversize_env):
+def test_confirm_success_dollar_paid_and_retrievable(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
-    r = _post_oversize(env, _line_content(50001))
+    content = _line_content(50001)
+    _seed_oversize_entitlement(env, uid, content)
+    r = _post_oversize(env, content)
     assert r.status_code == 402, r.text[:300]
     consent_id, file_hash = _consent_fields(r.text)
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 7  # 10 signup - 3 oversize
+    assert _http_balance(env) == 10  # credits never move on the dollar path
     ops = _ops(env, uid)
     assert len(ops) == 1
-    assert ops[0].cost == 3 and ops[0].status == "completed"
+    assert ops[0].cost == 0 and ops[0].status == "completed"
+    assert ops[0].entitlement_redemption_id is not None
     assert ops[0].result_id is not None
+    assert _entitlement_status(env, uid) == "redeemed"
     with env.sessions() as db:
         result = db.get(M.Result, ops[0].result_id)
         assert result is not None and result.type == "analysis"
         assert C._as_aware(result.expires_at) > C._utcnow()
         assert (C._as_aware(result.expires_at) - C._as_aware(result.created_at)
-                ) <= timedelta(days=7, minutes=1)
+                ) >= timedelta(days=89)  # 90-day paid retention
         allocs = db.query(M.OperationAllocation).filter(
             M.OperationAllocation.operation_id == ops[0].id).all()
-        assert all(a.state == "consumed" for a in allocs)
-        assert sum(a.quantity for a in allocs) == 3
+        assert allocs == []  # B-16/B-17: no credit allocations at all
         scope = db.query(M.CapacityScope).filter(
             M.CapacityScope.scope_key == "global:oversize").one()
         assert scope.used == 0  # permits released on completion
@@ -277,6 +319,7 @@ def test_confirm_success_net_minus_3_and_retrievable(oversize_env):
 def test_confirm_failure_restores_full_reservation(oversize_env, monkeypatch):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
 
@@ -287,7 +330,8 @@ def test_confirm_failure_restores_full_reservation(oversize_env, monkeypatch):
     monkeypatch.setattr(main, "_execute_oversize", failing)
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 400, r.text[:300]
-    assert _http_balance(env) == 10  # full reversal, no partial debit
+    assert _http_balance(env) == 10  # credits never moved
+    assert _entitlement_status(env, uid) == "available"  # F2 release
     ops = _ops(env, uid)
     assert len(ops) == 1 and ops[0].status == "failed"
     assert ops[0].result_id is None
@@ -297,75 +341,67 @@ def test_confirm_failure_restores_full_reservation(oversize_env, monkeypatch):
         assert scope.used == 0
 
 
-def test_oversize_report_retention_7d_and_separate_pdf(oversize_env):
+def test_oversize_report_retention_90d_and_free_pdf(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
-    r = _post_oversize(env, _line_content(50001))
+    content = _line_content(50001)
+    _seed_oversize_entitlement(env, uid, content)
+    r = _post_oversize(env, content)
     consent_id, file_hash = _consent_fields(r.text)
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 7  # 10 signup - 3 oversize
+    assert _http_balance(env) == 10
+    result_id = _ops(env, uid)[0].result_id
     with env.sessions() as db:
-        C.grant_credits(db, uid, "purchase", "test-pack", 5)
-        db.commit()
-        result_id = _ops(env, uid)[0].result_id
-    assert _http_balance(env) == 12  # 7 + 5 granted
-    # PDF export remains a separate 2-credit operation.
+        result = db.get(M.Result, result_id)
+        assert (C._as_aware(result.expires_at) - C._as_aware(result.created_at)
+                ) >= timedelta(days=89)
+    # PDF export is FREE for dollar-paid artifacts (Decision 8/B-9).
     r = env.client.post(f"/reports/{result_id}/pdf", data={"csrf_token": csrf})
     assert r.status_code == 200, r.text[:300]
     assert r.headers["content-type"] == "application/pdf"
-    assert _http_balance(env) == 10  # 12 - 2 PDF export
+    assert _http_balance(env) == 10  # unchanged: no export charge
 
 
 # --- insufficient credits ------------------------------------------------------
 
-def test_insufficient_at_quotation_exact_message_and_cta(oversize_env):
+def test_no_entitlement_at_quotation_checkout_and_confirm_402(oversize_env):
+    """Dollar analog of insufficient-at-quotation: no settled
+    entitlement -> the quote page offers checkout (never credits),
+    and confirming anyway is a 402 with the exact dollar message."""
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
-    # Re-base the 10-credit signup balance to 3 (issue #151) so the first
-    # oversize run genuinely exhausts it.
-    _drain_signup(env, uid, 7)
-    assert _http_balance(env) == 3
-    r = _post_oversize(env, _line_content(50001))
-    consent_id, file_hash = _consent_fields(r.text)
-    assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
-    assert _http_balance(env) == 0
-    # A second oversize upload now quotes the exact 402 message with the
-    # /credits CTA, and creates no operation or partial reservation.
-    r = _post_oversize(env, _line_content(50002))
-    assert r.status_code == 402, r.text[:300]
-    assert OVERSIZE_402 in r.text
-    assert "/credits" in r.text
-    assert len(_ops(env, uid)) == 1  # only the first, completed operation
-
-
-def test_insufficient_at_confirmation_after_balance_change(oversize_env):
-    # True after-quotation drain: quote at 3, spend 1 via additional
-    # analysis, then confirm the oversize consent -> 402, no reservation.
-    env = oversize_env
-    _, uid, csrf = _signup_verify_login(env)
-    # Re-base the 10-credit signup balance to 3 (issue #151) so the
-    # 1-credit spend below genuinely leaves less than the 3 quote.
-    _drain_signup(env, uid, 7)
-    assert _http_balance(env) == 3
     r = _post_oversize(env, _line_content(50001))
     assert r.status_code == 402, r.text[:300]
-    consent_id, file_hash = _consent_fields(r.text)
-    _exhaust_quota(env, uid)
-    r = env.client.post(
-        "/analyze",
-        files={"file": ("test.log", b"2024-01-01 10:00:00 INFO hi\n", "text/plain")},
-        data={"output": "html", "request_id": ""},
-    )
-    assert r.status_code == 402, r.text[:300]
-    cid, fhash = _consent_fields(r.text)
-    assert _confirm(env, cid, fhash, csrf).status_code == 200
-    assert _http_balance(env) == 2
+    assert "product-checkout-form" in r.text
+    assert "/credits" not in r.text
+    with env.sessions() as db:
+        consent = db.query(M.Consent).filter(
+            M.Consent.user_id == uid).one()
+        consent_id, file_hash = str(consent.id), consent.input_hash
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 402, r.text[:300]
     assert OVERSIZE_402 in r.text
-    assert _http_balance(env) == 2
-    assert _ops(env, uid) == []  # no partial reservation
+    assert len(_ops(env, uid)) == 0  # no operation or partial state
+
+
+def test_entitlement_consumed_before_confirmation_402(oversize_env):
+    """Dollar analog of insufficient-at-confirmation: the entitlement
+    is redeemed by a first run between quote and confirm."""
+    env = oversize_env
+    _, uid, csrf = _signup_verify_login(env)
+    content = _line_content(50001)
+    _seed_oversize_entitlement(env, uid, content)
+    r = _post_oversize(env, content)
+    c1, h1 = _consent_fields(r.text)
+    r = _post_oversize(env, content)
+    c2, h2 = _consent_fields(r.text)
+    assert _confirm(env, c2, h2, csrf).status_code == 200
+    r = _confirm(env, c1, h1, csrf)
+    assert r.status_code == 402, r.text[:300]
+    assert OVERSIZE_402 in r.text
+    assert _http_balance(env) == 10
+    assert len(_ops(env, uid)) == 1  # only the first run
 
 
 # --- anonymous / unsupported ---------------------------------------------------
@@ -400,6 +436,7 @@ def test_unsupported_line_ceiling_rejected_before_consent(oversize_env):
 def test_forgery_cases(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     # Wrong fingerprint -> 409.
@@ -413,6 +450,7 @@ def test_forgery_cases(oversize_env):
 def test_cross_user_consent_409_with_valid_csrf(oversize_env):
     env = oversize_env
     _, uid_a, csrf_a = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid_a, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     _, _, csrf_b = _signup_verify_login(env)
@@ -424,6 +462,7 @@ def test_cross_user_consent_409_with_valid_csrf(oversize_env):
 def test_expired_consent_409_and_missing_pending_410(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     with env.sessions() as db:
@@ -447,6 +486,7 @@ def test_expired_consent_409_and_missing_pending_410(oversize_env):
 def test_input_substitution_409(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     import pathlib
@@ -462,6 +502,7 @@ def test_input_substitution_409(oversize_env):
 def test_same_consent_different_key_409(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
@@ -476,19 +517,21 @@ def test_same_consent_different_key_409(oversize_env):
 def test_completed_replay_does_not_recharge(oversize_env):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
-    assert _http_balance(env) == 7  # 10 - 3
+    assert _http_balance(env) == 10  # dollar run: credits untouched
     r = _confirm(env, consent_id, file_hash, csrf)
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 7  # replay does not recharge
+    assert _http_balance(env) == 10  # replay does not recharge
     assert len(_ops(env, uid)) == 1
 
 
 def test_failed_replay_does_not_restart(oversize_env, monkeypatch):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     monkeypatch.setattr(
@@ -529,6 +572,7 @@ def test_cancel_oversize_releases_one_live_lockout(oversize_env):
     import pathlib
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     assert r.status_code == 402, r.text[:300]
     assert "/analyze/paid/cancel" in r.text
@@ -547,7 +591,7 @@ def test_cancel_oversize_releases_one_live_lockout(oversize_env):
     # charge and no operation from the cancelled consent.
     r = _post_oversize(env, _line_content(50002))
     assert r.status_code == 402, r.text[:300]
-    assert "Use 3 credits" in r.text
+    assert "Buy \u2014 $5" in r.text  # fresh dollar quote, no lockout
     assert _http_balance(env) == 10
     assert _ops(env, uid) == []
 
@@ -556,6 +600,7 @@ def test_cancel_rejects_bad_csrf_and_other_user(oversize_env):
     import pathlib
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     assert r.status_code == 402, r.text[:300]
     consent_id, _ = _consent_fields(r.text)
@@ -581,6 +626,7 @@ def test_confirm_passes_original_bytes_to_worker(oversize_env, monkeypatch):
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
     content = _line_content(50001)
+    _seed_oversize_entitlement(env, uid, content)
     r = _post_oversize(env, content)
     assert r.status_code == 402, r.text[:300]
     consent_id, file_hash = _consent_fields(r.text)
@@ -658,16 +704,16 @@ def test_pending_cleanup_on_success_and_failure(oversize_env, monkeypatch):
     import pathlib
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     consent_id, file_hash = _consent_fields(r.text)
     assert _confirm(env, consent_id, file_hash, csrf).status_code == 200
     pending_dir = pathlib.Path(main._PAID_PENDING_DIR)
     assert list(pending_dir.glob("pending-*.bin")) == []
     assert list(pending_dir.glob("pending-*.meta.json")) == []
-    # Failure path cleans up too (fresh consent: the first is consumed).
-    with env.sessions() as db:
-        C.grant_credits(db, uid, "purchase", "test-pack-2", 5)
-        db.commit()
+    # Failure path cleans up too (fresh entitlement + consent: the
+    # first entitlement is redeemed; F1 allows re-purchase).
+    _seed_oversize_entitlement(env, uid, _line_content(50001))
     r = _post_oversize(env, _line_content(50001))
     assert r.status_code == 402, r.text[:300]
     consent_id, file_hash = _consent_fields(r.text)
@@ -777,13 +823,20 @@ def test_oversize_idempotency_replay_under_full_pool(oversize_env):
     # replay-under-a-full-pool contract that the first-scope lock
     # guarantees on Postgres, and exercises the oversize first-scope
     # lock path (global:oversize sorts before global:paid).
+    # PREMISE NOTE (Phase B): the HTTP quote now mints a product
+    # consent, so the credit consent for this admission-API contract
+    # test is created directly, as in _direct_oversize_op.
     env = oversize_env
     _, uid, csrf = _signup_verify_login(env)
-    r = _post_oversize(env, _line_content(50001))
-    consent_id, file_hash = _consent_fields(r.text)
+    content = _line_content(50001)
+    digest = fingerprint("big.log", content)
+    with env.sessions() as db:
+        consent = C.create_consent(db, uid, "oversize_analysis", digest, 3)
+        db.commit()
+        consent_id = str(consent.id)
     admit_kwargs = dict(
         operation_type="oversize_analysis",
-        idempotency_key=consent_id, request_hash=file_hash, cost=3,
+        idempotency_key=consent_id, request_hash=digest, cost=3,
         consent_id=uuid.UUID(consent_id), worker_id="test-worker",
         extra_scopes=[("global:oversize", 1)],
     )

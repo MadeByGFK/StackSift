@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift — {{ product_name }}</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css?v=4">
+<style>
+.consent-box { max-width: 520px; margin: 48px auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 32px; text-align: center; }
+.consent-box h1 { margin: 0 0 12px; font-size: 1.5rem; }
+.consent-box .file { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: rgba(0,0,0,0.2); padding: 8px 12px; border-radius: 6px; margin: 12px 0; word-break: break-all; }
+.consent-actions { display: flex; gap: 12px; justify-content: center; }
+.btn-confirm { background: var(--accent); color: #1a1a2e; border: none; padding: 12px 32px; border-radius: 8px; font-weight: 700; font-size: 1rem; cursor: pointer; }
+.btn-confirm:hover { filter: brightness(1.1); }
+.btn-cancel { border: 1px solid var(--border); color: var(--text); background: transparent; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 1rem; cursor: pointer; font-family: inherit; }
+.btn-cancel:hover { border-color: var(--accent); }
+.consent-note { margin-top: 20px; font-size: 0.85rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="consent-box">
+  {% if state == "ready" %}
+  <h1>Payment received — {{ product_name }}</h1>
+  <p>Your purchase is settled and ready to run. Re-confirm the same
+     files below to start — you will not be charged again.</p>
+  {% if filename %}<div class="file">{{ filename }}</div>{% endif %}
+  <form method="post" action="{{ confirm_action }}" class="consent-actions">
+    <input type="hidden" name="consent_id" value="{{ consent_id }}">
+    <input type="hidden" name="file_hash" value="{{ file_hash }}">
+    <input type="hidden" name="idempotency_key" value="{{ consent_id }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn-confirm">{{ run_label }}</button>
+  </form>
+  <p class="consent-note">Exports are included. Results are available for 90 days.</p>
+  {% elif state == "settling" %}
+  <h1>Payment received — {{ product_name }}</h1>
+  <p>Your payment is still settling. This usually takes a few seconds —
+     you do not need to pay again. Check again in a moment and this page
+     will offer the Run action for the files you bought.</p>
+  {% if filename %}<div class="file">{{ filename }}</div>{% endif %}
+  <div class="consent-actions">
+    <a href="{{ return_url }}" class="btn-confirm">Check again</a>
+    <a href="/" class="btn-cancel">Home</a>
+  </div>
+  <p class="consent-note">If this does not clear shortly, contact disputes@goodfolkdigital.com.</p>
+  {% elif state == "no_consent" %}
+  <h1>Payment received — {{ product_name }}</h1>
+  <p>You already hold this purchase — do not buy it again. The upload
+     from before checkout is no longer saved, so upload the same
+     file(s) once more and the quote step will offer the Run action
+     instead of checkout.</p>
+  <div class="consent-actions">
+    <a href="{{ start_path }}" class="btn-confirm">Upload the same files</a>
+    <a href="/" class="btn-cancel">Home</a>
+  </div>
+  <p class="consent-note">Exports are included. Results are available for 90 days.</p>
+  {% elif state == "cancelled" %}
+  <h1>Checkout cancelled — {{ product_name }}</h1>
+  <p>Nothing was charged. You can start again whenever you are ready.</p>
+  <div class="consent-actions">
+    <a href="{{ start_path }}" class="btn-confirm">Start again</a>
+    <a href="/" class="btn-cancel">Home</a>
+  </div>
+  {% else %}
+  <h1>{{ product_name }}</h1>
+  <p>We could not find a purchase or a pending upload for this
+     checkout. If you were charged, contact
+     disputes@goodfolkdigital.com and we will sort it out.</p>
+  <div class="consent-actions">
+    <a href="/" class="btn-cancel">Home</a>
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>

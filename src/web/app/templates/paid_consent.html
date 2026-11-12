@@ -41,7 +41,45 @@
   {% if limits_line %}<p>{{ limits_line }}</p>{% endif %}
   <div class="cost">{{ cost_label }}</div>
   <div class="cost-label">{{ cost_sentence }}</div>
+  {% if not product_mode %}
   <div class="balance">Your balance: {{ eligible }} eligible credits ({{ balance }} total)</div>
+  {% endif %}
+  {% if product_checkout %}
+  {# Issue #164 Phase B: dollar checkout starts here; settlement is
+     webhook-only and the entitlement binds to this content digest. #}
+  <form id="product-checkout-form" class="consent-actions">
+    <input type="hidden" name="sku" value="{{ product_sku }}">
+    <input type="hidden" name="content_digest" value="{{ file_hash }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn-confirm">{{ confirm_label }}</button>
+    {# Oversize gets NO cancel link here: its one sensible Cancel
+       control is the CSRF cancel POST rendered below (it releases
+       the one-live-consent lockout) — on BOTH billing branches. #}
+    {% if operation_type != "oversize_analysis" %}
+    <a href="/" class="btn-cancel">{{ cancel_label }}</a>
+    {% endif %}
+  </form>
+  <p class="consent-note" id="product-checkout-promise">{{ promise }}</p>
+  <p class="consent-note" id="product-checkout-error" role="alert"></p>
+  <script>
+  document.getElementById('product-checkout-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var form = ev.target;
+    var body = new URLSearchParams(new FormData(form));
+    fetch('/products/checkout', {method: 'POST', body: body, credentials: 'same-origin'})
+      .then(function (r) { return r.json().then(function (j) { return {ok: r.ok, j: j}; }); })
+      .then(function (res) {
+        if (res.ok && res.j.checkout_url) { window.location = res.j.checkout_url; return; }
+        document.getElementById('product-checkout-error').textContent =
+          (res.j && res.j.error) || 'Checkout is unavailable right now.';
+      })
+      .catch(function () {
+        document.getElementById('product-checkout-error').textContent =
+          'Checkout is unavailable right now.';
+      });
+  });
+  </script>
+  {% else %}
   <form method="post" action="{{ confirm_action or "/analyze/paid" }}" class="consent-actions">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
     <input type="hidden" name="file_hash" value="{{ file_hash }}">
@@ -54,9 +92,15 @@
     <a href="/" class="btn-cancel">{{ cancel_label }}</a>
     {% endif %}
   </form>
+  {% endif %}
   {# PR #111 finding 5: for oversize, Cancel must actually release the
      one-live-consent lockout, so it POSTs (CSRF-protected) to the cancel
-     endpoint instead of merely navigating to "/". #}
+     endpoint instead of merely navigating to "/". PR #182 finding 3:
+     this must render on the dollar checkout branch too — _product_quote
+     already created the unconsumed oversize consent there, so a mere
+     link left the one-live check blocking a different upload until
+     expiry. The checkout form above omits its cancel link for oversize
+     so exactly one Cancel control renders per state. #}
   {% if operation_type == "oversize_analysis" %}
   <form method="post" action="/analyze/paid/cancel" class="consent-actions">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
