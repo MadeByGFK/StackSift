@@ -1272,6 +1272,175 @@ def test_runtime_replay_after_redemption_returns_report_not_purchase(p164b_env):
     assert "product-checkout-form" not in replay.text
 
 
+# --- PR #182 remediation: Codex findings 1-3 ---------------------------------------------
+
+def _capacity_snapshot(env, user_id):
+    from app import models as M
+    keys = ("global:batch", "global:oversize", "global:paid",
+            f"user:{user_id}:paid")
+    with env.sessions() as db:
+        rows = {r.scope_key: r.used for r in db.query(M.CapacityScope).all()}
+    return {k: rows.get(k, 0) for k in keys}
+
+
+def _lapse_entitlement(env, ent_id):
+    from app import credits as C, models as M
+    with env.sessions() as db:
+        ent = db.get(M.Entitlement, ent_id)
+        ent.redemption_deadline = C._utcnow() - timedelta(seconds=1)
+        db.commit()
+
+
+def test_lapsed_batch_redemption_leaves_capacity_unchanged(p164b_env):
+    """Finding 1 (P1): a lapsed Batch redemption must roll back the
+    admission capacity it acquired (global:batch is single-slot, so a
+    leak permanently exhausts it) while the entitlement still lands
+    in refund_eligible and the endpoint answers 410 (B-11)."""
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    files = _batch_files()
+    _, ent_id = _seed_entitlement(env, uid, "batch", _batch_digest(files))
+    _lapse_entitlement(env, ent_id)
+    r = _post_batch(env, files)
+    assert r.status_code == 402, r.text[:300]
+    from app import models as _M1
+    with env.sessions() as db:
+        consent = db.query(_M1.Consent).filter(
+            _M1.Consent.user_id == uid,
+            _M1.Consent.operation_type == "batch").one()
+        consent_id, file_hash = str(consent.id), consent.input_hash
+    before = _capacity_snapshot(env, uid)
+    r = env.client.post(
+        "/batch/paid",
+        data={"consent_id": consent_id, "file_hash": file_hash,
+              "idempotency_key": consent_id, "csrf_token": csrf})
+    assert r.status_code == 410, r.text[:300]
+    assert _capacity_snapshot(env, uid) == before
+    from app import models as M
+    with env.sessions() as db:
+        assert db.get(M.Entitlement, ent_id).status == "refund_eligible"
+        assert db.query(M.Operation).count() == 0
+
+
+def test_lapsed_oversize_redemption_leaves_capacity_unchanged(p164b_env):
+    """Finding 1 (P1), oversize twin: global:oversize is single-slot."""
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    content = (b"2024-01-01 10:00:00 INFO heartbeat ok\n" * 50001)
+    from app.analysis_admission import fingerprint
+    digest = fingerprint("big.log", content)
+    _, ent_id = _seed_entitlement(env, uid, "large_file_analysis", digest)
+    _lapse_entitlement(env, ent_id)
+    r = env.client.post(
+        "/analyze",
+        files={"file": ("big.log", content, "text/plain")},
+        data={"output": "html", "request_id": ""})
+    assert r.status_code == 402, r.text[:300]
+    from app import models as _M2
+    with env.sessions() as db:
+        consent = db.query(_M2.Consent).filter(
+            _M2.Consent.user_id == uid,
+            _M2.Consent.operation_type == "oversize_analysis").one()
+        consent_id, file_hash = str(consent.id), consent.input_hash
+    before = _capacity_snapshot(env, uid)
+    r = env.client.post(
+        "/analyze/paid",
+        data={"consent_id": consent_id, "file_hash": file_hash,
+              "idempotency_key": consent_id, "csrf_token": csrf})
+    assert r.status_code == 410, r.text[:300]
+    assert _capacity_snapshot(env, uid) == before
+    from app import models as M
+    with env.sessions() as db:
+        assert db.get(M.Entitlement, ent_id).status == "refund_eligible"
+        assert db.query(M.Operation).count() == 0
+
+
+def test_runtime_product_checkout_return_settling_then_run(p164b_env):
+    """Finding 2 (P1), DOM-level: the URL Stripe returns the buyer to
+    (read from the actual session-creation payload) renders a
+    settlement-aware surface — 'still settling' before the webhook,
+    the Run form for the SAME pending consent after it — never the
+    plain home page and never a second checkout prompt."""
+    from urllib.parse import urlparse
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    r = _post_compare(env)
+    assert r.status_code == 402, r.text[:300]
+    from app import models as _M3
+    with env.sessions() as db:
+        consent = db.query(_M3.Consent).filter(
+            _M3.Consent.user_id == uid,
+            _M3.Consent.operation_type == "compare_logs").one()
+        consent_id, file_hash = str(consent.id), consent.input_hash
+    captured = _fake_stripe(env.monkeypatch)
+    r = _checkout(env, csrf, "compare", _compare_digest())
+    assert r.status_code == 200, r.text[:300]
+    parsed = urlparse(captured[-1]["data"]["success_url"])
+    landing = parsed.path + "?" + parsed.query
+    r = env.client.get(landing)
+    assert r.status_code == 200, r.text[:300]
+    assert "still settling" in r.text
+    assert "product-checkout-form" not in r.text
+    # Settle the very purchase the checkout created (webhook-only).
+    from app import models as M
+    with env.sessions() as db:
+        purchase = db.query(M.ProductPurchase).filter(
+            M.ProductPurchase.user_id == uid).one()
+        ref = SimpleNamespace(id=purchase.id, user_id=purchase.user_id)
+        session_id = purchase.stripe_session_id
+    _LINE_PRICE["id"] = PRICE_BY_SKU["compare"]
+    ev = _completed_event("evt_return_1", ref, sku="compare",
+                          digest=_compare_digest(), session_id=session_id)
+    assert _post_event(env, ev).status_code == 200
+    r = env.client.get(landing)
+    assert r.status_code == 200, r.text[:300]
+    assert "Payment received" in r.text
+    assert "already paid" in r.text  # the Run path
+    assert "product-checkout-form" not in r.text  # no duplicate checkout
+    run_consent, run_hash = _consent_fields(r.text)
+    assert (run_consent, run_hash) == (consent_id, file_hash)
+    r = _confirm_compare(env, run_consent, run_hash, csrf)
+    assert r.status_code == 200, r.text[:300]
+
+
+def test_runtime_oversize_cancel_post_on_checkout_branch_releases_lockout(p164b_env):
+    """Finding 3 (P2), DOM-level: on the dollar checkout branch the
+    oversize consent page renders the CSRF cancel POST (not only a
+    link home), exactly one Cancel control renders, and posting the
+    cancel releases the one-live-consent lockout so a DIFFERENT
+    oversize upload is accepted."""
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    content = (b"2024-01-01 10:00:00 INFO heartbeat ok\n" * 50001)
+    r = env.client.post(
+        "/analyze",
+        files={"file": ("big.log", content, "text/plain")},
+        data={"output": "html", "request_id": ""})
+    assert r.status_code == 402, r.text[:300]
+    assert "product-checkout-form" in r.text  # checkout branch
+    assert 'action="/analyze/paid/cancel"' in r.text
+    assert r.text.count('class="btn-cancel"') == 1  # one Cancel control
+    cancel_form = r.text.split('action="/analyze/paid/cancel"', 1)[1]
+    consent_id = re.search(r'name="consent_id" value="([^"]+)"',
+                           cancel_form).group(1)
+    cancel_csrf = re.search(r'name="csrf_token" value="([^"]+)"',
+                            cancel_form).group(1)
+    r = env.client.post(
+        "/analyze/paid/cancel",
+        data={"consent_id": consent_id, "csrf_token": cancel_csrf})
+    assert r.status_code == 200, r.text[:200]
+    # A different oversize upload now quotes instead of hitting the
+    # one-live-consent lockout error.
+    other = (b"2024-01-01 10:00:01 INFO a different heartbeat\n" * 50001)
+    r = env.client.post(
+        "/analyze",
+        files={"file": ("other.log", other, "text/plain")},
+        data={"output": "html", "request_id": ""})
+    assert r.status_code == 402, r.text[:300]
+    assert "already have an oversize upload" not in r.text
+    assert "product-checkout-form" in r.text
+
+
 # --- B-21: PostgreSQL replay-vs-settlement race ------------------------------------------------
 
 @pytest.mark.skipif(not os.environ.get("TEST_POSTGRES_URL"),
