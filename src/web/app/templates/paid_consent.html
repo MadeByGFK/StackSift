@@ -52,7 +52,12 @@
     <input type="hidden" name="content_digest" value="{{ file_hash }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button type="submit" class="btn-confirm">{{ confirm_label }}</button>
+    {# Oversize gets NO cancel link here: its one sensible Cancel
+       control is the CSRF cancel POST rendered below (it releases
+       the one-live-consent lockout) — on BOTH billing branches. #}
+    {% if operation_type != "oversize_analysis" %}
     <a href="/" class="btn-cancel">{{ cancel_label }}</a>
+    {% endif %}
   </form>
   <p class="consent-note" id="product-checkout-promise">{{ promise }}</p>
   <p class="consent-note" id="product-checkout-error" role="alert"></p>
@@ -90,8 +95,13 @@
   {% endif %}
   {# PR #111 finding 5: for oversize, Cancel must actually release the
      one-live-consent lockout, so it POSTs (CSRF-protected) to the cancel
-     endpoint instead of merely navigating to "/". #}
-  {% if operation_type == "oversize_analysis" and not product_checkout %}
+     endpoint instead of merely navigating to "/". PR #182 finding 3:
+     this must render on the dollar checkout branch too — _product_quote
+     already created the unconsumed oversize consent there, so a mere
+     link left the one-live check blocking a different upload until
+     expiry. The checkout form above omits its cancel link for oversize
+     so exactly one Cancel control renders per state. #}
+  {% if operation_type == "oversize_analysis" %}
   <form method="post" action="/analyze/paid/cancel" class="consent-actions">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
