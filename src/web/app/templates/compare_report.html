@@ -36,7 +36,7 @@
     <div class="report-actions" style="margin-top:1rem">
       <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
+        <button type="submit" class="btn-small">{% if export_unlocked %}Export PDF (free){% else %}Export PDF (2 credits){% endif %}</button>
       </form>
     </div>
     {% endif %}

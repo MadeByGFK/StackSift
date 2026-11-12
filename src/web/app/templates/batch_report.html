@@ -34,9 +34,13 @@
     <div class="report-actions" style="margin-top:1rem">
       <form method="post" action="/reports/{{ report_id }}/pdf" style="display:inline">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn-small">Export PDF (2 credits)</button>
+        <button type="submit" class="btn-small">{% if export_unlocked %}Export PDF (free){% else %}Export PDF (2 credits){% endif %}</button>
       </form>
+      {% if export_unlocked %}
+      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">Exports are included with this report — re-downloads are free.</p>
+      {% else %}
       <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0 0">One 2-credit charge covers the whole combined report — never 2 credits per file. Re-downloads are free.</p>
+      {% endif %}
     </div>
     {% endif %}
   </section>

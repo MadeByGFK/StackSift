@@ -16,6 +16,59 @@ down_revision = "0022_report_ss_id"
 branch_labels = None
 depends_on = None
 
+_CONSENTS_COLS = (
+    "id, user_id, operation_type, input_hash, max_cost, pricing_version, "
+    "expires_at, consumed_by_operation_id, created_at, "
+    "consumed_by_free_request_id"
+)
+
+
+def _rebuild_consents_sqlite(*, sku: bool):
+    """Rebuild the sqlite consents table with the billing-mode CHECK
+    (sku=True, upgrade) or the legacy positive-cost CHECK restored
+    and sku dropped (sku=False, downgrade).
+
+    The CREATE TABLE mirrors the 0022-era migrated DDL exactly —
+    including migration 0004's column-level
+    ``fk_consent_free_request`` — so 0004's downgrade (a plain
+    DROP COLUMN of consumed_by_free_request_id, possible only for
+    column-level FKs on SQLite) keeps working.
+    """
+    sku_col = ",\n\tsku VARCHAR(40)" if sku else ""
+    check = (
+        "CONSTRAINT ck_consent_cost_matches_billing_mode CHECK "
+        "((sku IS NULL AND max_cost > 0) OR (sku IS NOT NULL AND max_cost = 0))"
+        if sku else
+        "CONSTRAINT ck_consent_max_cost_positive CHECK (max_cost > 0)")
+    cols = _CONSENTS_COLS + (", sku" if sku else "")
+    select_cols = _CONSENTS_COLS + (", NULL" if sku else "")
+    op.execute("PRAGMA foreign_keys=OFF")
+    op.execute(f"""
+CREATE TABLE consents_new (
+\tid VARCHAR(36) NOT NULL,
+\tuser_id VARCHAR(36) NOT NULL,
+\toperation_type VARCHAR(30) NOT NULL,
+\tinput_hash VARCHAR(64) NOT NULL,
+\tmax_cost INTEGER NOT NULL,
+\tpricing_version INTEGER DEFAULT '1' NOT NULL,
+\texpires_at DATETIME NOT NULL,
+\tconsumed_by_operation_id VARCHAR(36),
+\tcreated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+\tconsumed_by_free_request_id VARCHAR(255) CONSTRAINT fk_consent_free_request REFERENCES free_requests(request_id){sku_col},
+\tPRIMARY KEY (id),
+\t{check},
+\tFOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
+\tUNIQUE (consumed_by_operation_id),
+\tFOREIGN KEY(consumed_by_operation_id) REFERENCES operations (id)
+)""")
+    op.execute(f"INSERT INTO consents_new ({cols}) SELECT {select_cols} FROM consents")
+    op.execute("DROP TABLE consents")
+    op.execute("ALTER TABLE consents_new RENAME TO consents")
+    op.execute("CREATE INDEX ix_consents_user_id ON consents (user_id)")
+    op.execute("CREATE UNIQUE INDEX ix_consents_consumed_by_free_request_id "
+               "ON consents (consumed_by_free_request_id)")
+    op.execute("PRAGMA foreign_keys=ON")
+
 
 def upgrade():
     # --- product_purchases -------------------------------------------
@@ -62,17 +115,19 @@ def upgrade():
     # NOT batch_alter_table: batch recreation rewrites consents'
     # column-level FK on consumed_by_free_request_id as a table-level
     # FK, and SQLite cannot DROP COLUMN a table-level-FK column —
-    # migration 0004's downgrade (plain drop_column) would break.
-    op.add_column("consents", sa.Column("sku", sa.String(40), nullable=True))
-    if op.get_bind().dialect.name != "sqlite":
+    # migration 0004's downgrade (plain drop_column) would break. On
+    # SQLite the table is rebuilt manually with the 0004 column-level
+    # FK form preserved verbatim; on PostgreSQL the constraint swap
+    # is direct.
+    if op.get_bind().dialect.name == "sqlite":
+        _rebuild_consents_sqlite(sku=True)
+    else:
+        op.add_column("consents", sa.Column("sku", sa.String(40), nullable=True))
         op.drop_constraint("ck_consent_max_cost_positive", "consents",
                            type_="check")
         op.create_check_constraint(
             "ck_consent_cost_matches_billing_mode", "consents",
             "(sku IS NULL AND max_cost > 0) OR (sku IS NOT NULL AND max_cost = 0)")
-    # On SQLite the legacy positive-cost CHECK stays in migrated
-    # schemas; the billing-mode invariant is enforced by the model
-    # CHECK on create_all databases and by validate_consent in code.
 
     # --- operations (B-8/B-16) ------------------------------------------
     with op.batch_alter_table("operations") as batch_op:
@@ -99,12 +154,14 @@ def downgrade():
         batch_op.drop_constraint("uq_operations_entitlement_redemption_id",
                                  type_="unique")
         batch_op.drop_column("entitlement_redemption_id")
-    if op.get_bind().dialect.name != "sqlite":
+    if op.get_bind().dialect.name == "sqlite":
+        _rebuild_consents_sqlite(sku=False)
+    else:
         op.drop_constraint("ck_consent_cost_matches_billing_mode",
                            "consents", type_="check")
         op.create_check_constraint("ck_consent_max_cost_positive",
                                    "consents", "max_cost > 0")
-    op.drop_column("consents", "sku")
+        op.drop_column("consents", "sku")
     with op.batch_alter_table("entitlement_redemptions") as batch_op:
         batch_op.alter_column("source_result_id", existing_type=sa.String(36),
                               nullable=False)

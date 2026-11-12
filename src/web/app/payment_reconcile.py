@@ -441,6 +441,37 @@ def compute_reconciliation(
         stripe_session_ids.add(s["id"])
     product_stripe_gross = sum(int(s.get("amount_total") or 0) for s in product_included)
     product_stripe_session_ids = {s["id"] for s in product_included}
+    # Issue #164 Phase B (B-14): per-SKU product buckets on BOTH
+    # sides. Stripe side keys on the session metadata ``sku`` (the
+    # same metadata _family_of keys on); the aggregate product line
+    # remains as a roll-up, asserted consistent below.
+    product_stripe_gross_by_sku: dict[str, int] = {}
+    for s in product_included:
+        _sku = (s.get("metadata") or {}).get("sku") or "unknown"
+        product_stripe_gross_by_sku[_sku] = \
+            product_stripe_gross_by_sku.get(_sku, 0) + int(s.get("amount_total") or 0)
+    product_stripe_refunds_by_sku: dict[str, int] = {}
+    product_stripe_disputes_by_sku: dict[str, int] = {}
+    # PI -> sku map for charge-side bucketing: session metadata
+    # first; the ProductPurchase snapshot (queried with product_pis
+    # below) fills the rest.
+    _pi_sku: dict[str, str] = {}
+    for _s in list(sessions) + list(wide_sessions or []):
+        if _family_of(_s) == "product":
+            _pi = _s.get("payment_intent")
+            if isinstance(_pi, dict):
+                _pi = _pi.get("id")
+            _sku = (_s.get("metadata") or {}).get("sku")
+            if _pi and _sku:
+                _pi_sku[_pi] = _sku
+
+    def _charge_sku(c) -> str:
+        _pi = c.get("payment_intent")
+        if isinstance(_pi, dict):
+            _pi = _pi.get("id")
+        if _pi and _pi in _pi_sku:
+            return _pi_sku[_pi]
+        return (c.get("metadata") or {}).get("sku") or "unknown"
 
     # Issue #164 (A8/P2-2): charge-side family partition. A charge is
     # a PRODUCT charge when its own metadata says kind=product, OR
@@ -466,12 +497,15 @@ def compute_reconciliation(
         if _pi:
             _charge_pis.add(_pi)
     if _charge_pis:
-        for (_pi,) in db.execute(
-            select(M.ProductPurchase.stripe_payment_intent_id).where(
+        for (_pi, _sku) in db.execute(
+            select(M.ProductPurchase.stripe_payment_intent_id,
+                   M.ProductPurchase.sku).where(
                 M.ProductPurchase.stripe_payment_intent_id.in_(_charge_pis))
         ).all():
             if _pi:
                 product_pis.add(_pi)
+                if _sku and _pi not in _pi_sku:
+                    _pi_sku[_pi] = _sku
 
     def _is_product_charge(c) -> bool:
         meta = c.get("metadata") or {}
@@ -496,6 +530,9 @@ def compute_reconciliation(
         if refunded > 0:
             if is_product:
                 product_stripe_refunds += refunded
+                _sku = _charge_sku(c)
+                product_stripe_refunds_by_sku[_sku] = \
+                    product_stripe_refunds_by_sku.get(_sku, 0) + refunded
             else:
                 stripe_refunds[pack] = stripe_refunds.get(pack, 0) + refunded
                 refund_charges.append({"charge_id": c["id"], "pack": pack,
@@ -530,6 +567,9 @@ def compute_reconciliation(
                     # was initialised 0 and never populated) and never
                     # enter the pack disputed_charges differences.
                     product_stripe_disputes += dispute_portion
+                    _sku = _charge_sku(c)
+                    product_stripe_disputes_by_sku[_sku] = \
+                        product_stripe_disputes_by_sku.get(_sku, 0) + dispute_portion
                     continue
                 stripe_disputes[pack] = stripe_disputes.get(pack, 0) \
                     + dispute_portion
@@ -844,6 +884,62 @@ def compute_reconciliation(
 
     product_ledger_disputes = sum(
         _ledger_dispute_cents(p) for p in product_disputed)
+    # B-14 ledger-side per-SKU buckets, keyed on ProductPurchase.sku
+    # with the same per-row amounts the aggregate sums use.
+    product_ledger_gross_by_sku: dict[str, int] = {}
+    for p in product_purchases:
+        product_ledger_gross_by_sku[p.sku] = \
+            product_ledger_gross_by_sku.get(p.sku, 0) + (p.amount_cents or 0)
+    product_ledger_refunds_by_sku: dict[str, int] = {}
+    for p in product_refunded:
+        _amt = (p.refunded_cents if p.refunded_cents is not None
+                else (p.amount_cents or 0) if p.status == "refunded" else 0)
+        product_ledger_refunds_by_sku[p.sku] = \
+            product_ledger_refunds_by_sku.get(p.sku, 0) + _amt
+    product_ledger_disputes_by_sku: dict[str, int] = {}
+    for p in product_disputed:
+        product_ledger_disputes_by_sku[p.sku] = \
+            product_ledger_disputes_by_sku.get(p.sku, 0) + _ledger_dispute_cents(p)
+    # Per-SKU comparison: a doctored amount in one SKU mismatches
+    # only that bucket and the roll-up.
+    _all_skus = (set(product_stripe_gross_by_sku) | set(product_ledger_gross_by_sku)
+                 | set(product_stripe_refunds_by_sku) | set(product_ledger_refunds_by_sku)
+                 | set(product_stripe_disputes_by_sku) | set(product_ledger_disputes_by_sku))
+    product_per_sku: dict[str, dict] = {}
+    for _sku in sorted(_all_skus):
+        _sg = product_stripe_gross_by_sku.get(_sku, 0)
+        _sr = product_stripe_refunds_by_sku.get(_sku, 0)
+        _sd = product_stripe_disputes_by_sku.get(_sku, 0)
+        _lg = product_ledger_gross_by_sku.get(_sku, 0)
+        _lr = product_ledger_refunds_by_sku.get(_sku, 0)
+        _ld = product_ledger_disputes_by_sku.get(_sku, 0)
+        product_per_sku[_sku] = {
+            "stripe_gross_cents": _sg, "stripe_refund_cents": _sr,
+            "stripe_dispute_cents": _sd, "ledger_gross_cents": _lg,
+            "ledger_refund_cents": _lr, "ledger_dispute_cents": _ld,
+            "stripe_net_cents": _sg - _sr - _sd,
+            "ledger_net_cents": _lg - _lr - _ld,
+            "diff_cents": (_sg - _sr - _sd) - (_lg - _lr - _ld),
+        }
+        if product_per_sku[_sku]["diff_cents"] != 0:
+            differences.append({
+                "kind": "sku_total_mismatch", "family": "product",
+                "sku": _sku,
+                "stripe_net_cents": product_per_sku[_sku]["stripe_net_cents"],
+                "ledger_net_cents": product_per_sku[_sku]["ledger_net_cents"],
+                "diff_cents": product_per_sku[_sku]["diff_cents"],
+            })
+    # Internal consistency: the buckets must sum to the roll-up, so
+    # the extension cannot silently drop a session or a purchase.
+    if (sum(product_stripe_gross_by_sku.values()) != product_stripe_gross
+            or sum(product_ledger_gross_by_sku.values()) != product_ledger_gross
+            or sum(product_stripe_refunds_by_sku.values()) != product_stripe_refunds
+            or sum(product_ledger_refunds_by_sku.values()) != product_ledger_refunds
+            or sum(product_stripe_disputes_by_sku.values()) != product_stripe_disputes
+            or sum(product_ledger_disputes_by_sku.values()) != product_ledger_disputes):
+        differences.append({
+            "kind": "product_sku_bucket_mismatch", "family": "product",
+        })
     for s in product_included:
         if s["id"] not in product_ledger_session_ids:
             differences.append({
@@ -898,6 +994,7 @@ def compute_reconciliation(
             "stripe_net_cents": product_stripe_net,
             "ledger_net_cents": product_ledger_net,
             "diff_cents": product_stripe_net - product_ledger_net,
+            "per_sku": product_per_sku,
         },
     }
 
