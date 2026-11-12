@@ -879,8 +879,11 @@ async def product_checkout(
 
     entry = stripe_billing.get_product_sku(sku)
     origin = str(request.base_url).rstrip("/")
-    success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/?product_checkout=success&sku={sku}"
-    cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/?product_checkout=cancelled&sku={sku}"
+    # PR #182 finding 2: the return landing is the settlement-aware
+    # /products/return surface, NOT the plain home page (which ignored
+    # the parameter and dead-ended a buyer who had just paid).
+    success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/products/return?product_checkout=success&sku={sku}"
+    cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/products/return?product_checkout=cancelled&sku={sku}"
     try:
         stripe_billing._secret_key()
         if stripe_billing.product_price_id(sku) is None:
@@ -922,6 +925,122 @@ async def product_checkout(
         "checkout_url": checkout_url, "purchase_id": str(purchase.id),
         "promise": stripe_billing.PAY_NOW_PROMISE,
     })
+
+
+PRODUCT_OPERATION_BY_SKU = {sku: op for op, sku in PRODUCT_SKU_BY_OPERATION.items()}
+
+_PRODUCT_RETURN_ACTIONS = {
+    "compare_logs": ("/compare/paid", "Run comparison — already paid", "/compare"),
+    "batch": ("/batch/paid", "Run batch analysis — already paid", "/batch"),
+    "oversize_analysis": ("/analyze/paid", "Run oversize analysis — already paid", "/"),
+}
+
+
+@app.get("/products/return", response_class=HTMLResponse)
+async def product_return(request: Request):
+    """Issue #164 Phase B (PR #182 finding 2): settlement-aware
+    landing for a digest-SKU checkout return.
+
+    Settlement is webhook-only — this page grants nothing. It reads
+    the buyer's own state for the SKU and renders exactly one honest
+    state: ``ready`` (a settled entitlement + the still-pending
+    consent for the same files: the Run form, never a second checkout
+    prompt), ``settling`` (payment received, webhook not landed yet:
+    check-again link, no checkout prompt), ``no_consent`` (entitlement
+    held but the pending upload is gone: re-upload the same files and
+    the quote step offers Run), ``cancelled``, or ``missing``.
+    The pending consent identity (consent_id + file_hash) is resolved
+    server-side from the buyer's latest unconsumed consent for the
+    SKU's operation, so the Run form re-confirms the SAME files the
+    buyer paid for.
+    """
+    from fastapi.responses import RedirectResponse
+    from app import stripe_billing as _sb
+    sku = request.query_params.get("sku", "")
+    outcome = request.query_params.get("product_checkout", "success")
+    if sku not in _sb.DIGEST_SKUS:
+        return HTMLResponse(
+            content="<h1>Unknown product</h1><p>This checkout link is not valid.</p>",
+            status_code=400)
+    _user, _csrf = _get_current_user_optional(request)
+    if not _user:
+        return RedirectResponse("/login", status_code=303)
+    operation = PRODUCT_OPERATION_BY_SKU[sku]
+    confirm_action, run_label, start_path = _PRODUCT_RETURN_ACTIONS[operation]
+    entry = _sb.get_product_sku(sku) or {}
+    context = {
+        "current_user": _user, "csrf_token": _csrf,
+        "product_name": entry.get("name", sku),
+        "state": "missing", "filename": None,
+        "consent_id": None, "file_hash": None,
+        "confirm_action": confirm_action, "run_label": run_label,
+        "start_path": start_path,
+        "return_url": f"/products/return?product_checkout=success&sku={sku}",
+    }
+    from app.db import SessionLocal
+    from app import models as _M
+    from app import product_billing as _pb
+    with SessionLocal() as db:
+        consent = db.query(_M.Consent).filter(
+            _M.Consent.user_id == _user.id,
+            _M.Consent.operation_type == operation,
+            _M.Consent.sku == sku,
+            _M.Consent.consumed_by_operation_id.is_(None),
+            _M.Consent.consumed_by_free_request_id.is_(None),
+            _M.Consent.expires_at > datetime.now(timezone.utc),
+        ).order_by(_M.Consent.created_at.desc()).first()
+        entitlement = None
+        purchase = None
+        if consent is not None:
+            context["consent_id"] = str(consent.id)
+            context["file_hash"] = consent.input_hash
+            entitlement = _pb.available_entitlement(
+                db, _user.id, None, sku, content_digest=consent.input_hash)
+            purchase = db.query(_M.ProductPurchase).filter(
+                _M.ProductPurchase.user_id == _user.id,
+                _M.ProductPurchase.sku == sku,
+                _M.ProductPurchase.content_digest == consent.input_hash,
+            ).order_by(_M.ProductPurchase.created_at.desc()).first()
+            try:
+                if operation == "compare_logs":
+                    pair = _load_compare_pending(str(consent.id))
+                    if pair is not None:
+                        context["filename"] = f"{pair[0]} → {pair[2]}"
+                elif operation == "batch":
+                    bundle = _load_batch_pending(str(consent.id))
+                    if bundle is not None:
+                        context["filename"] = f"Batch — {len(bundle)} files"
+                else:
+                    pending = _load_paid_pending(str(consent.id))
+                    if pending is not None:
+                        context["filename"] = pending[0]
+            except Exception:
+                context["filename"] = None
+        else:
+            # No live consent: an entitlement for ANY digest of this
+            # SKU still means "already paid — re-upload to run".
+            entitlement = db.query(_M.Entitlement).filter(
+                _M.Entitlement.user_id == _user.id,
+                _M.Entitlement.sku == sku,
+                _M.Entitlement.status == "available",
+            ).order_by(_M.Entitlement.created_at.desc()).first()
+            if entitlement is not None and not _pb.available_entitlement(
+                    db, _user.id, None, sku,
+                    content_digest=entitlement.content_digest):
+                entitlement = None  # lapsed window: not redeemable
+            purchase = db.query(_M.ProductPurchase).filter(
+                _M.ProductPurchase.user_id == _user.id,
+                _M.ProductPurchase.sku == sku,
+            ).order_by(_M.ProductPurchase.created_at.desc()).first()
+    if entitlement is not None and consent is not None:
+        context["state"] = "ready"
+    elif entitlement is not None:
+        context["state"] = "no_consent"
+    elif outcome == "cancelled":
+        context["state"] = "cancelled"
+    elif purchase is not None or consent is not None:
+        context["state"] = "settling"
+    return templates.TemplateResponse(request, "product_return.html", context)
 
 
 # ISSUE-69 + #164 (A3): Stripe webhook — family dispatch by kind.
@@ -1354,6 +1473,19 @@ async def health():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    # PR #182 finding 2 (legacy landings): checkout sessions created
+    # before the /products/return surface existed still carry the old
+    # "/?product_checkout=...&sku=..." success URL — consume the
+    # parameter here by handing off to that surface instead of
+    # dead-ending the buyer on the plain home page.
+    _pc = request.query_params.get("product_checkout")
+    _sku = request.query_params.get("sku", "")
+    if _pc in ("success", "cancelled") and _sku:
+        from fastapi.responses import RedirectResponse
+        from urllib.parse import quote as _q
+        return RedirectResponse(
+            f"/products/return?product_checkout={_pc}&sku={_q(_sku)}",
+            status_code=303)
     _user, _csrf = _get_current_user_optional(request)
     return templates.TemplateResponse(
         request, "index.html", {"error": None, "remaining": _remaining(_client_ip(request)), "current_user": _user, "csrf_token": _csrf}
