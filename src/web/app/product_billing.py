@@ -1126,8 +1126,38 @@ def admit_product_operation(db: Session, user_id, operation_type: str,
     if entitlement is None:
         raise EntitlementRequired(
             "no live entitlement for this purchase")
-    redemption = reserve_redemption(
-        db, entitlement, request_hash=content_digest, worker_id=worker_id)
+    entitlement_id = entitlement.id
+    try:
+        redemption = reserve_redemption(
+            db, entitlement, request_hash=content_digest, worker_id=worker_id)
+    except DeadlineLapsed:
+        # Capacity-leak fix (PR #182 Codex P1): capacity was acquired
+        # at step (3), BEFORE reserve_redemption could lapse the
+        # entitlement here. The endpoints answer DeadlineLapsed with
+        # db.commit() to preserve the refund_eligible transition —
+        # which would also commit the orphaned CapacityScope.used
+        # increments (no Operation/Permit exists to release them;
+        # the single-slot global:batch / global:oversize scopes were
+        # permanently exhausted by one lapsed attempt). Roll the
+        # whole admission transaction back — discarding every
+        # capacity increment and any other admission side effect —
+        # then re-apply ONLY the lapse transition in the fresh
+        # transaction the caller's commit will persist. B-11
+        # semantics are unchanged: refund_eligible + 410, and
+        # settlement/redelivery paths never resurrect the row.
+        db.rollback()
+        locked = db.execute(
+            select(models.Entitlement).where(
+                models.Entitlement.id == entitlement_id)
+            .with_for_update().execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if locked is not None and locked.status == "available" \
+                and locked.redemption_deadline is not None \
+                and _as_aware(locked.redemption_deadline) < _utcnow():
+            locked.status = "refund_eligible"
+            locked.version += 1
+            db.flush()
+        raise
     # (7) Operation + permit. cost=0 is enforced by the billing-mode
     # CHECK together with the redemption FK (B-16).
     now = _utcnow()
