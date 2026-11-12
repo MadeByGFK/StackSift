@@ -258,6 +258,11 @@ class Operation(Base):
     free_allowance_claim = Column(Boolean, nullable=False, default=False)
     pricing_version = Column(Integer, nullable=False, default=1)
     consent_id = Column(GUID(), ForeignKey("consents.id", use_alter=True, name="fk_operations_consent_id"), nullable=True)
+    # Issue #164 Phase B (B-8/B-16): product-backed operations link the
+    # entitlement redemption that pays for the run. The FK is the
+    # billing-mode discriminator: NULL = credit-backed (cost > 0);
+    # set = product-backed (cost = 0, no account/grant/ledger effects).
+    entitlement_redemption_id = Column(GUID(), ForeignKey("entitlement_redemptions.id", use_alter=True, name="fk_operations_entitlement_redemption_id"), nullable=True, unique=True)
     status = Column(String(20), nullable=False, default="reserved")  # reserved|completed|failed|expired
     worker_id = Column(String(255), nullable=False)
     lease_generation = Column(Integer, nullable=False, default=1)
@@ -269,7 +274,13 @@ class Operation(Base):
     updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
     __table_args__ = (
-        CheckConstraint("cost > 0", name="ck_operation_cost_positive"),
+        # B-16: cost must match billing mode — a zero-cost credit
+        # Operation stays impossible, and a product Operation cannot
+        # carry a credit price.
+        CheckConstraint(
+            "(entitlement_redemption_id IS NULL AND cost > 0) OR "
+            "(entitlement_redemption_id IS NOT NULL AND cost = 0)",
+            name="ck_operation_cost_matches_billing_mode"),
         UniqueConstraint("user_id", "type", "idempotency_key", name="uq_operation_identity"),
     )
 
@@ -353,13 +364,19 @@ class Consent(Base):
     operation_type = Column(String(30), nullable=False)
     input_hash = Column(String(64), nullable=False)  # canonical input/options hash
     max_cost = Column(Integer, nullable=False)
+    # Issue #164 Phase B (B-7): product (dollar) consents carry their
+    # SKU and a zero credit cost; credit consents keep sku NULL and a
+    # positive max_cost. The pair is DB-enforced below.
+    sku = Column(String(40), nullable=True)
     pricing_version = Column(Integer, nullable=False, default=1)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     consumed_by_operation_id = Column(GUID(), ForeignKey("operations.id"), nullable=True, unique=True)
     consumed_by_free_request_id = Column(String(255), ForeignKey("free_requests.request_id", use_alter=True, name="fk_consent_free_request"), nullable=True, unique=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
-    __table_args__ = (CheckConstraint("max_cost > 0", name="ck_consent_max_cost_positive"),)
+    __table_args__ = (CheckConstraint(
+        "(sku IS NULL AND max_cost > 0) OR (sku IS NOT NULL AND max_cost = 0)",
+        name="ck_consent_cost_matches_billing_mode"),)
 
 
 class AdminAdjustment(Base):
@@ -913,7 +930,11 @@ class ProductPurchase(Base):
     user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
                      nullable=False, index=True)
     sku = Column(String(40), nullable=False)
-    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=False, index=True)
+    # Phase A binding: a retained source Result. Phase B (B-5a):
+    # upload-first SKUs bind to a content digest instead — exactly
+    # one of the two bindings is set per row (CHECK below).
+    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=True, index=True)
+    content_digest = Column(String(64), nullable=True, index=True)
     stripe_session_id = Column(String(255), unique=True, nullable=True)
     stripe_payment_intent_id = Column(String(255), nullable=True)
     # Checkout-time snapshots (A4): settlement asserts the event equals
@@ -989,6 +1010,17 @@ class ProductPurchase(Base):
               "user_id", "source_result_id", "sku", unique=True,
               postgresql_where="status = 'pending'",
               sqlite_where=sa.text("status = 'pending'")),
+        # B-5a: exactly one binding per row (source XOR digest).
+        CheckConstraint(
+            "(source_result_id IS NOT NULL) <> (content_digest IS NOT NULL)",
+            name="ck_product_purchase_exactly_one_binding",
+        ),
+        # B-10: the pending-unique backstop for digest-bound rows
+        # (NULL source rows escape the source index above).
+        Index("ix_product_purchases_pending_digest_unique",
+              "user_id", "sku", "content_digest", unique=True,
+              postgresql_where="status = 'pending' AND content_digest IS NOT NULL",
+              sqlite_where=sa.text("status = 'pending' AND content_digest IS NOT NULL")),
     )
 
 
@@ -1046,7 +1078,10 @@ class Entitlement(Base):
     product_purchase_id = Column(GUID(), ForeignKey("product_purchases.id"),
                                  nullable=False, unique=True)
     sku = Column(String(40), nullable=False)
-    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=False, index=True)
+    # Binding mirrors the purchase: source Result (Phase A) XOR
+    # content digest (Phase B, B-5a) — exactly one set (CHECK below).
+    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=True, index=True)
+    content_digest = Column(String(64), nullable=True, index=True)
     status = Column(String(20), nullable=False, default="available")
     version = Column(Integer, nullable=False, default=0)
     # F5: source Result expiry + 30 days, fixed at settlement.
@@ -1067,6 +1102,16 @@ class Entitlement(Base):
               "user_id", "source_result_id", "sku", unique=True,
               postgresql_where="status IN ('available', 'reserved')",
               sqlite_where=sa.text("status IN ('available', 'reserved')")),
+        # B-5a: exactly one binding per row (source XOR digest).
+        CheckConstraint(
+            "(source_result_id IS NOT NULL) <> (content_digest IS NOT NULL)",
+            name="ck_entitlement_exactly_one_binding",
+        ),
+        # B-10: the live-unique F1 backstop for digest-bound rows.
+        Index("ix_entitlements_live_digest_unique",
+              "user_id", "sku", "content_digest", unique=True,
+              postgresql_where="status IN ('available', 'reserved') AND content_digest IS NOT NULL",
+              sqlite_where=sa.text("status IN ('available', 'reserved') AND content_digest IS NOT NULL")),
     )
 
 
@@ -1084,7 +1129,10 @@ class EntitlementRedemption(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     entitlement_id = Column(GUID(), ForeignKey("entitlements.id", ondelete="CASCADE"),
                             nullable=False, index=True)
-    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=False)
+    # Binding copied from the entitlement at reserve time (B-10):
+    # source Result (Phase A) or content digest (Phase B, B-5a).
+    source_result_id = Column(GUID(), ForeignKey("results.id"), nullable=True)
+    content_digest = Column(String(64), nullable=True)
     request_hash = Column(String(64), nullable=False)
     worker_id = Column(String(255), nullable=False)
     lease_generation = Column(Integer, nullable=False, default=1)
