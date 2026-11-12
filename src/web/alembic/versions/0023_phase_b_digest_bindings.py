@@ -10,6 +10,14 @@ the cost CHECK becomes billing-mode aware.
 """
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import UUID
+
+# House UUID type (see 0001/0017): native UUID on PostgreSQL,
+# VARCHAR(36) on SQLite — matching models.GUID. A plain String(36)
+# column cannot FK-reference a UUID primary key on PostgreSQL
+# (DatatypeMismatch); SQLite's type affinity hid that in local runs
+# and every migrated-Postgres test in CI errored at this migration.
+UUID_TYPE = sa.String(36).with_variant(UUID(as_uuid=True), "postgresql")
 
 revision = "0023_phase_b_digest_bindings"
 down_revision = "0022_report_ss_id"
@@ -132,7 +140,7 @@ def upgrade():
     # --- operations (B-8/B-16) ------------------------------------------
     with op.batch_alter_table("operations") as batch_op:
         batch_op.add_column(sa.Column(
-            "entitlement_redemption_id", sa.String(36),
+            "entitlement_redemption_id", UUID_TYPE,
             sa.ForeignKey("entitlement_redemptions.id",
                           name="fk_operations_entitlement_redemption_id"),
             nullable=True))
