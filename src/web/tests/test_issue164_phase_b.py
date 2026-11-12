@@ -1403,6 +1403,106 @@ def test_runtime_product_checkout_return_settling_then_run(p164b_env):
     assert r.status_code == 200, r.text[:300]
 
 
+def test_runtime_product_return_binds_to_purchase_not_latest_consent(p164b_env):
+    """Finding 4 (P2), DOM-level: the return landing must bind to the
+    checkout's purchase, not the buyer's LATEST consent. The buyer
+    pays for digest A, then opens a quote for different files (digest
+    B, a newer consent) in another tab; the return URL carrying A's
+    purchase id must render A's Run form — never 'settling' and never
+    B's consent."""
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    r = _post_compare(env)
+    assert r.status_code == 402, r.text[:300]
+    from app import models as M
+    with env.sessions() as db:
+        consent_a = db.query(M.Consent).filter(
+            M.Consent.user_id == uid,
+            M.Consent.operation_type == "compare_logs").one()
+        consent_a_id, hash_a = str(consent_a.id), consent_a.input_hash
+    captured = _fake_stripe(env.monkeypatch)
+    r = _checkout(env, csrf, "compare", _compare_digest())
+    assert r.status_code == 200, r.text[:300]
+    purchase_a_id = r.json()["purchase_id"]
+    # A newer consent B for different files, created AFTER checkout A.
+    r = _post_compare(env, LOG_B, LOG_A)
+    assert r.status_code == 402, r.text[:300]
+    with env.sessions() as db:
+        consents = db.query(M.Consent).filter(
+            M.Consent.user_id == uid,
+            M.Consent.operation_type == "compare_logs",
+        ).order_by(M.Consent.created_at.asc()).all()
+        assert len(consents) == 2
+        consent_b = consents[-1]
+        consent_b_id, hash_b = str(consent_b.id), consent_b.input_hash
+        assert consent_b_id != consent_a_id and hash_b != hash_a
+        # Make B strictly the latest consent, deterministically.
+        consents[0].created_at = consents[0].created_at - timedelta(minutes=5)
+        db.commit()
+    # Settle ONLY purchase A (webhook-only settlement).
+    with env.sessions() as db:
+        purchase = db.get(M.ProductPurchase, uuid.UUID(purchase_a_id))
+        ref = SimpleNamespace(id=purchase.id, user_id=purchase.user_id)
+        session_id = purchase.stripe_session_id
+    _LINE_PRICE["id"] = PRICE_BY_SKU["compare"]
+    ev = _completed_event("evt_return_bind_a", ref, sku="compare",
+                          digest=hash_a, session_id=session_id)
+    assert _post_event(env, ev).status_code == 200
+    # The return URL as minted after the fix carries the purchase id.
+    landing = ("/products/return?product_checkout=success&sku=compare"
+               f"&purchase={purchase_a_id}")
+    r = env.client.get(landing)
+    assert r.status_code == 200, r.text[:300]
+    assert "still settling" not in r.text
+    run_consent, run_hash = _consent_fields(r.text)
+    assert (run_consent, run_hash) == (consent_a_id, hash_a)
+    # Checkout wiring: the Stripe session URLs themselves carry the
+    # purchase binding (success AND cancel).
+    assert f"purchase={purchase_a_id}" in captured[-1]["data"]["success_url"]
+    assert f"purchase={purchase_a_id}" in captured[-1]["data"]["cancel_url"]
+
+
+def test_runtime_product_return_bound_settling_preserves_purchase(p164b_env):
+    """Finding 4 (P2): before settlement, a purchase-bound return
+    renders 'settling' and its Check-again link PRESERVES the
+    purchase binding, so the recheck cannot drift to a newer
+    consent either."""
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    r = _post_compare(env)
+    assert r.status_code == 402, r.text[:300]
+    captured = _fake_stripe(env.monkeypatch)
+    r = _checkout(env, csrf, "compare", _compare_digest())
+    assert r.status_code == 200, r.text[:300]
+    purchase_id = r.json()["purchase_id"]
+    assert f"purchase={purchase_id}" in captured[-1]["data"]["success_url"]
+    landing = ("/products/return?product_checkout=success&sku=compare"
+               f"&purchase={purchase_id}")
+    r = env.client.get(landing)
+    assert r.status_code == 200, r.text[:300]
+    assert "still settling" in r.text
+    assert f"purchase={purchase_id}" in r.text  # Check-again href
+
+
+def test_runtime_product_return_unknown_purchase_binds_nothing(p164b_env):
+    """Finding 4 (P2): a purchase parameter that does not resolve to
+    THIS buyer's purchase for the SKU binds to nothing — even though
+    the buyer holds a settled, ready-to-run consent A, the landing
+    renders the honest 'missing' state instead of A's Run form."""
+    env = p164b_env
+    _, uid, csrf = _make_user(env)
+    r = _post_compare(env)
+    assert r.status_code == 402, r.text[:300]
+    _buy_and_settle(env, csrf, "compare", _compare_digest())
+    bogus = uuid.uuid4()
+    r = env.client.get(
+        "/products/return?product_checkout=success&sku=compare"
+        f"&purchase={bogus}")
+    assert r.status_code == 200, r.text[:300]
+    assert "could not find a purchase" in r.text
+    assert 'action="/compare/paid"' not in r.text
+
+
 def test_runtime_oversize_cancel_post_on_checkout_branch_releases_lockout(p164b_env):
     """Finding 3 (P2), DOM-level: on the dollar checkout branch the
     oversize consent page renders the CSRF cancel POST (not only a

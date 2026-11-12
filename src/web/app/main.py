@@ -879,11 +879,6 @@ async def product_checkout(
 
     entry = stripe_billing.get_product_sku(sku)
     origin = str(request.base_url).rstrip("/")
-    # PR #182 finding 2: the return landing is the settlement-aware
-    # /products/return surface, NOT the plain home page (which ignored
-    # the parameter and dead-ended a buyer who had just paid).
-    success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/products/return?product_checkout=success&sku={sku}"
-    cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/products/return?product_checkout=cancelled&sku={sku}"
     try:
         stripe_billing._secret_key()
         if stripe_billing.product_price_id(sku) is None:
@@ -891,6 +886,36 @@ async def product_checkout(
         purchase, reused = pb.create_pending_product_purchase(
             db, _user.id, sku, content_digest=content_digest)
         db.commit()
+        # PR #182 finding 4: bind the return landing to THIS checkout's
+        # purchase. The success/cancel URLs are built only once the
+        # pending purchase row exists, and carry its id so
+        # /products/return resolves consent/purchase/entitlement by
+        # the purchase's content_digest — never by whatever consent
+        # happens to be the buyer's latest (a newer quote opened in
+        # another tab must not hijack the landing). An env override
+        # still wins as the base URL; the purchase parameter is
+        # appended query-string-aware (any stale purchase parameter
+        # on the override is replaced, not duplicated).
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+        def _purchase_bound_url(override, default_query):
+            base = override or f"{origin}/products/return?{default_query}"
+            parts = urlsplit(base)
+            query = [(k, v) for k, v in
+                     parse_qsl(parts.query, keep_blank_values=True)
+                     if k != "purchase"]
+            query.append(("purchase", str(purchase.id)))
+            return urlunsplit(parts._replace(query=urlencode(query)))
+
+        # PR #182 finding 2: the return landing is the settlement-aware
+        # /products/return surface, NOT the plain home page (which
+        # ignored the parameter and dead-ended a buyer who had paid).
+        success_url = _purchase_bound_url(
+            _os.environ.get("STRIPE_SUCCESS_URL"),
+            f"product_checkout=success&sku={sku}")
+        cancel_url = _purchase_bound_url(
+            _os.environ.get("STRIPE_CANCEL_URL"),
+            f"product_checkout=cancelled&sku={sku}")
         try:
             checkout_url, session_id = stripe_billing.create_product_checkout_session(
                 user_id=_user.id, sku=sku, purchase_id=purchase.id,
@@ -953,6 +978,18 @@ async def product_return(request: Request):
     server-side from the buyer's latest unconsumed consent for the
     SKU's operation, so the Run form re-confirms the SAME files the
     buyer paid for.
+
+    PR #182 finding 4: when the return URL carries a ``purchase``
+    parameter (minted by /products/checkout since that fix), the
+    landing binds STRICTLY to that purchase: the purchase must belong
+    to this buyer and SKU, and consent/entitlement are resolved by
+    the purchase's content_digest — never by the latest-consent pick
+    (a newer quote in another tab must not hijack the landing). A
+    purchase parameter that does not resolve to such a purchase
+    binds to NOTHING: the landing renders ``missing`` rather than
+    falling back to some other consent on the account. URLs without
+    the parameter (minted before the fix) keep the latest-consent
+    behaviour above.
     """
     from fastapi.responses import RedirectResponse
     from app import stripe_billing as _sb
@@ -980,59 +1017,125 @@ async def product_return(request: Request):
     from app.db import SessionLocal
     from app import models as _M
     from app import product_billing as _pb
+
+    def _load_pending_filename(consent):
+        """Fill the display filename from the consent's pending
+        payload. Returns True only when the payload actually loaded
+        (a loader returning None, or raising, counts as NOT loaded —
+        PR #182 finding 5 gates the Run action on this)."""
+        try:
+            if operation == "compare_logs":
+                pair = _load_compare_pending(str(consent.id))
+                if pair is not None:
+                    context["filename"] = f"{pair[0]} → {pair[2]}"
+                    return True
+            elif operation == "batch":
+                bundle = _load_batch_pending(str(consent.id))
+                if bundle is not None:
+                    context["filename"] = f"Batch — {len(bundle)} files"
+                    return True
+            else:
+                pending = _load_paid_pending(str(consent.id))
+                if pending is not None:
+                    context["filename"] = pending[0]
+                    return True
+        except Exception:
+            context["filename"] = None
+        return False
+
+    # PR #182 finding 4: a purchase-bound return URL keeps its
+    # binding in the settling state's Check-again link.
+    purchase_param = request.query_params.get("purchase", "")
+    if purchase_param:
+        from urllib.parse import quote as _urlquote
+        context["return_url"] = (
+            f"/products/return?product_checkout=success&sku={sku}"
+            f"&purchase={_urlquote(purchase_param, safe='')}")
+    pending_loaded = False
     with SessionLocal() as db:
-        consent = db.query(_M.Consent).filter(
-            _M.Consent.user_id == _user.id,
-            _M.Consent.operation_type == operation,
-            _M.Consent.sku == sku,
-            _M.Consent.consumed_by_operation_id.is_(None),
-            _M.Consent.consumed_by_free_request_id.is_(None),
-            _M.Consent.expires_at > datetime.now(timezone.utc),
-        ).order_by(_M.Consent.created_at.desc()).first()
+        consent = None
         entitlement = None
         purchase = None
-        if consent is not None:
-            context["consent_id"] = str(consent.id)
-            context["file_hash"] = consent.input_hash
-            entitlement = _pb.available_entitlement(
-                db, _user.id, None, sku, content_digest=consent.input_hash)
-            purchase = db.query(_M.ProductPurchase).filter(
-                _M.ProductPurchase.user_id == _user.id,
-                _M.ProductPurchase.sku == sku,
-                _M.ProductPurchase.content_digest == consent.input_hash,
-            ).order_by(_M.ProductPurchase.created_at.desc()).first()
+        if purchase_param:
+            # Finding 4, bound branch: resolve ONLY the named
+            # purchase (this buyer, this SKU) and bind strictly to
+            # its content_digest. No latest-consent fallback here —
+            # that fallback is exactly the hijack being fixed. An
+            # unresolvable parameter leaves consent/entitlement/
+            # purchase all None, so the landing renders "missing":
+            # the safest honest state (it neither claims a payment is
+            # settling nor offers another purchase's files to run).
+            import uuid as _uuid
             try:
-                if operation == "compare_logs":
-                    pair = _load_compare_pending(str(consent.id))
-                    if pair is not None:
-                        context["filename"] = f"{pair[0]} → {pair[2]}"
-                elif operation == "batch":
-                    bundle = _load_batch_pending(str(consent.id))
-                    if bundle is not None:
-                        context["filename"] = f"Batch — {len(bundle)} files"
-                else:
-                    pending = _load_paid_pending(str(consent.id))
-                    if pending is not None:
-                        context["filename"] = pending[0]
-            except Exception:
-                context["filename"] = None
+                purchase_id = _uuid.UUID(purchase_param)
+            except (ValueError, AttributeError, TypeError):
+                purchase_id = None
+            if purchase_id is not None:
+                purchase = db.query(_M.ProductPurchase).filter(
+                    _M.ProductPurchase.id == purchase_id,
+                    _M.ProductPurchase.user_id == _user.id,
+                    _M.ProductPurchase.sku == sku,
+                ).first()
+            if purchase is not None:
+                digest = purchase.content_digest
+                consent = db.query(_M.Consent).filter(
+                    _M.Consent.user_id == _user.id,
+                    _M.Consent.operation_type == operation,
+                    _M.Consent.sku == sku,
+                    _M.Consent.input_hash == digest,
+                    _M.Consent.consumed_by_operation_id.is_(None),
+                    _M.Consent.consumed_by_free_request_id.is_(None),
+                    _M.Consent.expires_at > datetime.now(timezone.utc),
+                ).order_by(_M.Consent.created_at.desc()).first()
+                entitlement = _pb.available_entitlement(
+                    db, _user.id, None, sku, content_digest=digest)
+                if consent is not None:
+                    context["consent_id"] = str(consent.id)
+                    context["file_hash"] = consent.input_hash
+                    pending_loaded = _load_pending_filename(consent)
         else:
-            # No live consent: an entitlement for ANY digest of this
-            # SKU still means "already paid — re-upload to run".
-            entitlement = db.query(_M.Entitlement).filter(
-                _M.Entitlement.user_id == _user.id,
-                _M.Entitlement.sku == sku,
-                _M.Entitlement.status == "available",
-            ).order_by(_M.Entitlement.created_at.desc()).first()
-            if entitlement is not None and not _pb.available_entitlement(
+            consent = db.query(_M.Consent).filter(
+                _M.Consent.user_id == _user.id,
+                _M.Consent.operation_type == operation,
+                _M.Consent.sku == sku,
+                _M.Consent.consumed_by_operation_id.is_(None),
+                _M.Consent.consumed_by_free_request_id.is_(None),
+                _M.Consent.expires_at > datetime.now(timezone.utc),
+            ).order_by(_M.Consent.created_at.desc()).first()
+            if consent is not None:
+                context["consent_id"] = str(consent.id)
+                context["file_hash"] = consent.input_hash
+                entitlement = _pb.available_entitlement(
                     db, _user.id, None, sku,
-                    content_digest=entitlement.content_digest):
-                entitlement = None  # lapsed window: not redeemable
-            purchase = db.query(_M.ProductPurchase).filter(
-                _M.ProductPurchase.user_id == _user.id,
-                _M.ProductPurchase.sku == sku,
-            ).order_by(_M.ProductPurchase.created_at.desc()).first()
-    if entitlement is not None and consent is not None:
+                    content_digest=consent.input_hash)
+                purchase = db.query(_M.ProductPurchase).filter(
+                    _M.ProductPurchase.user_id == _user.id,
+                    _M.ProductPurchase.sku == sku,
+                    _M.ProductPurchase.content_digest == consent.input_hash,
+                ).order_by(_M.ProductPurchase.created_at.desc()).first()
+                pending_loaded = _load_pending_filename(consent)
+            else:
+                # No live consent: an entitlement for ANY digest of
+                # this SKU still means "already paid — re-upload".
+                entitlement = db.query(_M.Entitlement).filter(
+                    _M.Entitlement.user_id == _user.id,
+                    _M.Entitlement.sku == sku,
+                    _M.Entitlement.status == "available",
+                ).order_by(_M.Entitlement.created_at.desc()).first()
+                if entitlement is not None and not _pb.available_entitlement(
+                        db, _user.id, None, sku,
+                        content_digest=entitlement.content_digest):
+                    entitlement = None  # lapsed window: not redeemable
+                purchase = db.query(_M.ProductPurchase).filter(
+                    _M.ProductPurchase.user_id == _user.id,
+                    _M.ProductPurchase.sku == sku,
+                ).order_by(_M.ProductPurchase.created_at.desc()).first()
+    if purchase_param and purchase is None:
+        # Finding 4: an unresolvable purchase binding renders the
+        # honest "missing" state — never another consent's state,
+        # and never a "settling" claim for an unknown purchase.
+        context["state"] = "missing"
+    elif entitlement is not None and consent is not None:
         context["state"] = "ready"
     elif entitlement is not None:
         context["state"] = "no_consent"
