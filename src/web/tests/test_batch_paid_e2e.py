@@ -524,7 +524,11 @@ def test_batch_no_entitlement_quote_offers_checkout_and_confirm_402(batch_env):
     # test_issue164_s6s7_browser.py (A1).
     assert 'id="credit-badge"' not in r.text
     assert '<a href="/credits"' not in r.text
-    assert "Buy credits" not in r.text
+    # The rendered Buy-credits CTA (batch.html's buy_credits branch),
+    # not the bare words: the retained PDF-handler script source sets
+    # a modal button's textContent to 'Buy credits' on every page.
+    assert 'buy-credits-cta' not in r.text
+    assert '>Buy credits</a>' not in r.text
     # The checkout variant renders no consent form; the zero-cost
     # consent exists server-side — take its id/hash from the DB.
     with env.sessions() as db:
