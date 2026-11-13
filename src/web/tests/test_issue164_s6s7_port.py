@@ -186,9 +186,16 @@ def test_batch_entry_composition_and_copy(s6_env):
     assert '<a href="/settings">Settings</a>' in r.text
     assert 'action="/auth/logout"' in r.text
     # A1: the shared script is included in badge-suppressed mode — the
-    # badge/quick-buy block is absent from the served page.
+    # badge/quick-buy block is absent from the served page. Pin the
+    # EXECUTABLE block, not the bare word: the retained script's own
+    # comments (wireAuthForm header, PDF-modal handoff) legitimately
+    # mention "credit-badge" on every page, suppressed or not. The
+    # executed-DOM half (zero #credit-badge elements) is the browser
+    # suite's test_a1_*.
     assert "auth/balance" not in r.text
-    assert "credit-badge" not in r.text
+    assert "badge.id = 'credit-badge'" not in r.text
+    assert "MODAL_PACKS" not in r.text
+    assert "function showCreditModal" not in r.text
 
 
 def test_compare_entry_composition_and_copy(s6_env):
@@ -203,14 +210,21 @@ def test_compare_entry_composition_and_copy(s6_env):
     # C-E3: inherited paragraph, price token only swapped.
     assert "Comparison costs $5, charged" in r.text
     assert "3 credits" not in r.text
-    assert "Existing reports cannot be compared retrospectively" in r.text
+    # The sub paragraph wraps across template lines; compare on
+    # whitespace-normalized text (rendered HTML collapses it anyway).
+    assert ("Existing reports cannot be compared retrospectively"
+            in " ".join(r.text.split()))
     assert 'class="s6-compare-grid"' in r.text
     assert 'id="zone-a"' in r.text and 'id="zone-b"' in r.text
     assert "one .log, .txt, or .text file" in r.text
     assert "Compare ($5)" in r.text
     assert 'class="nav-toggle"' in r.text
     assert 'action="/auth/logout"' in r.text
-    assert "credit-badge" not in r.text
+    # A1 executable-block pins, as in the batch entry test above.
+    assert "auth/balance" not in r.text
+    assert "badge.id = 'credit-badge'" not in r.text
+    assert "MODAL_PACKS" not in r.text
+    assert "function showCreditModal" not in r.text
 
 
 # --- RT-1 (corrected, A2): quote -> checkout -> return -> run ----------
