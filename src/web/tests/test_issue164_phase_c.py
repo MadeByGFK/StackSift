@@ -589,6 +589,9 @@ def test_credit_era_rows_byte_identical_after_flows(p164c_env):
         purchase = C.create_pending_purchase(db, uid, "growth")
         purchase.status = "completed"
         purchase.completed_at = C._utcnow()
+        # A completed purchase must carry its amount (base-model
+        # ck_purchase_completed_has_amount); growth is the $10 pack.
+        purchase.amount_cents = 1000
         db.commit()
         pid = purchase.id
     _grant(env, uid, 25, key=f"purchase-grant-{pid}")
@@ -668,7 +671,9 @@ def _seed_free_window(env, uid, ip="127.0.0.1", count=10):
         for i in range(count):
             db.add(M.FreeRequest(
                 request_id=f"seed-{ip}-{i}-{uuid.uuid4().hex[:6]}",
-                user_id=uid, anonymous_session_hash="seedhash",
+                # Signed-in owner only: ck_free_request_exactly_one_owner
+                # requires user_id XOR anonymous_session_hash.
+                user_id=uid, anonymous_session_hash=None,
                 fingerprint=f"fp-{i}", status="completed",
                 quota_bucket_trusted_ip=ip,
                 quota_bucket_window_start=now,
@@ -757,7 +762,8 @@ def test_admit_at_cap_never_creates_paid_operation(p164c_env):
         for i in range(10):
             db.add(M.FreeRequest(
                 request_id=f"seed-{i}", user_id=uid,
-                anonymous_session_hash="x", fingerprint=f"fp-{i}",
+                # Signed-in owner only (ck_free_request_exactly_one_owner).
+                anonymous_session_hash=None, fingerprint=f"fp-{i}",
                 quota_bucket_trusted_ip=ip, quota_bucket_window_start=now,
                 deadline=now + timedelta(minutes=5),
                 created_at=now - timedelta(minutes=2),
@@ -776,24 +782,38 @@ def test_admit_at_cap_never_creates_paid_operation(p164c_env):
 def _seed_pdf_op(env, uid, rid, status, *, artifact_expired=False):
     from app import credits as C, models as M
     with env.sessions() as db:
-        result_id = None
+        # (user_id, type, idempotency_key) is unique: a second PDF op
+        # for the same report is a server retry, exactly as the routes
+        # create it — base key plus a "-retry-" suffix, which
+        # export_key_belongs_to still matches to this report.
+        key = f"pdf-{rid}"
+        taken = db.query(M.Operation).filter(
+            M.Operation.user_id == uid, M.Operation.type == "pdf",
+            M.Operation.idempotency_key == key).first()
+        if taken is not None:
+            key = f"{key}-retry-{uuid.uuid4().hex[:8]}"
+        op = M.Operation(
+            user_id=uid, type="pdf", idempotency_key=key,
+            request_hash="h", status=status, result_id=None,
+            cost=2, worker_id="w",
+            lease_expires_at=C._utcnow() + timedelta(minutes=5))
+        db.add(op)
+        db.flush()
         if status == "completed":
+            # Mirror store_pdf_result: the artifact Result's origin is
+            # its operation (ck_result_exactly_one_origin), and the
+            # completed operation points back at the artifact.
             raw = json.dumps({"pdf_base64": "AAAA", "filename": "test.log"})
             now = C._utcnow()
             exp = now - timedelta(days=1) if artifact_expired else now + timedelta(days=7)
             pr = M.Result(
-                user_id=uid, type="pdf", storage_manifest=raw,
+                user_id=uid, operation_id=op.id, type="pdf",
+                storage_manifest=raw,
                 integrity_digest=C.hash_input(raw.encode()),
                 byte_count=len(raw.encode()), ready_at=now, expires_at=exp)
             db.add(pr)
-            db.commit()
-            result_id = pr.id
-        op = M.Operation(
-            user_id=uid, type="pdf", idempotency_key=f"pdf-{rid}",
-            request_hash="h", status=status, result_id=result_id,
-            cost=2, worker_id="w",
-            lease_expires_at=C._utcnow() + timedelta(minutes=5))
-        db.add(op)
+            db.flush()
+            op.result_id = pr.id
         db.commit()
         return op.id
 
