@@ -2,6 +2,14 @@
 
 BR-01: zero eligible credits must return HTTP 402 (credit limit), not 503.
 BR-02: verified OAuth signups must receive the 10-credit signup reward.
+
+Issue #164 Phase C re-base:
+- BR-01's flow now ends at the CALL-1 HARD CAP: at the free-allowance
+  cap, analysis refuses 429 with its reset time and there is no credit
+  route at any balance — zero eligible credits changes nothing.
+- BR-02's reward is REMOVED (Decision 3 / C4): a verified OAuth signup
+  creates no grant, no credit account, and no ledger row, on first
+  login and on repeats alike.
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -19,7 +27,11 @@ from app.sample_data import SAMPLE_LOG
 
 
 def test_zero_eligible_credits_returns_402(env):
-    """BR-01: exhausted credits -> 402 credit-limit, not a 503 retry loop."""
+    """BR-01, Phase C premise: zero eligible credits at the allowance
+    cap -> the 429 hard-cap refusal (reset time named, analyses not
+    sold), not a 402 credit-limit page and not a 503 retry loop. The
+    revoked-grant setup is unchanged: balance can no longer buy past
+    the cap, so eligibility is irrelevant to the refusal."""
     quota(env)
     with env.sessions() as db:
         for grant in db.query(M.CreditGrant).filter(M.CreditGrant.user_id == env.uid):
@@ -30,11 +42,18 @@ def test_zero_eligible_credits_returns_402(env):
         files={"file": ("test.log", SAMPLE_LOG.encode())},
         data={"request_id": uuid.uuid4().hex},
     )
-    assert r.status_code == 402, f"expected 402, got {r.status_code}: {r.text[:300]}"
+    assert r.status_code == 429, f"expected 429, got {r.status_code}: {r.text[:300]}"
+    assert "resets at" in r.text
+    assert "not sold" in r.text
+    with env.sessions() as db:
+        assert db.query(M.Operation).filter(
+            M.Operation.type == "additional_analysis").count() == 0
 
 
 def test_oauth_signup_grants_ten_credits(env, monkeypatch):
-    """BR-02: a verified OAuth signup receives the 10-credit reward."""
+    """BR-02, Phase C premise: a verified OAuth signup receives NO
+    reward — the signup grant is removed (no grant, no credit account,
+    no ledger row), while the signup itself still succeeds."""
     from app import auth_routes
 
     async def fake_exchange(code):
@@ -80,11 +99,18 @@ def test_oauth_signup_grants_ten_credits(env, monkeypatch):
     with env.sessions() as db:
         user = db.query(M.User).filter_by(email="br02-oauth@example.com").first()
         assert user is not None and user.email_verified
-        assert C.get_balance_summary(db, user.id)["balance"] == 10
+        assert C.get_balance_summary(db, user.id)["balance"] == 0
+        assert db.query(M.CreditGrant).filter(
+            M.CreditGrant.user_id == user.id).count() == 0
+        assert db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == user.id).count() == 0
+        assert db.query(M.CreditLedger).filter(
+            M.CreditLedger.user_id == user.id).count() == 0
 
 
 def test_oauth_repeat_login_grants_no_second_reward(env, monkeypatch):
-    """BR-02: repeat OAuth logins and re-signups never double-grant."""
+    """BR-02, Phase C premise: repeat OAuth logins grant nothing either
+    — there is no first reward for a second login to double."""
     from app import auth_routes
 
     async def fake_exchange(code):
@@ -135,4 +161,8 @@ def test_oauth_repeat_login_grants_no_second_reward(env, monkeypatch):
 
     with env.sessions() as db:
         user = db.query(M.User).filter_by(email="br02-repeat@example.com").first()
-        assert C.get_balance_summary(db, user.id)["balance"] == 10
+        assert C.get_balance_summary(db, user.id)["balance"] == 0
+        assert db.query(M.CreditGrant).filter(
+            M.CreditGrant.user_id == user.id).count() == 0
+        assert db.query(M.CreditLedger).filter(
+            M.CreditLedger.user_id == user.id).count() == 0
