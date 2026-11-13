@@ -97,7 +97,9 @@ def _login(page, base, auth_env, email="s6s7@example.com"):
     page.get_by_label("Password", exact=True).fill("SecurePass123!")
     page.locator('button[type="submit"]').click()
     expect(page.get_by_role("status")).to_contain_text("verification link")
-    token = auth_env.sent[-1][1]
+    # conftest auth_env sent tuples are ("verify", address, token) —
+    # token is index 2 (the header-browser suite's pattern).
+    token = auth_env.sent[-1][2]
     page.goto(base + "/verify?token=" + token)
     page.get_by_role("button", name="Verify email").click()
     expect(page.get_by_role("status")).to_contain_text("Email verified")
