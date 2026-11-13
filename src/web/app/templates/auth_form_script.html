@@ -141,31 +141,9 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;';
           const card = document.createElement('div');
           card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
-          const insufficient = false; // #164 Phase C: exports are free — no insufficient-credits state
-          const title = document.createElement('div');
-          title.style.cssText = 'font-size:1.1rem;font-weight:600;margin:0 0 0.75rem 0;';
-          title.textContent = 'Export Failed';
-          card.appendChild(title);
-          const msg = document.createElement('p');
-          msg.style.cssText = 'margin:0 0 1rem 0;color:#9db1cc;';
-          msg.textContent = error;
-          card.appendChild(msg);
-          if (insufficient) {
-            // ISSUE-68: insufficient-credits entry point — hand off to the
-            // credit-pack modal so the user can buy without leaving the
-            // page; fall back to the credits page if the pack modal is
-            // unavailable (e.g. the badge script has not run yet).
-            const buy = document.createElement('button');
-            buy.type = 'button';
-            buy.textContent = 'Buy credits';
-            buy.style.cssText = 'display:block;text-align:center;width:100%;margin-top:1rem;padding:0.6rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;border:none;cursor:pointer;box-sizing:border-box;font:inherit;';
-            buy.addEventListener('click', () => {
-              modal.remove();
-              if (typeof window.showCreditModal === 'function') window.showCreditModal();
-              else location.assign('/credits');
-            });
-            card.appendChild(buy);
-          }
+          // Issue #164 Phase C: exports are free — the PDF error
+          // modal has no insufficient-credits state and no
+          // buy-credits handoff (the pack modal is retired).
           const close = document.createElement('button');
           close.style.cssText = 'width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;';
           close.textContent = 'Close';
