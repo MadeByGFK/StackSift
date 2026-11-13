@@ -20,58 +20,100 @@
 </style>
 </head>
 <body>
-<div class="consent-box">
+{# Issue #164 S6/S7 port (amendment A3): Batch/Compare returns get the
+   header + the shared s6- consent composition (the same class family
+   as the ported paid_consent.html renders, so the two templates
+   cannot drift); Large-File (oversize) returns keep the legacy
+   composition exactly. The five states' markup/text are shared — only
+   the class names switch — so no state's copy can diverge. #}
+{% set s6_return = operation in ["batch", "compare_logs"] %}
+{% set box_class = "s6-consent-panel" if s6_return else "consent-box" %}
+{% set file_class = "s6-chip" if s6_return else "file" %}
+{% set actions_class = "s6-actions" if s6_return else "consent-actions" %}
+{% set confirm_class = "s6-btn-confirm" if s6_return else "btn-confirm" %}
+{% set cancel_class = "s6-btn-cancel" if s6_return else "btn-cancel" %}
+{% set note_class = "s6-note" if s6_return else "consent-note" %}
+{% if s6_return %}
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/credits">Pricing</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+</div>
+<main class="s6-shell">
+{% endif %}
+<div class="{{ box_class }}">
   {% if state == "ready" %}
   <h1>Payment received — {{ product_name }}</h1>
   <p>Your purchase is settled and ready to run. Re-confirm the same
      files below to start — you will not be charged again.</p>
-  {% if filename %}<div class="file">{{ filename }}</div>{% endif %}
-  <form method="post" action="{{ confirm_action }}" class="consent-actions">
+  {% if filename %}<div class="{{ file_class }}">{{ filename }}</div>{% endif %}
+  <form method="post" action="{{ confirm_action }}" class="{{ actions_class }}">
     <input type="hidden" name="consent_id" value="{{ consent_id }}">
     <input type="hidden" name="file_hash" value="{{ file_hash }}">
     <input type="hidden" name="idempotency_key" value="{{ consent_id }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" class="btn-confirm">{{ run_label }}</button>
+    <button type="submit" class="{{ confirm_class }}">{{ run_label }}</button>
   </form>
-  <p class="consent-note">Exports are included. Results are available for 90 days.</p>
+  <p class="{{ note_class }}">Exports are included. Results are available for 90 days.</p>
   {% elif state == "settling" %}
   <h1>Payment received — {{ product_name }}</h1>
   <p>Your payment is still settling. This usually takes a few seconds —
      you do not need to pay again. Check again in a moment and this page
      will offer the Run action for the files you bought.</p>
-  {% if filename %}<div class="file">{{ filename }}</div>{% endif %}
-  <div class="consent-actions">
-    <a href="{{ return_url }}" class="btn-confirm">Check again</a>
-    <a href="/" class="btn-cancel">Home</a>
+  {% if filename %}<div class="{{ file_class }}">{{ filename }}</div>{% endif %}
+  <div class="{{ actions_class }}">
+    <a href="{{ return_url }}" class="{{ confirm_class }}">Check again</a>
+    <a href="/" class="{{ cancel_class }}">Home</a>
   </div>
-  <p class="consent-note">If this does not clear shortly, contact disputes@goodfolkdigital.com.</p>
+  <p class="{{ note_class }}">If this does not clear shortly, contact disputes@goodfolkdigital.com.</p>
   {% elif state == "no_consent" %}
   <h1>Payment received — {{ product_name }}</h1>
   <p>You already hold this purchase — do not buy it again. The upload
      from before checkout is no longer saved, so upload the same
      file(s) once more and the quote step will offer the Run action
      instead of checkout.</p>
-  <div class="consent-actions">
-    <a href="{{ start_path }}" class="btn-confirm">Upload the same files</a>
-    <a href="/" class="btn-cancel">Home</a>
+  <div class="{{ actions_class }}">
+    <a href="{{ start_path }}" class="{{ confirm_class }}">Upload the same files</a>
+    <a href="/" class="{{ cancel_class }}">Home</a>
   </div>
-  <p class="consent-note">Exports are included. Results are available for 90 days.</p>
+  <p class="{{ note_class }}">Exports are included. Results are available for 90 days.</p>
   {% elif state == "cancelled" %}
   <h1>Checkout cancelled — {{ product_name }}</h1>
   <p>Nothing was charged. You can start again whenever you are ready.</p>
-  <div class="consent-actions">
-    <a href="{{ start_path }}" class="btn-confirm">Start again</a>
-    <a href="/" class="btn-cancel">Home</a>
+  <div class="{{ actions_class }}">
+    <a href="{{ start_path }}" class="{{ confirm_class }}">Start again</a>
+    <a href="/" class="{{ cancel_class }}">Home</a>
   </div>
   {% else %}
   <h1>{{ product_name }}</h1>
   <p>We could not find a purchase or a pending upload for this
      checkout. If you were charged, contact
      disputes@goodfolkdigital.com and we will sort it out.</p>
-  <div class="consent-actions">
-    <a href="/" class="btn-cancel">Home</a>
+  <div class="{{ actions_class }}">
+    <a href="/" class="{{ cancel_class }}">Home</a>
   </div>
   {% endif %}
 </div>
+{% if s6_return %}
+</main>
+{% set suppress_credit_badge = true %}
+{% include "auth_form_script.html" %}
+{% include "nav_script.html" %}
+{% endif %}
 </body>
 </html>

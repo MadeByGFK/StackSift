@@ -904,6 +904,9 @@ async def product_return(request: Request):
     entry = _sb.get_product_sku(sku) or {}
     context = {
         "current_user": _user, "csrf_token": _csrf,
+        # S6/S7 port (A3): the return template scopes its new
+        # presentation by operation — Batch/Compare only.
+        "operation": operation, "sku": sku,
         "product_name": entry.get("name", sku),
         "state": "missing", "filename": None,
         "consent_id": None, "file_hash": None,
@@ -2109,10 +2112,22 @@ def _product_quote(request, *, operation: str, sku: str, file_hash: str, user,
 def _product_consent_context(*, user, csrf_token, filename, file_hash,
                              consent_id, entitlement, sku, heading, intro,
                              size_line, limits_line, cost_sentence,
-                             confirm_action, run_label, note_extra=""):
+                             confirm_action, run_label, note_extra="",
+                             lead_in="", footnote="", note_text=None):
     """Shared dollar consent-page context (Decision 9 copy rules):
     $5, success-only, exports included, 90-day retention, and the
-    Phase A PAY_NOW_PROMISE pinned verbatim on the checkout path."""
+    Phase A PAY_NOW_PROMISE pinned verbatim on the checkout path.
+
+    S6/S7 port additions (presentation only): ``lead_in`` is the
+    design's post-cost-block lead-in and ``footnote`` the per-operation
+    redemption footnote (amendment A4: NEW disclosure composed from
+    the billing contract — redemption binds to the original filenames,
+    plus upload order for Batch, and the 30-day window runs from the
+    SETTLED purchase); both are supplied only by the Batch/Compare
+    callers, so the Oversize render is unchanged apart from the
+    CALL-3 confirm label. ``note_text`` replaces the composed bottom
+    note outright when a caller has retired its facts into the
+    lead-in (CALL-1: no sentence renders twice)."""
     from app import stripe_billing as _sb
     redeem = entitlement is not None
     return {
@@ -2134,10 +2149,13 @@ def _product_consent_context(*, user, csrf_token, filename, file_hash,
         "limits_line": limits_line,
         "cost_label": "$5",
         "cost_sentence": cost_sentence,
-        "confirm_label": run_label if redeem else "Buy — $5",
+        "confirm_label": run_label if redeem else "Pay $5",
         "confirm_action": confirm_action,
         "cancel_label": "Cancel",
-        "note": ("Exports are included. Results are available for 90 days. "
+        "lead_in": lead_in,
+        "footnote": footnote,
+        "note": (note_text if note_text is not None else
+                 "Exports are included. Results are available for 90 days. "
                  + note_extra),
     }
 
@@ -2247,7 +2265,18 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
                                "identical or show no material differences. "
                                "No charge if the comparison fails."),
                 confirm_action="/compare/paid",
-                run_label="Run comparison — already paid")
+                run_label="Run comparison — already paid",
+                lead_in=("Comparison costs $5, paid by card at checkout. "
+                         "Exports are included, and the comparison is kept "
+                         "for 90 days."),
+                footnote=("You have 30 days from the settled purchase to run "
+                          "this comparison; re-uploading the same two files, "
+                          "with the same filenames, redeems your purchase."),
+                note_text="")
+            # S6/S7 port (spec §8.3, the one named context addition):
+            # the design's per-file chips need the A/B file list; both
+            # names are already in hand here — no new computation.
+            context["file_list"] = [f"A — {filename}", f"B — {filename_b}"]
             context["operation_type"] = operation
         return templates.TemplateResponse(
             request, "paid_consent.html", context, status_code=402)
@@ -3353,14 +3382,21 @@ def _batch_consent_page(request: Request, validated, user, csrf_token: str, ip: 
         file_hash=file_hash, consent_id=consent_id,
         entitlement=entitlement, sku="batch",
         heading="Batch analysis",
-        intro=f"{n} files. One flat price covers the whole batch.",
+        intro="One combined report, in upload order.",
         size_line=f"{total_bytes:,} bytes across {n} files, in upload order",
         limits_line="Free limits apply to every file (10 MB / 50,000 lines each). Duplicate filenames are separate files, told apart by their number.",
-        cost_sentence=("This batch produces one combined report. "
-                       "No charge if the batch fails."),
+        cost_sentence=("This batch costs $5 — one flat price for all files "
+                       "in the set. No charge if the batch fails."),
         confirm_action="/batch/paid",
         run_label=f"Analyze {n} files \u2014 already paid",
-        note_extra="PDF export of the combined report is included.")
+        lead_in=("Batch analysis costs $5, paid by card at checkout. "
+                 "Exports are included, and the combined report is kept "
+                 "for 90 days."),
+        footnote=("You have 30 days from the settled purchase to run this "
+                  "batch; re-uploading the same files, with the same "
+                  "filenames in the same upload order, redeems your "
+                  "purchase."),
+        note_text="PDF export of the combined report is included.")
     context["file_list"] = [f"{ordinal}. {filename}" for ordinal, filename, _ in files]
     context["operation_type"] = "batch"
     return templates.TemplateResponse(
