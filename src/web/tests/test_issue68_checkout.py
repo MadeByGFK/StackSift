@@ -12,6 +12,14 @@
   (issue #154 — production runs an rk_live_ key).
 
 Stripe's HTTP API is faked at the httpx boundary — no network, no keys.
+
+Issue #164 Phase C re-base: pack SALES are retired. The billing-module
+session helper above stays (settlement/product plumbing), but the
+/credits page now renders dollar pricing with no pack grid and no buy
+forms, and POST /credits/checkout fails closed with 410 for every
+caller — before auth/CSRF/config checks, before any Stripe call, and
+before any purchase row. The route tests below assert that retirement
+with the same strength the old tests asserted session creation.
 """
 import os
 from types import SimpleNamespace
@@ -285,109 +293,164 @@ def test_stripe_error_fails_closed(checkout_env, monkeypatch):
 
 # --- credits page entry point --------------------------------------------
 
+def _offer_card(html, sku):
+    # A card contains nested divs, so take a fixed window from its start
+    # (cards are a few hundred bytes; the window stays inside this card).
+    start = html.index(f'data-product="{sku}"')
+    return html[start:start + 1200]
+
+
 def test_credits_page_anonymous_sees_packs_not_buy_forms(checkout_env):
+    # Phase C premise: anonymous visitors see the DOLLAR pricing page —
+    # the four product offers — and no pack grid, no buy forms, and no
+    # checkout route anywhere on the page.
     resp = checkout_env.client.get("/credits")
     assert resp.status_code == 200
-    assert "Starter" in resp.text and "Growth" in resp.text and "Power" in resp.text
-    assert 'action="/credits/checkout"' not in resp.text
-    assert "Sign up to buy" in resp.text
+    assert 'id="offers"' in resp.text
+    for name in ("Investigation Report", "Compare", "Batch Analysis",
+                 "Large-File Analysis"):
+        assert name in resp.text, name
+    assert "$9" in resp.text and "$5" in resp.text
+    assert 'id="packs"' not in resp.text
+    assert 'name="pack_id"' not in resp.text
+    assert "/credits/checkout" not in resp.text
+    assert "Sign up free" in resp.text
     # The issue-67 notify bridge is gone with checkout.
     assert "/credits/notify" not in resp.text
     assert "notify-capture" not in resp.text
 
 
 def test_credits_page_logged_in_shows_buy_forms(checkout_env):
+    # Phase C premise: signing in changes nothing about buying on this
+    # page — dollar offers are informational (purchases start from the
+    # report/quote flows); there are no pack buy forms for anyone.
     user_id, csrf = _login(checkout_env)
     resp = checkout_env.client.get("/credits")
     assert resp.status_code == 200
+    assert 'id="offers"' in resp.text and "offer-card" in resp.text
     for pack_id in ("starter", "growth", "power"):
-        assert f'name="pack_id" value="{pack_id}"' in resp.text, pack_id
-    assert f'name="csrf_token" value="{csrf}"' in resp.text
-    assert "data-checkout-form" in resp.text
+        assert f'name="pack_id" value="{pack_id}"' not in resp.text, pack_id
+    assert 'action="/credits/checkout"' not in resp.text
+    assert "/credits/checkout" not in resp.text
+    assert "Manage your account" in resp.text
 
 
 def test_credits_page_unconfigured_pack_shows_coming_soon(checkout_env, monkeypatch):
+    # Phase C premise: "unconfigured" is now a PRODUCT-price fact. With
+    # every product price configured except the Investigation Report's,
+    # only that offer card shows Coming soon; the retired pack price
+    # envs have no effect on the page at all.
     monkeypatch.delenv("STRIPE_PRICE_POWER", raising=False)
+    monkeypatch.delenv("STRIPE_PRICE_INVESTIGATION_REPORT", raising=False)
+    monkeypatch.setenv("STRIPE_PRICE_COMPARE", "price_test_compare")
+    monkeypatch.setenv("STRIPE_PRICE_BATCH", "price_test_batch")
+    monkeypatch.setenv("STRIPE_PRICE_LARGE_FILE", "price_test_large_file")
     _login(checkout_env)
     resp = checkout_env.client.get("/credits")
     assert resp.status_code == 200
+    assert "Coming soon" in _offer_card(resp.text, "investigation_report")
+    assert "Coming soon" not in _offer_card(resp.text, "compare")
     assert 'name="pack_id" value="power"' not in resp.text
-    assert "Coming soon" in resp.text
 
 
 def test_credits_page_checkout_banners(checkout_env):
-    assert "Payment complete" in checkout_env.client.get("/credits?checkout=success").text
-    assert "no charge was made" in checkout_env.client.get("/credits?checkout=cancelled").text
-    assert "Payment complete" not in checkout_env.client.get("/credits").text
+    # Phase C premise (C6c): the pricing page renders NO return banner
+    # from a query string — neither the success nor the cancelled
+    # variant; the page is the same dollar pricing either way.
+    for suffix in ("?checkout=success", "?checkout=cancelled", ""):
+        text = checkout_env.client.get(f"/credits{suffix}").text
+        assert "checkout-banner" not in text, suffix
+        assert "Payment complete" not in text, suffix
+        assert "no charge was made" not in text, suffix
+        assert 'id="offers"' in text, suffix
 
 
 # --- checkout route --------------------------------------------------------
 
 def test_checkout_anonymous_routed_to_signup(checkout_env):
+    # Phase C premise: the retired route answers 410 to EVERYONE —
+    # anonymous callers are no longer routed to signup first, and the
+    # retirement happens before any Stripe call or purchase row.
+    from app import models
+
     resp = checkout_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": "x"})
-    assert resp.status_code == 401
-    assert "sign up" in resp.json()["error"].lower()
+    assert resp.status_code == 410
+    assert "retired" in resp.json()["error"].lower()
+    with checkout_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_checkout_rejects_unknown_pack(checkout_env):
+    # Phase C premise: unknown pack ids fail closed with the same 410
+    # retirement as known ones — there is no pack validation any more
+    # because there is no pack checkout.
+    from app import models
+
     _, csrf = _login(checkout_env)
     resp = checkout_env.client.post(
         "/credits/checkout", data={"pack_id": "platinum", "csrf_token": csrf})
-    assert resp.status_code == 400
+    assert resp.status_code == 410
+    assert "retired" in resp.json()["error"].lower()
+    with checkout_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_checkout_rejects_bad_csrf(checkout_env):
+    # Phase C premise: retirement precedes even the CSRF check — a bad
+    # token gets the 410 retirement, never a session, never a row.
+    from app import models
+
     _login(checkout_env)
     resp = checkout_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": "wrong"})
-    assert resp.status_code == 403
+    assert resp.status_code == 410
+    assert "retired" in resp.json()["error"].lower()
+    with checkout_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_checkout_creates_session_for_each_pack(checkout_env, monkeypatch):
+    # Phase C premise: for EACH pack the route creates nothing — 410,
+    # zero Stripe calls, zero purchase rows (the old test asserted one
+    # session + one pending row per pack, with the purchase id riding
+    # in the session metadata).
     from app import models, stripe_billing
 
     user_id, csrf = _login(checkout_env)
     captured = []
     monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
-    for pack_id, price_id in PACK_PRICES.items():
+    for pack_id in PACK_PRICES:
         resp = checkout_env.client.post(
             "/credits/checkout", data={"pack_id": pack_id, "csrf_token": csrf})
-        assert resp.status_code == 200, (pack_id, resp.text)
-        call = captured[-1]
-        assert call["data"]["line_items[0][price]"] == price_id
-        assert call["data"]["metadata[user_id]"] == user_id
-        assert call["data"]["metadata[pack_id]"] == pack_id
-    # Issue #69: each checkout attempt recorded a pending purchase whose id
-    # rode in the session metadata, each with its own Stripe session id.
+        assert resp.status_code == 410, (pack_id, resp.text)
+        assert "retired" in resp.json()["error"].lower()
+    assert captured == []
     with checkout_env.sessions() as db:
-        purchases = db.query(models.CreditPurchase).all()
-        assert len(purchases) == 3
-        session_ids = set()
-        for p in purchases:
-            assert p.status == "pending"
-            assert p.stripe_session_id not in session_ids
-            session_ids.add(p.stripe_session_id)
+        assert db.query(models.CreditPurchase).count() == 0
 
 
-def test_checkout_503_when_stripe_unconfigured(checkout_env, monkeypatch):
+def test_checkout_410_even_when_stripe_unconfigured(checkout_env, monkeypatch):
+    # Phase C premise (was: 503 when unconfigured): retirement precedes
+    # the config pre-check too, so an unconfigured Stripe still answers
+    # the honest 410 — and, as before, no purchase row is written.
     from app import models
 
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     _, csrf = _login(checkout_env)
     resp = checkout_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
-    assert resp.status_code == 503
-    assert "not available yet" in resp.json()["error"]
-    # Config pre-check fails before any database write: no purchase row.
+    assert resp.status_code == 410
+    assert "retired" in resp.json()["error"].lower()
     with checkout_env.sessions() as db:
         assert db.query(models.CreditPurchase).count() == 0
 
 
-def test_checkout_accepts_live_key(checkout_env, monkeypatch):
-    # Issue #126 premise-changed test: the route used to answer 500 for a
-    # live key without any network call; it now creates the session.
-    from app import stripe_billing
+def test_checkout_410_even_with_live_key(checkout_env, monkeypatch):
+    # Phase C premise (was issue #126: a live key creates the session):
+    # retirement precedes key handling — a live key creates no session,
+    # no network call, and no purchase row.
+    from app import models, stripe_billing
 
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc123")
     captured = []
@@ -395,15 +458,19 @@ def test_checkout_accepts_live_key(checkout_env, monkeypatch):
     _, csrf = _login(checkout_env)
     resp = checkout_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["checkout_url"].startswith(
-        "https://checkout.stripe.com/pay/")
-    assert len(captured) == 1
-    assert captured[0]["auth"][0] == "sk_live_abc123"
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
+    assert captured == []
+    with checkout_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_checkout_rate_limited(checkout_env, monkeypatch):
-    from app import stripe_billing
+    # Phase C premise: there is no checkout left to rate-limit — six
+    # rapid attempts all get the uniform 410, with zero Stripe calls
+    # and zero purchase rows (the old 5-then-429 shape is retired with
+    # the route).
+    from app import models, stripe_billing
 
     _, csrf = _login(checkout_env, email="ratelimit@example.com")
     captured = []
@@ -413,8 +480,10 @@ def test_checkout_rate_limited(checkout_env, monkeypatch):
             "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf}).status_code
         for _ in range(6)
     ]
-    assert statuses[:5] == [200] * 5
-    assert statuses[5] == 429
+    assert statuses == [410] * 6
+    assert captured == []
+    with checkout_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 # --- notify bridge removal -------------------------------------------------
@@ -441,7 +510,10 @@ def test_402_page_carries_buy_credits_cta(checkout_env):
     assert response.status_code == 402
     body = response.body.decode()
     assert "Insufficient credits." in body
-    assert 'href="/credits"' in body and "Buy credits" in body
+    # Phase C premise: the CTA still links to /credits (now Pricing),
+    # but it reads "See pricing" — nothing offers to buy credits.
+    assert 'href="/credits"' in body and "See pricing" in body
+    assert "Buy credits" not in body
 
 
 def test_non_402_page_has_no_buy_cta(checkout_env):
