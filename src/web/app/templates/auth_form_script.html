@@ -1,8 +1,7 @@
 <script>
 // ISSUE-68: the submit wiring lives in a named function so a form created
-// after page load — the credit-badge modal's quick-buy form — gets exactly
-// the same handling (incl. the data-checkout-form redirect below) as the
-// forms rendered into the page.
+// after page load gets exactly the same handling (incl. the
+// data-checkout-form redirect below) as the forms rendered into the page.
 function wireAuthForm(form) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -102,10 +101,10 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
   wireAuthForm(form);
 }
 
-// Issue #164 Phase C (Decision 9 / C3): the header credit badge
-// and the quick-buy pack modal are REMOVED with the retired
-// /auth/balance API. The shared script's non-credit duties
-// (wireAuthForm, success modals, PDF download handling) remain.
+// Issue #164 Phase C (Decision 9 / C3): the header badge and the
+// quick-buy pack modal are REMOVED with the retired balance API.
+// The shared script's non-credit duties (wireAuthForm, success
+// modals, PDF download handling) remain.
 
 (function() {
   const forms = document.querySelectorAll('form[action$="/pdf"]');
