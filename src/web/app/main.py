@@ -4594,6 +4594,16 @@ async def report_export_structured(request: Request, result_id: str, export_form
     # Report-kind gate (§7): compare/batch/unknown fail closed before charge.
     try:
         se.check_report_kind(payload)
+        if source.type == "comparison":
+            # Issue #164 Phase C (C2): the format matrix keys off the
+            # report's kind, and a comparison report IS a comparison
+            # report by its stored type — a payload that lost (or never
+            # carried) the report_kind discriminator must not slip a
+            # comparison CSV/JSON past this gate now that the free
+            # path no longer stops at a charge. Fail closed, as §7
+            # requires, independent of the payload discriminator.
+            raise se.UnsupportedReportKind(
+                "Structured export is not yet supported for this report type")
     except se.UnsupportedReportKind:
         return JSONResponse(
             {"error": "Structured export is not yet supported for this report type"},
