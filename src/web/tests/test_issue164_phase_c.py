@@ -200,19 +200,25 @@ def _post_event(env, event_dict):
                  "content-type": "application/json"})
 
 
+PACK_CREDITS = {"starter": 10, "growth": 25, "power": 75}
+
+
 def _pack_event(event_id, session_id, purchase_id, user_id, *,
                 pack_id="starter", amount=500, kind=None):
+    # Shape mirrors test_issue69_webhook._checkout_event (the proven
+    # settlement fixture): metadata carries credits + pricing_version.
     meta = {"pack_id": pack_id, "purchase_id": str(purchase_id),
-            "user_id": str(user_id), "pricing_version": "1"}
+            "user_id": str(user_id), "pricing_version": "1",
+            "credits": str(PACK_CREDITS[pack_id])}
     if kind:
         meta["kind"] = kind
     return {"id": event_id, "type": "checkout.session.completed",
             "livemode": False,
             "data": {"object": {
-                "id": session_id, "payment_status": "paid",
-                "status": "complete", "mode": "payment",
+                "id": session_id, "object": "checkout.session",
                 "amount_total": amount, "currency": "usd",
                 "payment_intent": f"pi_{session_id}",
+                "client_reference_id": str(user_id),
                 "metadata": meta}}}
 
 
