@@ -14,6 +14,18 @@ rows were static and "Buy credits" just linked to /credits. Now:
   modal hands off to the pack modal instead of linking away.
 
 Stripe's HTTP API is faked at the httpx boundary — no network, no keys.
+
+Issue #164 Phase C re-base (C3): the header badge and the quick-buy
+pack modal are REMOVED, and /auth/balance is retired (410) along with
+its CSRF-for-modal provision. Every test below keeps its subject —
+the balance contract, the modal markup, the PDF-modal handoff — and
+asserts the retirement with the same strength: the endpoint serves no
+balance/CSRF/readiness to anyone, the shared script contains no badge,
+no pack rows, no modal buy form and no pack copy, and the PDF error
+modal has no insufficient-credits state and no buy handoff (exports
+are free). The shared script's non-credit duties (wireAuthForm, the
+data-checkout-form redirect used by PRODUCT checkout forms, the PDF
+error modal itself) are asserted preserved.
 """
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,109 +129,138 @@ def _fake_post(captured):
 # --- /auth/balance contract -------------------------------------------------
 
 def test_balance_logged_in_includes_csrf_and_readiness(modal_env):
+    # Phase C premise: /auth/balance is retired — a logged-in caller
+    # gets 410 and NONE of the old fields: no balance value, no session
+    # CSRF token for the modal, no per-pack readiness map.
     _, csrf = _login(modal_env)
     resp = modal_env.client.get("/auth/balance")
-    assert resp.status_code == 200
+    assert resp.status_code == 410
     data = resp.json()
-    assert isinstance(data["balance"], int)
-    # The token is the session token — the same one the page forms use.
-    assert data["csrf_token"] == csrf
-    assert data["packs"] == {"starter": True, "growth": True, "power": True}
+    assert data.get("balance") is None
+    assert "csrf_token" not in data
+    assert "packs" not in data
 
 
 def test_balance_anonymous_omits_csrf_and_readiness(modal_env):
+    # Phase C premise: anonymous callers get the same honest 410 (the
+    # old contract answered 200 with {"balance": None} and omitted the
+    # modal fields; nothing is served to anyone now).
     resp = modal_env.client.get("/auth/balance")
-    assert resp.status_code == 200
+    assert resp.status_code == 410
     data = resp.json()
-    assert data == {"balance": None}
+    assert data.get("balance") is None
     assert "csrf_token" not in data
     assert "packs" not in data
 
 
 def test_balance_readiness_reflects_unconfigured_pack(modal_env, monkeypatch):
+    # Phase C premise: pack readiness no longer exists as a concept —
+    # unconfiguring a pack price changes nothing; the endpoint stays
+    # retired and serves no readiness map.
     _login(modal_env)
     monkeypatch.delenv("STRIPE_PRICE_POWER")
-    data = modal_env.client.get("/auth/balance").json()
-    assert data["packs"] == {"starter": True, "growth": True, "power": False}
+    resp = modal_env.client.get("/auth/balance")
+    assert resp.status_code == 410
+    assert "packs" not in resp.json()
 
 
 def test_balance_csrf_token_authorizes_checkout(modal_env, monkeypatch):
-    # End to end: the token the modal receives from /auth/balance is the
-    # token /credits/checkout accepts — no page-form token involved.
-    from app import stripe_billing
+    # Phase C premise: there is no balance-endpoint token to authorize
+    # anything (the endpoint is 410), and even the real session CSRF
+    # token cannot buy a pack — /credits/checkout answers the 410
+    # retirement with zero Stripe calls and zero purchase rows.
+    from app import models, stripe_billing
 
-    _login(modal_env)
+    _, csrf = _login(modal_env)
     captured = []
     monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
-    balance = modal_env.client.get("/auth/balance").json()
+    balance = modal_env.client.get("/auth/balance")
+    assert balance.status_code == 410
+    assert "csrf_token" not in balance.json()
     resp = modal_env.client.post(
         "/credits/checkout",
-        data={"pack_id": "power", "csrf_token": balance["csrf_token"]},
+        data={"pack_id": "power", "csrf_token": csrf},
     )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["checkout_url"].startswith("https://checkout.stripe.com/")
-    assert captured[0]["data"]["line_items[0][price]"] == PACK_PRICES["power"]
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
+    assert captured == []
+    with modal_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 # --- modal template: selectable packs + quick-buy form ----------------------
 
 def test_modal_pack_rows_are_selectable_radios():
-    assert 'type="radio"' in SCRIPT
-    assert 'name="credit-pack"' in SCRIPT
-    assert 'role="radiogroup"' in SCRIPT
-    assert "data-pack-row" in SCRIPT
-    # Selected row gold, unselected default — the modal's existing palette.
-    assert "BORDER_SELECTED = '#ecc94b'" in SCRIPT
-    assert "BORDER_DEFAULT = '#2d3d6b'" in SCRIPT
+    # Phase C premise: the modal is gone — no pack radio rows, no
+    # radiogroup, no selected/default border logic in the shared script.
+    assert 'name="credit-pack"' not in SCRIPT
+    assert 'role="radiogroup"' not in SCRIPT
+    assert "data-pack-row" not in SCRIPT
+    assert "BORDER_SELECTED" not in SCRIPT
+    assert "BORDER_DEFAULT" not in SCRIPT
+    # The badge that opened the modal is gone too.
+    assert "credit-badge" not in SCRIPT
+    assert "/auth/balance" not in SCRIPT
 
 
 def test_modal_default_selection_is_growth():
-    # Growth preselected when purchasable; first ready pack otherwise.
-    assert "readyIds.indexOf('growth') !== -1 ? 'growth' : readyIds[0]" in SCRIPT
-    # The hidden pack_id starts at the default and follows selection changes.
-    assert 'name="pack_id" id="credit-modal-pack-id"' in SCRIPT
-    assert "packIdInput.value = radio.value" in SCRIPT
+    # Phase C premise: no default selection exists — no ready-pack
+    # computation, no hidden pack_id input following a selection.
+    assert "readyIds" not in SCRIPT
+    assert 'name="pack_id" id="credit-modal-pack-id"' not in SCRIPT
+    assert "packIdInput" not in SCRIPT
+    assert "MODAL_PACKS" not in SCRIPT
 
 
 def test_modal_buy_form_posts_to_existing_checkout_contract():
-    # The form is built with the DOM API inside the modal builder — it
-    # never exists in rendered page markup.
-    assert "buyForm.action = '/credits/checkout'" in SCRIPT
-    assert "buyForm.method = 'post'" in SCRIPT
-    assert "buyForm.setAttribute('data-auth-form', '')" in SCRIPT
-    assert "buyForm.setAttribute('data-checkout-form', '')" in SCRIPT
-    assert "buyForm.id = 'credit-modal-form'" in SCRIPT
-    assert 'name="csrf_token"' in SCRIPT
-    # Errors surface inline in the form's status element.
-    assert '<p role="status"' in SCRIPT
-    # The dynamically created form is wired with the shared submit handler.
-    assert "wireAuthForm(buyForm)" in SCRIPT
+    # Phase C premise: no modal buy form is ever built — no form posting
+    # to the retired checkout route, no modal form id, no wire-up.
+    assert "buyForm" not in SCRIPT
+    assert "'/credits/checkout'" not in SCRIPT
+    assert '"/credits/checkout"' not in SCRIPT
+    assert "credit-modal-form" not in SCRIPT
+    assert "wireAuthForm(buyForm)" not in SCRIPT
+    # Preserved: the shared script's non-credit duties remain — the
+    # auth-form wiring and the data-checkout-form redirect that PRODUCT
+    # checkout forms (Phase A/B) still rely on.
+    assert "wireAuthForm" in SCRIPT
+    assert "data-checkout-form" in SCRIPT
 
 
 def test_modal_keeps_pack_copy_and_popular_badge():
+    # Phase C premise: none of the modal's pack copy survives — no pack
+    # names, credit counts, pack prices, or POPULAR badge in the script.
     for copy in ("name: 'Starter'", "credits: 10", "price: '$5'",
                  "name: 'Growth'", "credits: 25", "price: '$10'",
                  "name: 'Power'", "credits: 75", "price: '$25'", "POPULAR"):
-        assert copy in SCRIPT, copy
+        assert copy not in SCRIPT, copy
 
 
 def test_modal_coming_soon_state_when_nothing_ready():
-    # Production parity: no live buy form, details live on /credits.
-    assert "Purchasing coming soon." in SCRIPT
-    assert "View details" in SCRIPT
-    # The quick-buy form only renders in the quickBuy branch.
-    assert "const quickBuy = Boolean(checkoutState.csrfToken) && readyIds.length > 0" in SCRIPT
+    # Phase C premise: there is no coming-soon state because there is
+    # no modal — the copy and the quickBuy branch condition are gone.
+    assert "Purchasing coming soon." not in SCRIPT
+    assert "quickBuy" not in SCRIPT
+    assert "checkoutState" not in SCRIPT
 
 
 # --- insufficient-credits PDF modal handoff ---------------------------------
 
 def test_pdf_modal_buy_button_opens_pack_modal():
-    assert "window.showCreditModal = showCreditModal" in SCRIPT
-    assert "window.showCreditModal()" in SCRIPT
-    # The old dead-end anchor out of the PDF modal is gone.
+    # Phase C premise: the PDF error modal no longer hands off anywhere
+    # — no showCreditModal export or call, and no /credits buy anchor;
+    # the modal itself (a preserved shared-script duty) just reports
+    # the error with a Close button, because exports are free.
+    assert "showCreditModal" not in SCRIPT
     assert "buy.href = '/credits'" not in SCRIPT
+    assert "error-modal" in SCRIPT
+    assert "Close" in SCRIPT
 
 
 def test_pdf_modal_ruled_copy_unchanged():
-    assert "Insufficient Credits" in SCRIPT
-    assert "PDF export costs 2 credits." in SCRIPT
+    # Phase C premise: the old ruled copy is retired with the charge —
+    # exports are free, so the script carries no insufficient-credits
+    # heading and no per-export credit price anywhere.
+    assert "Insufficient Credits" not in SCRIPT
+    assert "PDF export costs 2 credits." not in SCRIPT
+    assert "costs 2 credits" not in SCRIPT
