@@ -18,9 +18,9 @@
 
   <section class="s2-panel">
     <h1>Compare two logs</h1>
-    <p>Upload A (before) and B (after). Comparison costs 3 credits, charged
-    only on success — even if the logs are identical or show no material
-    differences. Both files are subject to the free limits
+    <p>Upload A (before) and B (after). Comparison costs $5 flat — even if the logs are identical or show no material
+    differences. Payment is captured at checkout; if generation fails,
+    your purchase is never consumed and you can retry. Both files are subject to the free limits
     (10 MB / 50,000 lines each). Existing reports cannot be compared
     retrospectively: this is upload-only in v1.</p>
     {% if error %}
@@ -35,7 +35,7 @@
         <label for="file_b">B — After</label>
         <input type="file" id="file_b" name="file_b" accept=".log,.txt,.text" required>
       </div>
-      <button type="submit">Compare (3 credits)</button>
+      <button type="submit">Compare ($5)</button>
     </form>
   </section>
 </div>

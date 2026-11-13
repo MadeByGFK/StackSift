@@ -70,11 +70,14 @@ def admit(db, user_id, anonymous_hash, key, digest, ip, worker, consent_id=None)
     if burst >= 2:
         raise C.AdmissionError('Too many requests. Please wait a minute and try again.')
     if count_free(now - timedelta(hours=1)) + count_batch_claims(now - timedelta(hours=1)) >= 10:
-        if consent_id is None:
-            return None, False
-        op = C.admit_paid_operation(db, user_id, 'additional_analysis', key, digest, 1, consent_id, worker,
-            input_manifest=ip)
-        return op, op.worker_id == worker
+        # Issue #164 Phase C (C1, founder CALL-1 ruling 2026-11-13):
+        # the free allowance is a HARD CAP. Beyond it, admission
+        # refuses (the caller renders the refusal with its reset
+        # time); there is no paid additional-analysis branch, no
+        # consent path, and no credit debit. Already-admitted
+        # operations were returned by lookup() above and still
+        # settle/replay on their recorded terms.
+        return None, False
     active_free = db.scalar(select(func.count()).select_from(M.FreeRequest).where(M.FreeRequest.status == 'in_progress'))
     if scope.used + active_free >= scope.max_limit:
         raise C.AdmissionError('Analysis capacity exhausted. Please try again later.')

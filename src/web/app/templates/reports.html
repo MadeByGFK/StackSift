@@ -296,16 +296,16 @@
         <div class="s3-export">
           <button type="button" class="btn btn-ghost s3-export-btn" aria-haspopup="true" aria-expanded="false" data-s3-export-btn>Export <span class="s3-caret" aria-hidden="true">▾</span></button>
           <div class="s3-export-menu" data-s3-export-menu hidden>
-            <form method="post" action="/reports/{{ report.id }}/pdf" class="s3-export-form" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <form method="post" action="/reports/{{ report.id }}/pdf" class="s3-export-form" data-confirm="Exports are free for this report." style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="btn btn-ghost s3-export-item">Export PDF</button>
             </form>
             {% if report.type != 'comparison' and report.report_kind != 'batch' %}
-            <form method="post" action="/reports/{{ report.id }}/exports/csv" class="s3-export-form" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <form method="post" action="/reports/{{ report.id }}/exports/csv" class="s3-export-form" data-confirm="Exports are free for this report." style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="btn btn-ghost s3-export-item">Export CSV</button>
             </form>
-            <form method="post" action="/reports/{{ report.id }}/exports/json" class="s3-export-form" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+            <form method="post" action="/reports/{{ report.id }}/exports/json" class="s3-export-form" data-confirm="Exports are free for this report." style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="btn btn-ghost s3-export-item">Export JSON</button>
             </form>
@@ -341,11 +341,8 @@
            sources, so an Extend form on a deep_dive row would POST
            to a 404 (dead button). Normal reports keep Extend. #}
         {% if report.type != 'deep_dive' and not report.redemption_only %}
-        <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" data-retention-form style="display:inline;margin:0">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
-          <button type="submit" class="btn btn-ghost">Extend</button>
-        </form>
+{# Issue #164 Phase C: the Extend control is removed — retention extensions are no longer sold (the route refuses new extensions with 410). #}
+        
         <span class="retention-status" data-retention-status role="status" style="display:none"></span>
         {% endif %}
       </div></td>
@@ -535,56 +532,6 @@
     extendMsg.textContent = message || 'Retention extension failed. Please try again.';
     extendModal.style.display = 'flex';
   }
-  function refreshCreditBadgeFromBalance() {
-    // PR #143 remediation (Codex P2): a replayed success means the
-    // server committed the charge on an EARLIER attempt whose
-    // response never reached this page (e.g. it was lost to a
-    // network error), so the badge was never decremented for a
-    // charge that did happen. The local badge value cannot be
-    // trusted in that case — refresh it from the authoritative
-    // GET /auth/balance payload (the same payload
-    // auth_form_script.html renders #credit-badge from). If the
-    // balance fetch fails or carries no usable balance, leave the
-    // badge unchanged and show no error: the extension itself
-    // succeeded, so this refresh is best-effort only.
-    var badge = document.getElementById('credit-badge');
-    if (!badge) { return Promise.resolve(); }
-    try {
-      return fetch('/auth/balance', { credentials: 'same-origin' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (!data) { return; }
-          var balance = data.balance;
-          var parsed = null;
-          if (typeof balance === 'number' && isFinite(balance)) {
-            parsed = balance;
-          } else if (typeof balance === 'string' && /^-?\d+$/.test(balance.trim())) {
-            parsed = parseInt(balance.trim(), 10);
-          }
-          if (parsed === null) { return; }
-          badge.textContent = '\u{1FA99} ' + parsed + ' credits';
-        })
-        .catch(function () {});
-    } catch (err) {
-      return Promise.resolve();
-    }
-  }
-  function updateCreditBadge(cost, replayed) {
-    // The header badge (#credit-badge, rendered by
-    // auth_form_script.html from /auth/balance) is the page's credit
-    // balance display. A fresh extension charged `cost` just now,
-    // so decrement locally. A replayed response charged nothing
-    // new on THIS attempt, but the original attempt may have
-    // committed without its response reaching the page — refresh
-    // from the server instead of guessing (see above).
-    if (replayed) { return refreshCreditBadgeFromBalance(); }
-    var badge = document.getElementById('credit-badge');
-    if (!badge) { return; }
-    var match = String(badge.textContent || '').match(/-?\d+/);
-    if (!match) { return; }
-    var next = parseInt(match[0], 10) - (cost || 1);
-    badge.textContent = '\u{1FA99} ' + next + ' credits';
-  }
   function updateExtendedRow(form, data) {
     var actionsCard = form.closest ? form.closest('.card') : null;
     var card = actionsCard;
@@ -651,7 +598,6 @@
         .then(function (d) {
           if (d._httpOk && d.status === 'extended') {
             updateExtendedRow(f, d);
-            return updateCreditBadge(d.cost, d.replayed);
           } else {
             showExtendError(d.error || d.message);
           }

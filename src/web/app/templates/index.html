@@ -30,7 +30,7 @@
   margin: 2rem 0;
 }
 .privacy-notice h3 { margin: 0 0 0.5rem 0; color: #ffffff; font-size: 1.1rem; }
-/* ISSUE-68: insufficient-credits (402) entry point to the credits page. */
+/* Entry-point CTA to the Pricing page (kept class name for styling). */
 .buy-credits-cta { display: inline-block; margin: 0 0 1.5rem; padding: 12px 32px; border-radius: 8px; font-weight: 700; background: #ecc94b; color: #1a1a2e; text-decoration: none; }
 .buy-credits-cta:hover { filter: brightness(1.1); }
 .privacy-notice p { margin: 0; font-size: 0.9rem; color: #a0aec0; line-height: 1.6; }
@@ -103,7 +103,7 @@ document.addEventListener('DOMContentLoaded', function() {
   {% if error %}
   <div class="error" role="alert">{{ error }}</div>
   {% if buy_credits %}
-  <p style="text-align:center;"><a href="/credits" class="buy-credits-cta">Buy credits</a></p>
+  <p style="text-align:center;"><a href="/credits" class="buy-credits-cta">See pricing</a></p>
   {% endif %}
   {% endif %}
 
@@ -113,7 +113,7 @@ document.addEventListener('DOMContentLoaded', function() {
     <label class="dropzone s2-dropzone" id="dropzone" for="file-input">
       <span class="big">Drag &amp; drop your log file here</span>
       <span class="small\">or click to browse — .log or .txt, up to 10 MB</span>
-      <span class=\"small\">Signed in? Larger files (up to 100 MB / 500,000 lines) run with 3 credits.</span>
+      <span class=\"small\">Signed in? Larger files (up to 100 MB / 500,000 lines) run as Large-File Analysis — $5 per run.</span>
       <span class="filename" id="filename"></span>
     </label>
     <div class="actions">

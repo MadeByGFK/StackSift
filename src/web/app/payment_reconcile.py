@@ -45,6 +45,28 @@ STRIPE_API_BASE = "https://api.stripe.com/v1"
 PAGE_LIMIT = 100
 LOOKBACK_DAYS = 31  # backfill bound for the first run
 REFUND_ATTRIBUTION_LOOKBACK_DAYS = 60  # late refunds still find their pack
+
+# Issue #164 Phase C (C6a): the durable cutover anchor. Recorded at
+# activation (read-only pending-purchase/payable-session inventory on
+# #164) and supplied via PHASE_C_CUTOVER_AT (ISO-8601 UTC). Any pack
+# purchase COMPLETION after the anchor is an alert condition — it can
+# only be a pre-cutover pending session settling late (grant honoured,
+# founder surfaced) or a bug/bypass — regardless of when its row was
+# created. Unset anchor = pre-cutover, no alerting.
+import os as _os
+
+
+def phase_c_cutover_anchor():
+    raw = _os.environ.get("PHASE_C_CUTOVER_AT") or ""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 SETTLE_LOOKBACK_DAYS = 4  # a session created on day D can settle at most
 # ~4 days later: Checkout Sessions expire 24h after creation and Stripe
 # retries webhook delivery for up to ~3 days, so the prior-session fetch
@@ -997,6 +1019,29 @@ def compute_reconciliation(
             "per_sku": product_per_sku,
         },
     }
+
+    # Issue #164 Phase C (C6a): post-cutover pack completions alert.
+    _anchor = phase_c_cutover_anchor()
+    if _anchor is not None:
+        for _pid, _completed_at in db.execute(
+            select(M.CreditPurchase.id, M.CreditPurchase.completed_at).where(
+                M.CreditPurchase.status == "completed",
+                M.CreditPurchase.completed_at.isnot(None),
+            )
+        ).all():
+            _ca = _completed_at
+            if _ca is not None and _ca.tzinfo is None:
+                _ca = _ca.replace(tzinfo=timezone.utc)
+            if _ca is not None and _ca > _anchor and start <= _ca < end:
+                differences.append({
+                    "kind": "post_cutover_pack_completion",
+                    "purchase_id": str(_pid),
+                    "completed_at": _ca.isoformat(),
+                    "note": "pack purchase completed after the Phase C "
+                            "cutover anchor — pre-cutover pending "
+                            "settlement (grant honoured, surface to "
+                            "founder) or a sales bypass",
+                })
 
     return {
         "per_family": per_family,

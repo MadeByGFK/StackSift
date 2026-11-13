@@ -112,18 +112,18 @@
        "Get the Investigation Report" CTA is the purchase entry and
        opens #analysis-modal directly. #}
     <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
-          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="Exports are free for this report." style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
+            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">Free</span></button>
           </form>
           {% if not report_kind %}
-          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="Exports are free for this report." style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
+            <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">Free</span></button>
           </form>
-          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="Exports are free for this report." style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
+            <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">Free</span></button>
           </form>
           {% endif %}
           {# Issue #106 Stage 2, as amended by the 2026-11-10
@@ -187,9 +187,9 @@
           <fieldset id="share-format-choice" style="border:none;margin:0 0 12px;padding:0">
             <legend style="margin-bottom:6px">Format</legend>
             <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="txt" checked> TXT (free)</label>
-            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="pdf"{% if not export_unlocked %} data-locked="1"{% endif %}> PDF{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
-            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="json"{% if not export_unlocked %} data-locked="1"{% endif %}> JSON{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
-            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="csv"{% if not export_unlocked %} data-locked="1"{% endif %}> CSV{% if not export_unlocked %} 🔒 locked — export unlock required{% endif %}</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="pdf"> PDF</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="json"> JSON</label>
+            <label style="display:block;margin:2px 0"><input type="radio" name="share-format" value="csv"> CSV</label>
           </fieldset>
           <div id="share-link-row" style="display:none;margin-bottom:12px">
             <input type="text" id="share-link" readonly style="width:100%;box-sizing:border-box;margin-bottom:8px">

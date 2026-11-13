@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StackSift — Use a Credit</title>
+<title>StackSift — Confirm</title>
 <link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/style.css?v=4">
@@ -41,9 +41,9 @@
   {% if limits_line %}<p>{{ limits_line }}</p>{% endif %}
   <div class="cost">{{ cost_label }}</div>
   <div class="cost-label">{{ cost_sentence }}</div>
-  {% if not product_mode %}
-  <div class="balance">Your balance: {{ eligible }} eligible credits ({{ balance }} total)</div>
-  {% endif %}
+  {# Issue #164 Phase C (Decision 9): the consent balance line is
+     removed with the credit branch — product consents show the
+     dollar price and the pay-now promise only. #}
   {% if product_checkout %}
   {# Issue #164 Phase B: dollar checkout starts here; settlement is
      webhook-only and the entitlement binds to this content digest. #}

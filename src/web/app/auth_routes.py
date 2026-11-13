@@ -219,15 +219,31 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
         .all()
     )
     linked_providers = {row[0] for row in oauth_links}
-    # ISSUE-71: the account view shows the ledger-derived balance and the
-    # purchase history (pack, date, credits granted) — no display-only
-    # numbers, no card or Stripe detail.
-    from app import credits as credits_helpers
+    # Issue #164 Phase C (Decision 9): the account view shows the
+    # dollar-era facts — completed PRODUCT purchases (name, date,
+    # amount) — and no credit balance, no Buy-credits control, and no
+    # pack history. Credit-era rows are preserved in the database
+    # (Decision 7) but are no longer a user-facing account surface.
+    from app import models as _pm
     from app import stripe_billing as stripe_billing_helpers
 
-    balance_summary = credits_helpers.get_balance_summary(db, user.id)
-    purchases = credits_helpers.list_completed_purchases(db, user.id)
-    pack_names = {pid: p["name"] for pid, p in stripe_billing_helpers.PACKS.items()}
+    _product_rows = (
+        db.query(_pm.ProductPurchase)
+        .filter(
+            _pm.ProductPurchase.user_id == user.id,
+            _pm.ProductPurchase.status == "completed",
+        )
+        .order_by(_pm.ProductPurchase.completed_at.desc())
+        .all()
+    )
+    product_purchases = [
+        {
+            "name": (stripe_billing_helpers.get_product_sku(p.sku) or {}).get("name", p.sku),
+            "amount_cents": p.amount_cents,
+            "completed_at": p.completed_at,
+        }
+        for p in _product_rows
+    ]
     # Issue #135: Report Access — every ACTIVE share link for this
     # account (report, format, created time, copyable live link).
     # Links whose report has expired or been deleted serve nothing,
@@ -292,9 +308,7 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "current_session_id": str(session.id) if session else None,
             "csrf_token": session.csrf_token if session else "",
             "linked_providers": linked_providers,
-            "balance_summary": balance_summary,
-            "purchases": purchases,
-            "pack_names": pack_names,
+            "product_purchases": product_purchases,
             "share_links": share_links,
         },
     )
@@ -551,35 +565,16 @@ async def me(request: Request, db: DBSession = Depends(get_db)):
 
 @router.get("/auth/balance")
 async def balance(request: Request, db: DBSession = Depends(get_db)):
-    """Return credit balance for the logged-in user (for nav display).
+    """Issue #164 Phase C (C3): RETIRED as a balance/readiness API.
 
-    ISSUE-68 (in-modal quick buy): a logged-in response also carries the
-    session CSRF token — the same token the page forms use — and per-pack
-    checkout readiness, so the nav credit-badge modal can post the
-    selected pack straight to /credits/checkout instead of sending the
-    user to the credits page. Anonymous callers get neither field.
+    Credit balances stop being displayed at cutover and the header
+    badge + quick-buy modal that consumed this endpoint are removed
+    with it (including its CSRF provision for the modal). The route
+    stays registered only to answer honestly: 410, no stale JSON.
     """
-    session = auth_helpers.get_session_from_cookie(db, request)
-    if not session:
-        return JSONResponse({"balance": None})
-    try:
-        from app import credits as credits_helpers
-        summary = credits_helpers.get_balance_summary(db, session.user_id)
-        balance_value = summary["balance"]
-    except Exception:
-        return JSONResponse({"balance": None})
-    from app import stripe_billing as stripe_billing_helpers
-
-    readiness = {
-        pack["id"]: pack["ready"]
-        for pack in stripe_billing_helpers.packs_for_display()
-    }
     return JSONResponse(
-        {
-            "balance": balance_value,
-            "csrf_token": session.csrf_token,
-            "packs": readiness,
-        }
+        {"error": "Credit balances are retired. See /credits for pricing."},
+        status_code=410,
     )
 
 @router.get("/auth/sessions")

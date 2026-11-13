@@ -396,48 +396,31 @@ async def oversize_body_guard(request: Request, call_next):
 
 @app.get("/credits", response_class=HTMLResponse)
 async def credits(request: Request):
+    """Issue #164 Phase C (Decision 8): the dollar Pricing page.
+
+    This route's one job is pricing. It renders the four ruled dollar
+    prices from products_for_display() (fail-closed "Coming soon"
+    when a Price env is unset). Phase C retired, on this page: the
+    pack grid and its buy forms, the balance banner/strip, the
+    /credits/balance poll, and the latest-CreditPurchase return
+    banners (C6c) — product returns keep their own purchase-bound
+    authority (/reports/{rid} and /products/return). The /pricing
+    301 and the D2 first-touch cookie behaviour on /credits are
+    preserved (C6b); the offer_viewed observer is retargeted to the
+    dollar offer cards in pricing.html.
+    """
     _user, _csrf = _get_current_user_optional(request)
     from app import stripe_billing
 
-    packs = stripe_billing.packs_for_display()
-    # Issue #164 (P2-3): the product card's fail-closed display state
-    # comes from products_for_display() — when the product Price env
-    # is unset the card renders "Coming soon", not a live $9 action.
     products = stripe_billing.products_for_display()
-    status = request.query_params.get("checkout", "")
-    # ISSUE-71: the credits page shows the ledger-derived balance (never a
-    # display-only number) so the post-purchase balance is visible without
-    # the user hunting for it or hitting refresh.
-    balance_summary = None
-    latest_purchase = None
-    if _user is not None:
-        from app.db import SessionLocal
-        from app import credits as credits_helpers
-        from app.models import CreditPurchase
-
-        db = SessionLocal()
-        try:
-            balance_summary = credits_helpers.get_balance_summary(db, _user.id)
-            latest_purchase = (
-                db.query(CreditPurchase)
-                .filter(CreditPurchase.user_id == _user.id)
-                .order_by(CreditPurchase.created_at.desc())
-                .first()
-            )
-        finally:
-            db.close()
     return templates.TemplateResponse(
         request,
         "pricing.html",
         {
             "current_user": _user,
             "csrf_token": _csrf,
-            "packs": packs,
             "products": products,
-            "checkout_ready": any(p["ready"] for p in packs),
-            "checkout_status": status if status in ("success", "cancelled") else "",
-            "balance_summary": balance_summary,
-            "latest_purchase": latest_purchase,
+            "pay_now_promise": stripe_billing.PAY_NOW_PROMISE,
         },
     )
 
@@ -499,108 +482,20 @@ async def d2_client_event(request: Request):
 # Anonymous users cannot buy: they get a 401 pointing at signup/login, and
 # the credits page only renders buy forms for signed-in users.
 @app.post("/credits/checkout")
-async def credits_checkout(
-    request: Request,
-    pack_id: str = Form(...),
-    csrf_token: str = Form(""),
-    db=Depends(get_db),
-):
-    import hmac
-    import logging
-    import os as _os
-    from fastapi import HTTPException
+async def credits_checkout(request: Request):
+    """Issue #164 Phase C (Decision 1): credit-pack sales are CLOSED.
+
+    Fails closed for every pack_id, before any Stripe call and before
+    any purchase row is written: 410 with the honest retirement
+    message. Pack SETTLEMENT stays live on the shared webhook below
+    for late/duplicate events on the historical purchase family.
+    """
     from fastapi.responses import JSONResponse
-    from app import auth as auth_helpers
-    from app import stripe_billing
-
-    if not _os.environ.get("DATABASE_URL"):
-        raise HTTPException(503, "Credit purchases are unavailable right now.")
-
-    _user, _ = _get_current_user_optional(request)
-    if not _user:
-        return JSONResponse({"error": "Log in or sign up to buy credits."}, status_code=401)
-
-    # CSRF: session token, same pattern as the other authenticated POSTs.
-    session = auth_helpers.get_session_from_cookie(db, request)
-    expected = session.csrf_token if session else None
-    if not expected or not isinstance(csrf_token, str) or not hmac.compare_digest(csrf_token, expected):
-        raise HTTPException(403, "Invalid CSRF token. Reload the page and try again.")
-
-    # Issue #156: premium intent at attempt entry — after auth, before
-    # any outcome (rate limit, pack validation, Stripe). Observe-only:
-    # best-effort emission, no change to charging or status codes.
-    from app import d2_attribution as _d2
-    _d2.emit_premium_intent(request, _user.id, "checkout_start")
-
-    ip = _client_ip(request)
-    if _use_shared_limiter():
-        # Shared enforcement (same pattern as analysis admission): a fresh
-        # session, because admit() manages its own transaction; database
-        # failures fail closed with 503 rather than skipping the limit.
-        try:
-            rl_db = _db_session()
-            try:
-                checkout_limiter.admit(rl_db, f"c:{ip}")
-            finally:
-                rl_db.close()
-        except (BurstLimited, HourlyLimited):
-            # Identical windows/counts on checkout_limiter: both mean the
-            # 5/hour cap for this IP is exhausted.
-            raise HTTPException(429, "Too many attempts. Please try again later.")
-        except Exception:
-            raise HTTPException(503, "Rate limiting is temporarily unavailable. Please try again shortly.")
-    else:
-        auth_helpers.check_rate_limit("checkout", ip)
-
-    pack = stripe_billing.get_pack(pack_id)
-    if pack is None:
-        return JSONResponse({"error": "Unknown credit pack."}, status_code=400)
-
-    origin = str(request.base_url).rstrip("/")
-    success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/credits?checkout=success"
-    cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/credits?checkout=cancelled"
-    try:
-        # Fail closed on configuration BEFORE touching the database, so the
-        # purchases table only ever holds real checkout attempts.
-        stripe_billing._secret_key()
-        if stripe_billing.pack_price_id(pack_id) is None:
-            raise stripe_billing.CheckoutNotConfigured(
-                f"price not configured for pack {pack_id}")
-        # ISSUE-69: record the purchase as pending BEFORE the Stripe call, so
-        # a crash between Stripe and our DB cannot produce a paid session
-        # with no local record. The purchase id rides in the session metadata
-        # as the settlement join key.
-        from app import credits as credits_helpers
-        purchase = credits_helpers.create_pending_purchase(db, _user.id, pack_id)
-        db.commit()
-        try:
-            checkout_url, session_id = stripe_billing.create_checkout_session(
-                user_id=_user.id,
-                pack_id=pack_id,
-                purchase_id=purchase.id,
-                success_url=success_url,
-                cancel_url=cancel_url,
-            )
-        except Exception:
-            # Stripe never saw a session (or we never got its id): the
-            # pending row stays as an abandoned attempt for reconciliation.
-            db.rollback()
-            raise
-        purchase.stripe_session_id = session_id
-        db.commit()
-    except stripe_billing.CheckoutNotConfigured:
-        return JSONResponse(
-            {"error": "Credit purchases are not available yet. Please try again later."},
-            status_code=503,
-        )
-    except stripe_billing.CheckoutError:
-        raise HTTPException(503, "Credit purchases are temporarily unavailable. Please try again shortly.")
-    # Issue #62: purchase start — a Checkout session was created for this user.
-    # Standalone session: this route is otherwise read-only and never commits.
-    from app import funnel as funnel_helpers
-    funnel_helpers.emit_standalone(funnel_helpers.PURCHASE_START, user_id=_user.id,
-                                   meta={"pack_id": pack_id})
-    return JSONResponse({"checkout_url": checkout_url})
+    return JSONResponse(
+        {"error": "Credit packs are retired. StackSift now sells "
+                  "individual reports — see Pricing for the dollar prices."},
+        status_code=410,
+    )
 
 
 # ISSUE-69: Stripe webhook — idempotent credit granting.
@@ -1818,7 +1713,7 @@ async def analyze(
             if _nbytes > MAX_BYTES:
                 return error("That file is over the 10 MB free-tier limit. "
                              "Sign in to analyze files up to 100 MB / 500,000 lines "
-                             "with credits, or upload a smaller file.")
+                             "with Large-File Analysis ($5), or upload a smaller file.")
             return error("That file has more than 50,000 lines. "
                          "Sign in to analyze files up to 100 MB / 500,000 lines "
                          "with credits, or upload a smaller file.")
@@ -2356,12 +2251,24 @@ def _paid_consent_page(request: Request, filename: str, content: bytes, user, cs
             context["operation_type"] = operation
         return templates.TemplateResponse(
             request, "paid_consent.html", context, status_code=402)
+    if operation == "additional_analysis":
+        # Issue #164 Phase C (C1, CALL-1 hard cap): no consent is
+        # minted for additional analyses any more. The free allowance
+        # (10/hour) is a hard cap — refuse honestly with the reset
+        # guidance and NO purchase route.
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"error": "Free-tier limit reached (10 analyses/hour). "
+                      "Your free analyses reset within the hour — "
+                      "please try again later. Additional analyses "
+                      "are not sold.",
+             "remaining": limiter.remaining(ip),
+             "current_user": user, "csrf_token": csrf_token},
+            status_code=429)
     if operation == "oversize_analysis":
         cost = credits_helpers.COST_OVERSIZE_ANALYSIS
     elif operation == "compare_logs":
         cost = credits_helpers.COST_COMPARE
-    elif operation == "additional_analysis":
-        cost = credits_helpers.COST_ADDITIONAL_ANALYSIS
     else:
         raise ValueError(f"unknown paid operation: {operation}")
     db = SessionLocal()
@@ -2600,6 +2507,7 @@ def _execute_oversize(filename: str, content: bytes, *, original_byte_count: int
 
 
 def _durable_analysis(request, filename, content, key, output="html", *, consent_id=None, digest=None):
+    from datetime import timedelta
     from app.db import SessionLocal
     from app import auth, credits as C, models as M, analysis_admission as A
     from sqlalchemy import select
@@ -2738,7 +2646,17 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                         rid = str(existing.result_id)
                     return _analysis_response(request, status, data, message, output=output, filename=filename, report_id=rid)
                 if consent_id:
-                    C.validate_consent(db, consent_id, user_id, "additional_analysis", digest, 1)
+                    # Issue #164 Phase C (C1b): an additional-analysis
+                    # consent minted before cutover can no longer admit
+                    # or debit after it. Replay of an already-admitted
+                    # operation was resolved by A.lookup above; a bare
+                    # unconsumed consent is refused, no charge.
+                    db.rollback()
+                    return _analysis_response(
+                        request, 429,
+                        message="Free-tier limit reached (10 analyses/hour). "
+                                "Additional analyses are not sold — please "
+                                "try again after your free allowance resets.")
                     pending = _load_paid_pending(str(consent_id))
                     if pending is None:
                         return _analysis_response(request, 410, message="Upload expired. Please upload the file again.")
@@ -2748,10 +2666,23 @@ def _durable_analysis(request, filename, content, key, output="html", *, consent
                 worker = uuid_module.uuid4().hex
                 item, created = A.admit(db, user_id, anon, key, digest, _client_ip(request), worker, consent_id)
                 if item is None:
+                    # Issue #164 Phase C (C1a/e): hard cap — refusal
+                    # carrying the reset time (oldest in-window free
+                    # request + 1h), no consent, no purchase route,
+                    # for anonymous and signed-in users alike.
+                    _oldest = db.scalar(
+                        select(M.FreeRequest.created_at).where(
+                            M.FreeRequest.quota_bucket_trusted_ip == _client_ip(request),
+                            M.FreeRequest.created_at > C._utcnow() - timedelta(hours=1),
+                        ).order_by(M.FreeRequest.created_at.asc()).limit(1))
                     db.rollback()
-                    if user:
-                        return _paid_consent_page(request, filename, content, user, _get_current_user_optional(request)[1], _client_ip(request))
-                    return _analysis_response(request, 429, message="Free-tier limit reached (10 analyses/hour). Please try again later.")
+                    _reset = ""
+                    if _oldest is not None:
+                        _reset_at = C._as_aware(_oldest) + timedelta(hours=1)
+                        _reset = f" Your allowance resets at {_reset_at.strftime('%H:%M UTC')}."
+                    return _analysis_response(
+                        request, 429,
+                        message="Free-tier limit reached (10 analyses/hour)." + _reset + " Additional analyses are not sold.")
                 paid = isinstance(item, M.Operation)
                 identity = item.id if paid else item.request_id
                 db.commit()
@@ -3822,22 +3753,14 @@ async def batch_paid(request: Request, consent_id: str = Form(...), file_hash: s
 
 @app.get("/credits/balance")
 async def credits_balance(request: Request):
-    """JSON API: current user's credit balance summary."""
+    """Issue #164 Phase C (C3): RETIRED with its last consumer (the
+    pricing page's unsettled-pack poll, removed with the pack grid).
+    Answers honestly — 410, no stale JSON served."""
     from fastapi.responses import JSONResponse
-    import os as _os
-    if not _os.environ.get("DATABASE_URL"):
-        return JSONResponse({"error": "credits unavailable"}, status_code=503)
-    _user, _ = _get_current_user_optional(request)
-    if not _user:
-        return JSONResponse({"error": "login required"}, status_code=401)
-    from app.db import SessionLocal
-    from app import credits as credits_helpers
-    db = SessionLocal()
-    try:
-        summary = credits_helpers.get_balance_summary(db, _user.id)
-        return JSONResponse(summary)
-    finally:
-        db.close()
+    return JSONResponse(
+        {"error": "Credit balances are retired. See /credits for pricing."},
+        status_code=410,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4338,8 +4261,9 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     # Issue #156: premium intent at the same attempt point (the export
     # unlock is a premium action, including when it ends in a 402).
     # Observe-only, standalone like the export-intent emit above.
-    from app import d2_attribution as _d2
-    _d2.emit_premium_intent(request, user.id, "export_unlock")
+    # Issue #164 Phase C (C7): the export_unlock premium-intent emit is
+    # REMOVED — exports are free for all reports, so an export attempt
+    # is not a paid upsell and must not be recorded as one.
 
     # PR #132 finding 5: build the operation key from the PARSED
     # canonical UUID (rid), never the raw URL segment — an uppercase
@@ -4651,8 +4575,8 @@ async def report_export_structured(request: Request, result_id: str, export_form
     # same paid per-report unlock, so the attempt must record
     # identically or the funnel depends on the chosen format).
     # Observe-only, best-effort; counts whether or not credits suffice.
-    from app import d2_attribution as _d2
-    _d2.emit_premium_intent(request, user.id, "export_unlock")
+    # Issue #164 Phase C (C7): export_unlock premium-intent emit
+    # removed (exports are free; see the PDF route note).
 
     # Validate ALL source prerequisites BEFORE reservation (spec §5),
     # including integrity via result_payload (owner/origin/expiry/digest).
@@ -5798,6 +5722,18 @@ async def report_extend_retention(request: Request, result_id: str, db=Depends(g
             "replayed": True,
         })
 
+    # Issue #164 Phase C (Decision 5 / C5): retention extensions are
+    # no longer sold. This refusal sits AFTER the ReportAction replay
+    # fence above, so a completed pre-cutover extension still returns
+    # its recorded replay response; every NEW admission refuses
+    # honestly — no charge, no date change. Expiries already in force
+    # keep running to their recorded dates.
+    db.rollback()
+    return JSONResponse(
+        {"error": "Retention extensions are no longer sold; paid "
+                  "reports include 90 days of retention."},
+        status_code=410)
+
     if credits_helpers._as_aware(source.expires_at) <= credits_helpers._utcnow():
         db.rollback()
         return JSONResponse({"error": "Report has expired"}, status_code=410)
@@ -6082,21 +6018,12 @@ async def report_share_create(request: Request, result_id: str, db=Depends(get_d
     if gate is not None:
         db.rollback()
         return gate
-    # Issue #135 format gate (the teeth of this rework): pdf/json/csv
-    # links require the report's #129 export unlock. Checked BEFORE
-    # any rate consumption, link row, or action record, so a denied
-    # creation leaves nothing behind and charges nothing.
-    if share_format in _ra.GATED_SHARE_FORMATS and not (
-            credits_helpers.is_export_unlocked(db, user.id, source.id)):
-        db.rollback()
-        return JSONResponse(
-            {"error": f"Sharing as {share_format.upper()} requires this "
-                      "report's export unlock (2 credits, via Export). "
-                      "TXT sharing is always free.",
-             "code": "export_unlock_required",
-             "export_unlocked": False,
-             "format": share_format},
-            status_code=402)
+    # Issue #164 Phase C (Decision 4 / C2): the #135 format gate is
+    # REMOVED. Exports are free for all reports, so pdf/json/csv share
+    # links are created on the link's own authority — no unlock
+    # consult, no 402. Format eligibility itself is unchanged
+    # (single-file payloads only; batch/comparison/deep_dive stay
+    # excluded in report_access).
     try:
         credits_helpers._consume_rate(db, "share:actions", str(user.id))
     except credits_helpers.AdmissionError:
