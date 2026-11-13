@@ -82,10 +82,11 @@ def s6_env(tmp_path, monkeypatch):
                        PRICE_BY_SKU["investigation_report"])
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_s6_fixture")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", pb.WEBHOOK_SECRET)
+    sent = []
     monkeypatch.setattr(email, "send_verification_email",
-                        lambda a, t: None)
+                        lambda a, t: sent.append(("verify", a, t)))
     monkeypatch.setattr(email, "send_password_reset_email",
-                        lambda a, t: None)
+                        lambda a, t: sent.append(("reset", a, t)))
 
     from app.service import analyze_upload as service_analyze
 
@@ -118,8 +119,8 @@ def s6_env(tmp_path, monkeypatch):
             client.headers["X-CSRF-Token"] = \
                 client.get("/auth/csrf").json()["csrf_token"]
             yield pb.SimpleNamespace(
-                client=client, sessions=sessions, engine=engine, app=app,
-                monkeypatch=monkeypatch)
+                client=client, sessions=sessions, sent=sent, engine=engine,
+                app=app, monkeypatch=monkeypatch)
     finally:
         engine.dispose()
 
@@ -173,7 +174,9 @@ def test_batch_entry_composition_and_copy(s6_env):
     assert "1 credit for each additional file" not in r.text
     assert 'id="batch-dropzone"' in r.text
     assert "or browse your files — .log, .txt, .text" in r.text
-    assert ".json" not in r.text  # CALL-2: hint list stays live
+    # CALL-2: the hint/accept list stays the live one — no .json.
+    assert ".log, .txt, .json" not in r.text
+    assert 'accept=".log,.txt,.text"' in r.text
     assert 'id="batch-staged"' in r.text
     assert "Get batch quote" in r.text
     # Standard live header (A5): toggle + signed-in set + logout form.
@@ -410,7 +413,11 @@ def test_rt4_promise_absent_on_run_renders_both_flows(s6_env, monkeypatch):
     _, uid, csrf = pb._make_user(env)
     _settle(env, csrf, "compare", pb._compare_digest())
     files = pb._batch_files()
-    _settle(env, csrf, "batch", pb._batch_digest(files))
+    # NOTE: a second _buy_and_settle for another SKU in one test hits
+    # a Phase B harness limitation that fails identically on the base
+    # tree (verified in the teeth clone); Phase B's own multi-SKU
+    # tests seed the second entitlement directly, as here.
+    pb._seed_entitlement(env, uid, "batch", pb._batch_digest(files))
 
     def failing_compare(a, b, c, d):
         return ({"error": "analysis_failed", "message": "x", "filename": "a.log"},
@@ -525,8 +532,13 @@ def test_rt6_worker_failure_releases_entitlement(s6_env, monkeypatch):
     assert pb._confirm_compare(env, consent_id, file_hash, csrf).status_code == 400
     from app import models as M
     with env.sessions() as db:
-        assert db.query(M.Operation).filter(
-            M.Operation.user_id == uid).count() == 0
+        # F2 (Phase B pin): the failed attempt records a FAILED
+        # operation and NO result; the entitlement is released.
+        op = db.query(M.Operation).filter(
+            M.Operation.user_id == uid).one()
+        assert op.status == "failed"
+        assert db.query(M.Result).filter(
+            M.Result.type == "comparison").count() == 0
         ent = db.query(M.Entitlement).filter(
             M.Entitlement.user_id == uid).one()
         assert ent.status == "available"
@@ -560,10 +572,18 @@ def test_rt8_compare_swap_refused_at_paid_endpoint(s6_env):
     _settle(env, csrf, "compare", pb._compare_digest())
     r = pb._post_compare(env, LOG_B, LOG_A)  # swapped pair = new digest
     assert 'id="product-checkout-form"' in r.text
-    consent_id, file_hash = pb._consent_fields(r.text)
+    # The checkout render carries no consent_id field; take the
+    # swapped pair's consent from the DB (the batch e2e pattern).
+    from app import models as M
+    with env.sessions() as db:
+        consent = db.query(M.Consent).filter(
+            M.Consent.user_id == uid,
+            M.Consent.operation_type == "compare_logs",
+            M.Consent.input_hash == pb._compare_digest(LOG_B, LOG_A),
+        ).one()
+        consent_id, file_hash = str(consent.id), consent.input_hash
     r = pb._confirm_compare(env, consent_id, file_hash, csrf)
     assert r.status_code == 402  # no entitlement for the swapped digest
-    from app import models as M
     with env.sessions() as db:
         assert db.query(M.Operation).count() == 0
 
@@ -652,15 +672,22 @@ def test_rt12_credit_branch_isolation_render(s6_env):
     assert 'class="s6-consent-panel"' in r.text
     consent_id, file_hash = pb._consent_fields(r.text)
     assert pb._confirm_compare(env, consent_id, file_hash, csrf).status_code == 200
-    # Exhaust the free quota, then quote a single file -> credit consent.
-    # Ten free analyses exhaust the hourly allowance (house pattern:
-    # drive the real route like the oversize suite does).
-    for i in range(10):
-        r = env.client.post(
-            "/analyze",
-            files={"file": (f"f{i}.log", LOG_A, "text/plain")},
-            data={"output": "html", "request_id": ""})
-        assert r.status_code == 200, r.text[:200]
+    # Exhaust the free quota, then quote a single file -> credit
+    # consent. Quota exhaustion is seeded directly (the oversize
+    # suite's _exhaust_quota pattern): ten FreeRequest rows in the
+    # current hour. Driving ten real analyses instead would trip the
+    # shared in-memory IP limiter (429) before the credit path.
+    from app import credits as C, models as M2
+    from datetime import timedelta as _td
+    with env.sessions() as db:
+        for _ in range(10):
+            db.add(M2.FreeRequest(
+                request_id=uuid.uuid4().hex, user_id=uid,
+                fingerprint="old", status="failed",
+                quota_bucket_trusted_ip="127.0.0.1",
+                created_at=C._utcnow() - _td(minutes=2),
+                deadline=C._utcnow()))
+        db.commit()
     r = env.client.post(
         "/analyze",
         files={"file": ("extra.log", LOG_A, "text/plain")},
@@ -765,10 +792,15 @@ def test_sweep_retention_terms_on_ported_screens(s6_env):
     group-6 tests, premise-preserved.)"""
     env = s6_env
     _, uid, csrf = pb._make_user(env)
-    _settle(env, csrf, "batch", pb._batch_digest(pb._batch_files()))
+    # Checkout render (no entitlement yet): the lead-in states the
+    # 90-day term; nothing states 7 days.
     r = pb._post_batch(env, pb._batch_files())
     assert r.status_code == 402
     assert "kept for 90 days" in r.text
+    assert "7 days" not in r.text
+    _settle(env, csrf, "batch", pb._batch_digest(pb._batch_files()))
+    r = pb._post_batch(env, pb._batch_files())
+    assert r.status_code == 402
     assert "7 days" not in r.text
     consent_id, file_hash = pb._consent_fields(r.text)
     r = _confirm_batch(env, consent_id, file_hash, csrf)
@@ -803,6 +835,7 @@ def test_sweep_f1_second_checkout_blocked_same_digest(s6_env):
     different digest is always allowed."""
     env = s6_env
     _, uid, csrf = pb._make_user(env)
+    pb._fake_stripe(env.monkeypatch)
     digest = pb._compare_digest()
     r = pb._checkout(env, csrf, "compare", digest)
     assert r.status_code == 200
