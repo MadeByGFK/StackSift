@@ -264,6 +264,19 @@ def _balance(env, user_id):
         return acct.balance if acct else None
 
 
+def _seed_grant(env, user_id, qty=10):
+    """PREMISE CHANGED (#164 Phase C, Decision 3): the signup grant
+    is removed, so a test that needs a funded legacy balance seeds
+    the grant directly (the test_issue164_phase_c.py pattern)
+    instead of relying on signup to create it."""
+    from app import credits as C
+    with env.sessions() as db:
+        g = C.grant_credits(db, user_id, "purchase",
+                            f"test-{uuid.uuid4().hex}", qty)
+        db.commit()
+        return g.id
+
+
 def _consent_fields(page_text):
     def field(name):
         m = re.search(r'name="%s" value="([^"]+)"' % name, page_text)
@@ -452,7 +465,8 @@ def test_quote_step_shows_checkout_then_run_after_settlement(p164b_env):
 def test_compare_redemption_end_to_end_no_credit_effects(p164b_env):
     env = p164b_env
     _, uid, csrf = _make_user(env)
-    assert _balance(env, uid) == 10  # signup grant
+    _seed_grant(env, uid, 10)  # Phase C: seeded directly, not signup
+    assert _balance(env, uid) == 10
     from app import models as _M0
     with env.sessions() as db:
         ledger_before = db.query(_M0.CreditLedger).filter(
@@ -559,6 +573,7 @@ def test_compare_failure_releases_entitlement_for_retry(p164b_env, monkeypatch):
 def test_compare_exports_pdf_free_no_csv_json(p164b_env):
     env = p164b_env
     _, uid, csrf = _make_user(env)
+    _seed_grant(env, uid, 10)  # Phase C: seeded directly, not signup
     _buy_and_settle(env, csrf, "compare", _compare_digest())
     r = _post_compare(env)
     consent_id, file_hash = _consent_fields(r.text)
@@ -595,6 +610,7 @@ def test_product_result_retention_90_days(p164b_env):
 def test_extend_retention_refused_for_product_result(p164b_env):
     env = p164b_env
     _, uid, csrf = _make_user(env)
+    _seed_grant(env, uid, 10)  # Phase C: seeded directly, not signup
     _buy_and_settle(env, csrf, "compare", _compare_digest())
     r = _post_compare(env)
     consent_id, file_hash = _consent_fields(r.text)
@@ -630,10 +646,22 @@ def test_product_consent_row_shape(p164b_env):
         assert consent.max_cost == 0
 
 
-def test_credit_consent_row_shape_unchanged(p164b_env):
+def test_credit_consent_helper_shape_unchanged_no_http_mint(p164b_env):
+    # PREMISE CHANGED (#164 Phase C, C1 / CALL-1 hard cap): the
+    # credit consent helper's row shape is unchanged (legacy
+    # settlement machinery is preserved), but the HTTP flow no
+    # longer mints one — at the free-allowance cap, /analyze
+    # refuses 429 with the reset time and no purchase route, and
+    # creates NO additional_analysis consent.
     env = p164b_env
     _, uid, csrf = _make_user(env)
     from app import credits as C, models as M
+    with env.sessions() as db:
+        helper = C.create_consent(db, uid, "additional_analysis",
+                                  "d" * 64, 1)
+        db.commit()
+        assert helper.sku is None
+        assert helper.max_cost == 1
     with env.sessions() as db:
         for _ in range(10):
             db.add(M.FreeRequest(
@@ -646,13 +674,18 @@ def test_credit_consent_row_shape_unchanged(p164b_env):
         "/analyze",
         files={"file": ("t.log", b"2024-01-01 INFO hi\n", "text/plain")},
         data={"output": "html", "request_id": ""})
-    assert r.status_code == 402, r.text[:300]
+    assert r.status_code == 429, r.text[:300]
+    assert "resets at" in r.text
+    assert "not sold" in r.text
+    assert "Your balance" not in r.text
     with env.sessions() as db:
-        consent = db.query(M.Consent).filter(
+        # Only the helper-created row exists; the HTTP attempt
+        # minted nothing.
+        assert db.query(M.Consent).filter(
             M.Consent.user_id == uid,
-            M.Consent.operation_type == "additional_analysis").one()
-        assert consent.sku is None
-        assert consent.max_cost == 1
+            M.Consent.operation_type == "additional_analysis").count() == 1
+        assert db.query(M.Operation).filter(
+            M.Operation.type == "additional_analysis").count() == 0
 
 
 def test_validate_consent_billing_mode_mismatch():
@@ -771,6 +804,7 @@ def _batch_digest(files):
 def test_batch_redemption_no_claim_no_hit_dollar_snapshot(p164b_env):
     env = p164b_env
     _, uid, csrf = _make_user(env)
+    _seed_grant(env, uid, 10)  # Phase C: seeded directly, not signup
     files = _batch_files()
     _seed_entitlement(env, uid, "batch", _batch_digest(files))
     r = _post_batch(env, files)
@@ -829,6 +863,7 @@ def test_batch_burst_limit_from_operation_counts(p164b_env):
 def test_oversize_redemption_end_to_end(p164b_env):
     env = p164b_env
     _, uid, csrf = _make_user(env)
+    _seed_grant(env, uid, 10)  # Phase C: seeded directly, not signup
     content = (b"2024-01-01 10:00:00 INFO heartbeat ok\n" * 50001)
     from app.analysis_admission import fingerprint
     digest = fingerprint("big.log", content)
@@ -871,6 +906,7 @@ def test_oversize_redemption_end_to_end(p164b_env):
 def test_legacy_credit_consent_refused_compare(p164b_env):
     env = p164b_env
     _, uid, csrf = _make_user(env)
+    _seed_grant(env, uid, 10)  # Phase C: seeded directly, not signup
     from app import credits as C, main, models as M
     digest = _compare_digest()
     with env.sessions() as db:
@@ -910,9 +946,12 @@ def test_legacy_credit_consent_refused_oversize(p164b_env):
 
 def test_admitted_credit_operation_still_settles_on_credit_terms(p164b_env):
     """B-12 class 1: an operation admitted under credit terms
-    settles on those terms (the credit engine is untouched)."""
+    settles on those terms (the credit engine is untouched).
+    PREMISE CHANGED (#164 Phase C): the balance it settles against
+    is seeded directly — the signup grant no longer funds it."""
     env = p164b_env
     _, uid, csrf = _make_user(env)
+    _seed_grant(env, uid, 10)  # Phase C: seeded directly, not signup
     from app import credits as C, models as M
     from app.analysis_admission import fingerprint
     digest = fingerprint("big.log", b"x\n")
