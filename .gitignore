@@ -11,3 +11,4 @@ reports/
 .vscode/
 # Local test-run database artifact — never commit
 stacksift.db
+*.db
