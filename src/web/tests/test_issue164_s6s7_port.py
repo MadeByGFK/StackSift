@@ -403,6 +403,7 @@ def test_rt2_cross_flow_consent_refused(s6_env):
 def test_rt3_cross_sku_entitlement_never_renders_run(s6_env):
     env = s6_env
     _, uid, csrf = pb._make_user(env)
+    pb._seed_grant(env, uid, 10)  # Phase C re-base: seeded directly, not signup
     pb._seed_entitlement(env, uid, "compare", pb._compare_digest())
     files = pb._batch_files()
     r = pb._post_batch(env, files)
@@ -676,8 +677,11 @@ def test_rt11_return_after_pending_deletion_renders_reupload(s6_env, flow):
 
 def test_rt12_credit_branch_isolation_render(s6_env):
     """After exercising the new product layout, an Additional Analysis
-    CREDIT consent on the same template renders its legacy composition
-    intact — and none of the new product composition appears."""
+    request past the free quota renders WITHOUT any of the new product
+    composition. Phase C re-base: the CREDIT consent render this test
+    originally pinned is retired (C1 hard cap) — the render is now the
+    429 refusal (reset time, "Additional analyses are not sold"), with
+    no consent and no operation created."""
     env = s6_env
     _, uid, csrf = pb._make_user(env)
     # Exercise the product layout end to end first.
@@ -706,19 +710,19 @@ def test_rt12_credit_branch_isolation_render(s6_env):
         "/analyze",
         files={"file": ("extra.log", LOG_A, "text/plain")},
         data={"output": "html", "request_id": ""})
-    assert r.status_code == 402, r.text[:300]
-    assert "<title>StackSift — Use a Credit</title>" in r.text
-    assert "Free analyses used up" in r.text
-    assert "Your balance:" in r.text and "eligible credits" in r.text
-    assert "Use 1 credit" in r.text
-    assert 'class="consent-box"' in r.text
-    # None of the new product composition leaks into the credit render.
+    assert r.status_code == 429, r.text[:300]
+    assert "resets at" in r.text
+    assert "not sold" in r.text
+    with env.sessions() as db:
+        assert db.query(M2.Operation).filter(
+            M2.Operation.type == "additional_analysis").count() == 0
+        assert db.query(M2.Consent).filter(
+            M2.Consent.operation_type == "additional_analysis").count() == 0
+    # None of the new product composition leaks into the refusal render.
     assert "s6-consent-panel" not in r.text
     assert "s6-chip" not in r.text
     assert "s6-lead" not in r.text
     assert "s6-foot" not in r.text
-    assert 'class="nav-toggle"' not in r.text  # credit renders: no header
-    assert "Pay $5" not in r.text
 
 
 # --- A3: Oversize isolation -------------------------------------------------
@@ -737,7 +741,7 @@ def test_a3_oversize_render_isolated_except_pay_label(s6_env):
     assert 'class="consent-box"' in r.text
     assert "s6-consent-panel" not in r.text
     assert 'class="nav-toggle"' not in r.text
-    assert "<title>StackSift — Use a Credit</title>" in r.text
+    assert "<title>StackSift — Confirm</title>" in r.text  # Phase C title
     assert "Pay $5" in r.text
     assert "Buy — $5" not in r.text
     assert "Results are available for 90 days." in r.text

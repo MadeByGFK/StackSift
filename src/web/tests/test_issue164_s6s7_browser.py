@@ -151,9 +151,12 @@ def _write(tmp_path, name, content):
 
 def test_a1_badge_suppressed_on_ported_surfaces(auth_env, tmp_path, monkeypatch):
     """A1: after the shared script runs, each ported surface renders
-    zero #credit-badge elements and exposes no quick-buy control, at
-    positive AND zero balance; the un-suppressed home page is the
-    control (badge appears there in the same harness); Log out from a
+    zero #credit-badge elements and exposes no quick-buy control.
+    Phase C re-base: the badge/quick-buy block is retired GLOBALLY
+    (Decision 9 / C3), so the home page — formerly the positive
+    control — is now badge-free as well, and no credit account is
+    ever created for the user; the ported-surface pins are unchanged
+    and now hold by the stronger global retirement. Log out from a
     ported surface still submits."""
     from playwright.sync_api import sync_playwright, expect
 
@@ -165,10 +168,13 @@ def test_a1_badge_suppressed_on_ported_surfaces(auth_env, tmp_path, monkeypatch)
             page.set_default_timeout(15000)
             _login(page, base, auth_env)
 
-            # Control: home (un-suppressed include) DOES inject a badge.
+            # Control (Phase C): home injects NO badge either — the
+            # badge block is gone from the shared script entirely.
             page.goto(base + "/")
-            expect(page.locator("#credit-badge")).to_be_visible()
-            expect(page.locator("#credit-badge")).to_contain_text("10 credits")
+            page.wait_for_timeout(800)
+            assert page.locator("#credit-badge").count() == 0
+            assert page.evaluate(
+                "typeof window.showCreditModal") == "undefined"
 
             def assert_suppressed(url):
                 page.goto(url)
@@ -197,20 +203,19 @@ def test_a1_badge_suppressed_on_ported_surfaces(auth_env, tmp_path, monkeypatch)
             assert page.evaluate(
                 "typeof window.showCreditModal") == "undefined"
 
-            # Zero balance: the control still shows a badge on home
-            # ("0 credits" — the base script's reproduced behaviour),
-            # the ported surfaces still show none.
+            # No-balance state (Phase C): signup creates no credit
+            # account at all — home and the ported surfaces still
+            # render no badge and no quick-buy control.
             from app.models import CreditAccount, User
             db = auth_env.sessions()
             user = db.query(User).filter(
                 User.email == "s6s7@example.com").one()
-            acct = db.query(CreditAccount).filter(
-                CreditAccount.user_id == user.id).one()
-            acct.balance = 0
-            db.commit()
+            assert db.query(CreditAccount).filter(
+                CreditAccount.user_id == user.id).first() is None
             db.close()
             page.goto(base + "/")
-            expect(page.locator("#credit-badge")).to_contain_text("0 credits")
+            page.wait_for_timeout(800)
+            assert page.locator("#credit-badge").count() == 0
             assert_suppressed(base + "/batch")
 
             # Log out from a ported surface still submits (the shared
