@@ -26,6 +26,14 @@ Commerce is untouched: checkout banners, the balance strip + its
 settlement polling script (#71), the pack buy forms, and the #156
 offer_viewed script are asserted present and unchanged in shape.
 
+PREMISE CHANGED (#164 Phase C, 2026-11-13): S5-full has landed —
+the meta is dollar copy, the commerce regions are the dollar offer
+cards (banners/balance strip/pack forms/signup-grant CTA retired),
+Settings §02 is Purchases, and the Terms section is "Pricing and
+purchases". The affected tests below are re-based accordingly,
+with absence assertions at the same strength as the old presence
+assertions.
+
 No stateful control changes in this slice, so the standing
 runtime-interaction-sequence requirement does not apply.
 
@@ -83,14 +91,17 @@ def test_s5a_pricing_title_uses_design_format():
     assert "<title>StackSift — Credits</title>" not in PRICING
 
 
-def test_s5a_meta_description_stays_credits_accurate():
-    # The design's dollar meta copy ("Free log analysis with paid
-    # per-deliverable reports...") is gated to S5-full / #164C; the
-    # live meta must keep describing the credit model truthfully.
-    assert ('<meta name="description" content="StackSift credits: '
-            'free log analysis for everyone, premium capabilities '
-            'with credits.">') in PRICING
-    assert "per-deliverable" not in PRICING
+def test_s5a_meta_description_is_dollar_accurate():
+    # PREMISE CHANGED (#164 Phase C, Decision 8): S5-full has landed
+    # — the meta describes the dollar model truthfully, with the
+    # four ruled prices and the free-exports policy.
+    assert ('<meta name="description" content="StackSift pricing: '
+            'free log analysis for everyone, and per-report dollar '
+            'prices — Investigation Report $9, Compare $5, Batch $5, '
+            'Large-File Analysis $5. Exports are free for all '
+            'reports.">') in PRICING
+    assert "StackSift credits:" not in PRICING
+    assert "premium capabilities with credits" not in PRICING
 
 
 # --- Nav label sweep (item 9) ----------------------------------------------
@@ -103,46 +114,64 @@ def test_s5a_nav_label_is_pricing_on_every_header_template():
 
 
 def test_s5a_no_nav_anchor_still_labelled_credits():
+    # PREMISE CHANGED (#164 Phase C, Decision 10 copy sweep): even
+    # the terms.html body-copy /credits anchor is labelled Pricing
+    # now ("See Pricing for the per-report prices") — NO /credits
+    # anchor anywhere is labelled Credits.
     for name in NAV_TEMPLATES:
         html = (TEMPLATES / name).read_text()
-        if name == "terms.html":
-            # terms.html carries ONE further /credits anchor in body
-            # copy ("See Credits for what credits cost...") — that is
-            # prose naming the credit product, not the nav label,
-            # and stays. The nav (first) occurrence is Pricing.
-            assert html.count(OLD_NAV) == 1, name
-            assert html.index(NEW_NAV) < html.index(OLD_NAV), name
-        else:
-            assert OLD_NAV not in html, name
+        assert OLD_NAV not in html, name
+        assert NEW_NAV in html, name
 
 
-def test_s5a_non_nav_credits_names_deliberately_unchanged():
+def test_s5a_non_nav_names_now_dollar_era():
+    # PREMISE CHANGED (#164 Phase C, Decisions 9-10): the names that
+    # S5a deliberately left alone are renamed by Phase C — Settings
+    # §02 is Purchases / "Purchase history", and the Terms legal
+    # section is "Pricing and purchases".
     settings = (TEMPLATES / "settings.html").read_text()
-    assert '<span class="s4-section-label">Credits</span>' in settings
-    assert "<h2>Credits</h2>" in settings
+    assert '<span class="s4-section-label">Purchases</span>' in settings
+    assert "<h2>Purchase history</h2>" in settings
+    assert '<span class="s4-section-label">Credits</span>' not in settings
+    assert "<h2>Credits</h2>" not in settings
     terms = (TEMPLATES / "terms.html").read_text()
-    assert "<h2>Credits</h2>" in terms
+    assert "<h2>Pricing and purchases</h2>" in terms
+    assert "<h2>Credits</h2>" not in terms
 
 
 # --- Commerce regions unchanged (gates, pass on both trees) -----------------
 
-def test_s5a_commerce_regions_unchanged_in_pricing_source():
+def test_s5a_commerce_regions_now_dollar_offers_in_pricing_source():
+    # PREMISE CHANGED (#164 Phase C, Decisions 1/8 + C6b/c): the
+    # commerce regions are the dollar offer cards — no return
+    # banners, no balance strip/poll, no pack buy forms, no
+    # signup-grant CTA. The #156 beacon survives, retargeted.
     for marker in (
-        # Checkout return banners (success / cancelled).
-        '<div class="checkout-banner success" role="status">',
-        "Payment didn't go through — no charge was made",
-        # Balance strip + settlement polling script (#71).
-        '<div class="balance-strip" role="status">',
-        'id="credit-balance"',
-        'fetch("/credits/balance"',
-        # Pack buy forms post to the live checkout route.
-        '<form method="post" action="/credits/checkout"',
-        # Signup-grant CTA copy (retires only in #164 Phase C).
-        "10 free credits",
-        # #156 offer-visibility beacon script.
+        # Dollar offer cards (the four ruled SKUs render here).
+        'id="offers"',
+        "offer-card",
+        "Payment is captured at checkout",
+        # #156 offer-visibility beacon script, retargeted (C6b).
         "offer_viewed",
+        'querySelectorAll(".offer-card")',
     ):
         assert marker in PRICING, marker
+    for retired in (
+        # Checkout return banners (success / cancelled) — C6c.
+        "checkout-banner",
+        "Payment didn't go through — no charge was made",
+        # Balance strip + settlement polling script (#71).
+        "balance-strip",
+        'id="credit-balance"',
+        'fetch("/credits/balance"',
+        # Pack buy forms / pack grid.
+        '<form method="post" action="/credits/checkout"',
+        'name="pack_id"',
+        'id="packs"',
+        # Signup-grant CTA copy.
+        "10 free credits",
+    ):
+        assert retired not in PRICING, retired
 
 
 # --- Live routes -------------------------------------------------------------
