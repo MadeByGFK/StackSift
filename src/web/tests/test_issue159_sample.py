@@ -369,7 +369,14 @@ def test_teeth_sample_template_gating_controls_scripts():
     sample = template.render(analysis_projection=projection,
                              filename="sample-incident.log",
                              is_sample=True)
-    assert "/auth/balance" in owned
+    # PREMISE CHANGED (#164 Phase C, C3): the shared account script
+    # no longer fetches the retired balance API on ANY page — the
+    # owned render carries the script's surviving non-credit duties
+    # (wireAuthForm) and NO balance fetch; the sample render carries
+    # neither. The gating contrast is the script itself, as before.
+    assert "wireAuthForm" in owned
+    assert "wireAuthForm" not in sample
+    assert "/auth/balance" not in owned
     assert "Back to My Reports" in owned
     assert "/auth/balance" not in sample
     assert "<form" not in sample.lower()
@@ -521,7 +528,10 @@ def test_owned_deep_dive_page_and_pdf_untouched(auth_env, cold_cache):
     assert page.status_code == 200
     assert "<form" in page.text.lower()
     assert "Back to My Reports" in page.text
-    assert "/auth/balance" in page.text
+    # PREMISE CHANGED (#164 Phase C, C3): the owned page's shared
+    # script no longer fetches the retired balance API.
+    assert "/auth/balance" not in page.text
+    assert "credit-badge" not in page.text
     assert BANNER not in page.text
     pdf = auth_env.client.post(f"/reports/{analysis_id}/pdf",
                                data={"csrf_token": csrf})
