@@ -142,7 +142,19 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
           // Issue #164 Phase C: exports are free — the PDF error
           // modal has no insufficient-credits state and no
-          // buy-credits handoff (the pack modal is retired).
+          // buy-credits handoff (the pack modal is retired). The
+          // generic heading and the server-provided error message
+          // are preserved (Codex P2, PR #183): responses such as the
+          // 409 generation fence or an expired artifact's 410 must
+          // stay visible to the user.
+          const title = document.createElement('div');
+          title.style.cssText = 'font-size:1.1rem;font-weight:600;margin:0 0 0.75rem 0;';
+          title.textContent = 'Export Failed';
+          card.appendChild(title);
+          const msg = document.createElement('p');
+          msg.style.cssText = 'margin:0 0 1rem 0;color:#9db1cc;';
+          msg.textContent = error;
+          card.appendChild(msg);
           const close = document.createElement('button');
           close.style.cssText = 'width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;';
           close.textContent = 'Close';

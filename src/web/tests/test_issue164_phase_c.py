@@ -19,8 +19,11 @@ import hashlib
 import hmac
 import json
 import re
+import shutil
+import subprocess
 import time
 import uuid
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -923,3 +926,111 @@ def test_runtime_consent_rerender_no_balance_line(p164c_env):
 
 LOG_B_BYTES = (b"2024-01-01 10:00:00 ERROR database connection failed\n" * 5
                + b"2024-01-01 10:00:01 ERROR disk full\n" * 3)
+
+
+# --- Group 12b: PDF error modal runtime (Codex P2 on PR #183, fbb85d7) ------------------
+# Removing the credit upsell from the shared PDF handler also removed
+# the modal's heading and the element displaying `result.error`, so a
+# 409 generation-fence / 410 expired-artifact / generation-failure
+# response rendered a modal whose only visible text was "Close".
+# This Node harness exercises the real handler twice (409 then 410)
+# and pins the displayed text after EACH mutation: generic heading +
+# the server-provided message, no stale first message, no credit
+# upsell, and the submit button re-enabled.
+
+_PDF_ERROR_HARNESS = r"""
+'use strict';
+const created = [];
+class El {
+  constructor(tag) {
+    this.tagName = tag || ''; this.id = ''; this.style = {}; this.textContent = '';
+    this.value = ''; this.href = ''; this.dataset = {}; this.attrs = {};
+    this.listeners = {}; this.children = []; this.disabled = false; this.type = '';
+    this.classList = { add: function () {}, remove: function () {}, toggle: function () {} };
+  }
+  addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
+  hasAttribute() { return false; }
+  appendChild(c) { this.children.push(c); }
+  remove() { this.removed = true; }
+  click() {}
+  focus() {}
+  select() {}
+}
+const pdfButton = { disabled: false };
+const pdfForm = new El('form');
+pdfForm.action = '/reports/RID/pdf';
+pdfForm.querySelector = function (sel) { return sel.indexOf('submit') !== -1 ? pdfButton : null; };
+globalThis.window = globalThis;
+globalThis.location = { origin: 'https://example.test', assign: function () {} };
+globalThis.URL = { createObjectURL: function () { return 'blob:x'; },
+                   revokeObjectURL: function () {} };
+globalThis.FormData = class { constructor(form) {} };
+globalThis.document = {
+  getElementById: function (id) {
+    for (let i = created.length - 1; i >= 0; i--) {
+      if (created[i].id === id && !created[i].removed) return created[i];
+    }
+    return null;
+  },
+  createElement: function (tag) { const e = new El(tag); created.push(e); return e; },
+  body: new El('body'),
+  addEventListener: function () {},
+  removeEventListener: function () {},
+  querySelectorAll: function (sel) {
+    if (sel === 'form[action$="/pdf"]') { return [pdfForm]; }
+    return [];
+  },
+  querySelector: function () { return null; },
+};
+let serverStatus = 409;
+let serverError = 'PDF export already in progress. Please wait.';
+globalThis.fetch = function () {
+  return Promise.resolve({
+    ok: false, status: serverStatus,
+    json: function () { return Promise.resolve({ error: serverError }); },
+  });
+};
+async function flush() { for (let i = 0; i < 10; i++) { await new Promise(function (r) { setTimeout(r, 0); }); } }
+async function submitPdf() {
+  const before = created.length;
+  pdfButton.disabled = false;
+  const handlers = pdfForm.listeners.submit || [];
+  for (const fn of handlers) { await fn({ preventDefault: function () {} }); }
+  await flush();
+  return { texts: created.slice(before).map(function (e) { return e.textContent; }).filter(Boolean),
+           buttonDisabled: pdfButton.disabled };
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required")
+def test_runtime_pdf_error_modal_shows_server_message_after_each_error():
+    template = (Path(__file__).resolve().parent.parent / "app" / "templates"
+                / "auth_form_script.html").read_text()
+    script = re.search(r"<script>(.*?)</script>", template, re.S).group(1)
+    full = (_PDF_ERROR_HARNESS + "\n" + script + "\n(async () => {\n"
+            "  const out = {};\n"
+            "  out.first = await submitPdf();\n"
+            "  serverStatus = 410;\n"
+            "  serverError = 'This PDF artifact has expired.';\n"
+            "  out.second = await submitPdf();\n"
+            "  console.log('RESULT:' + JSON.stringify(out));\n"
+            "})().catch(function (e) { console.error(e && e.stack || e); process.exit(3); });\n")
+    proc = subprocess.run(["node", "-e", full], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
+    line = next(l for l in proc.stdout.splitlines() if l.startswith("RESULT:"))
+    out = json.loads(line[len("RESULT:"):])
+    first = out["first"]["texts"]
+    assert "Export Failed" in first, out
+    assert "PDF export already in progress. Please wait." in first, out
+    assert "Close" in first, out
+    assert not any("Buy credits" in t or "Insufficient" in t for t in first), out
+    assert out["first"]["buttonDisabled"] is False, out
+    second = out["second"]["texts"]
+    assert "Export Failed" in second, out
+    assert "This PDF artifact has expired." in second, out
+    # No stale first message in the second modal.
+    assert "PDF export already in progress. Please wait." not in second, out
+    assert out["second"]["buttonDisabled"] is False, out
