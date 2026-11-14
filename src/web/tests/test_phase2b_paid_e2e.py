@@ -17,6 +17,18 @@ and result retrieval were covered at the unit level only.
 
 Runs against SQLite and real PostgreSQL via ``migrated_engine``. The
 Postgres leg runs in CI (TEST_POSTGRES_URL) and skips locally.
+
+PREMISE CHANGED (#164 Phase C): the signup grant is removed and
+``GET /credits/balance`` is retired (410), and an unconsumed
+additional-analysis consent can no longer admit or debit (hard cap —
+429). The subjects below are the PRESERVED legacy behaviours:
+settlement and replay of operations admitted BEFORE cutover, and
+failure release. Fixtures therefore seed the legacy balance and the
+admitted operation directly (grant_credits / create_consent /
+admit_paid_operation / store_result / complete_operation, mirroring
+test_issue164_phase_c.py) and the HTTP calls exercise the replay
+fence; balances are read from the ledger in the DB (the retired HTTP
+endpoint's exact value), and PDF exports are now FREE.
 """
 
 import copy
@@ -105,29 +117,94 @@ def _signup_verify_login(env, email_addr=None):
     env.client.headers["X-CSRF-Token"] = csrf
     with env.sessions() as db:
         uid = db.query(M.User).filter(M.User.email == email_addr).one().id
+    env.current_uid = uid
     return email_addr, uid, csrf
 
 
 def _http_balance(env):
-    r = env.client.get("/credits/balance")
-    assert r.status_code == 200, r.text[:300]
-    return r.json()["balance"]
+    """Phase C re-base: ``GET /credits/balance`` is retired (410) and
+    the signup grant is removed, so the ledger balance is read
+    directly from the DB for the currently signed-in user
+    (``env.current_uid``, set by _signup_verify_login); a user with
+    no credit account has balance 0."""
+    uid = getattr(env, "current_uid", None)
+    assert uid is not None, "_http_balance before signup/login"
+    with env.sessions() as db:
+        account = db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == uid).first()
+        return account.balance if account is not None else 0
 
 
 def _drain_signup(env, uid, qty):
-    """Re-base the 10-credit signup grant (issue #151) to a lower balance:
-    reduce the signup grant's remaining and the account balance together
-    (mirroring the _grant helpers in test_compare_routes.py)."""
+    """Reduce the user's credit balance by ``qty``.
+
+    Phase C re-base: no signup grant exists to drain (issue #151's
+    premise is retired), so this drains the user's grants FIFO —
+    each grant's remaining and the account balance together
+    (mirroring the _grant helpers in test_compare_routes.py) — which
+    keeps the premise "the balance is genuinely lowered by qty" for
+    balances seeded directly in fixtures."""
     with env.sessions() as db:
-        grant = db.query(M.CreditGrant).filter(
+        grants = db.query(M.CreditGrant).filter(
             M.CreditGrant.user_id == uid,
-            M.CreditGrant.source == "signup").one()
-        assert grant.remaining >= qty
-        grant.remaining -= qty
+            M.CreditGrant.remaining > 0).order_by(
+                M.CreditGrant.created_at).all()
+        assert sum(g.remaining for g in grants) >= qty
+        left = qty
+        for grant in grants:
+            take = min(grant.remaining, left)
+            grant.remaining -= take
+            left -= take
+            if not left:
+                break
         account = db.query(M.CreditAccount).filter(
             M.CreditAccount.user_id == uid).one()
         account.balance -= qty
         db.commit()
+
+
+def _seed_balance(env, uid, qty):
+    """Seed a legacy credit balance directly (Phase C: never via the
+    retired signup grant)."""
+    with env.sessions() as db:
+        C.grant_credits(db, uid, "purchase",
+                        f"seed-{uuid.uuid4().hex}", qty)
+        db.commit()
+
+
+def _paid_form(env, uid, csrf, filename="test.log", content=LOG_CONTENT):
+    """Build a /analyze/paid form around a consent created directly
+    in the fixture (Phase C: POST /analyze at the cap renders the
+    429 hard-cap refusal, not a consent page)."""
+    digest = fingerprint(filename, content)
+    with env.sessions() as db:
+        consent = C.create_consent(db, uid, "additional_analysis", digest, 1)
+        db.commit()
+        cid = str(consent.id)
+    main._store_paid_pending(cid, filename, content)
+    return {
+        "consent_id": cid,
+        "file_hash": digest,
+        "idempotency_key": cid,
+        "csrf_token": csrf,
+    }
+
+
+def _seed_completed_paid_analysis(env, uid, form):
+    """Admit + settle a paid analysis on pre-cutover credit terms,
+    directly in the fixture: consent -> admit (reserve 1 credit) ->
+    store_result -> complete_operation. Returns the report id.
+    The HTTP layer is then exercised through the replay fence."""
+    with env.sessions() as db:
+        op = C.admit_paid_operation(
+            db, uid, "additional_analysis", form["idempotency_key"],
+            form["file_hash"], 1, uuid.UUID(form["consent_id"]),
+            "seed-worker")
+        data = main.analyze_upload("test.log", LOG_CONTENT)
+        result = C.store_result(db, uid, op.id, data)
+        C.complete_operation(db, op.id, "seed-worker", result.id)
+        db.commit()
+        return result.id
 
 
 def _exhaust_quota(env, uid):
@@ -179,68 +256,93 @@ def _csrf_from(html):
 # --- the full flow ----------------------------------------------------------
 
 def test_full_paid_flow_signup_to_pdf(paid_env):
-    """admit -> analyze -> settle -> retrieve -> PDF, one HTTP journey."""
+    """admit -> analyze -> settle -> retrieve -> PDF, one HTTP journey.
+
+    PREMISE CHANGED (#164 Phase C): signup grants nothing and no new
+    additional-analysis admission is sold, so the admit -> settle
+    leg is seeded as a pre-cutover admitted operation (see
+    _seed_completed_paid_analysis) and the HTTP journey exercises
+    its replay; PDF exports are FREE (no 2-credit unlock charge).
+    Balance journey: 10 seeded -> 9 after the seeded settlement ->
+    9 through replay and both exports."""
     env = paid_env
-    _, uid, _ = _signup_verify_login(env)
-    assert _http_balance(env) == 10  # signup reward, asserted over HTTP
+    _, uid, csrf = _signup_verify_login(env)
+    assert _http_balance(env) == 0  # Phase C: no signup grant
+    _seed_balance(env, uid, 10)
+    assert _http_balance(env) == 10  # seeded legacy balance
 
     _exhaust_quota(env, uid)
-    form = _consent_page(env)
-    assert _http_balance(env) == 10  # the consent page itself charges nothing
+    form = _paid_form(env, uid, csrf)
+    assert _http_balance(env) == 10  # creating the consent charges nothing
 
+    rid = _seed_completed_paid_analysis(env, uid, form)
+    assert _http_balance(env) == 9  # 1 credit reserved then settled
+
+    # Replay the settled paid analysis over HTTP: recorded outcome,
+    # no second charge, and it names the same report.
     paid = env.client.post("/analyze/paid", data=form)
     assert paid.status_code == 200, paid.text[:500]
-    assert _http_balance(env) == 9  # 1 credit reserved then settled
-    rid = _report_id_from(paid.text)
+    assert _http_balance(env) == 9
+    assert _report_id_from(paid.text) == str(rid)
 
     # Retrieve the paid result over HTTP.
     view = env.client.get(f"/reports/{rid}")
     assert view.status_code == 200
     assert "test.log" in view.text
 
-    # Export PDF in the same flow: costs 2 credits.
+    # Export PDF in the same flow: FREE for all reports (Phase C).
     csrf = _csrf_from(view.text)
     pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
     assert pdf.content[:4] == b"%PDF"
-    assert _http_balance(env) == 7  # 9 - 2 PDF export
+    assert _http_balance(env) == 9  # no export charge at all
 
     # Re-downloading the same export is not a new charge (idempotent).
     pdf2 = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf2.status_code == 200
-    assert _http_balance(env) == 7
+    assert _http_balance(env) == 9
 
     # Replaying the paid analysis with the same idempotency key is free.
     replay = env.client.post("/analyze/paid", data=form)
     assert replay.status_code == 200
-    assert _http_balance(env) == 7
+    assert _http_balance(env) == 9
 
 
 def test_paid_insufficient_credits_402_without_charge(paid_env):
-    """402 when the balance cannot cover admission: no charge, no operation."""
+    """A fresh admission the balance cannot cover is refused with no
+    charge and no operation.
+
+    PREMISE CHANGED (#164 Phase C): there is no new credit admission
+    at ANY balance — an unconsumed additional-analysis consent
+    presented after cutover is refused 429 (hard cap) after the
+    already-admitted replay lookup, with no validate/debit. The
+    settled leg and the report journey are seeded pre-cutover
+    admissions (balance 3 -> 2), and the PDF export is FREE, so the
+    balance is still 2 (not 0) when the fresh consent is refused."""
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
-    # Re-base the 10-credit signup balance to 3 (issue #151) so spending
-    # it below genuinely leaves nothing for a fresh admission.
-    _drain_signup(env, uid, 7)
+    # Seed the legacy balance directly (Phase C: no signup grant).
+    _seed_balance(env, uid, 3)
     assert _http_balance(env) == 3
     _exhaust_quota(env, uid)
 
-    form = _consent_page(env)
+    form = _paid_form(env, uid, csrf)
+    rid = _seed_completed_paid_analysis(env, uid, form)
     paid = env.client.post("/analyze/paid", data=form)
     assert paid.status_code == 200, paid.text[:500]
     assert _http_balance(env) == 2
-    rid = _report_id_from(paid.text)
+    assert _report_id_from(paid.text) == str(rid)
 
-    # Spend the last 2 credits on a PDF export.
+    # The PDF export no longer spends the remaining credits: FREE.
     view = env.client.get(f"/reports/{rid}")
     assert view.status_code == 200
     pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": _csrf_from(view.text)})
     assert pdf.status_code == 200
-    assert _http_balance(env) == 0
+    assert _http_balance(env) == 2
 
-    # A fresh consent now fails at admission: 402, nothing reserved.
+    # A fresh consent now fails at admission: 429, nothing reserved,
+    # nothing charged, no operation created for it.
     content = b"2024-01-01 11:00:00 INFO other\n"
     digest = fingerprint("other.log", content)
     with env.sessions() as db:
@@ -254,19 +356,45 @@ def test_paid_insufficient_credits_402_without_charge(paid_env):
         "idempotency_key": cid,
         "csrf_token": csrf,
     })
-    assert denied.status_code == 402, denied.text[:300]
-    assert _http_balance(env) == 0
+    assert denied.status_code == 429, denied.text[:300]
+    assert _http_balance(env) == 2
     with env.sessions() as db:
         assert C.find_operation(db, uid, "additional_analysis", cid, digest) is None
 
 
 def test_paid_analysis_failure_releases_credits(paid_env, monkeypatch):
-    """A failed paid analysis releases the reservation: balance unchanged."""
+    """A failed paid analysis releases the reservation: balance unchanged.
+
+    PREMISE CHANGED (#164 Phase C): a NEW admission can no longer
+    reach execution (unconsumed consents refuse 429), so the failure
+    leg is a pre-cutover admitted operation whose execution failed:
+    admit (reserve 1) -> release_operation on failure restores the
+    full balance, and the HTTP replay of that failed identity is a
+    409 that re-executes nothing and charges nothing."""
     env = paid_env
-    _, uid, _ = _signup_verify_login(env)
+    _, uid, csrf = _signup_verify_login(env)
+    _seed_balance(env, uid, 10)
+    assert _http_balance(env) == 10
     _exhaust_quota(env, uid)
-    form = _consent_page(env)
-    monkeypatch.setattr(main, "analyze_upload", lambda *a: {"error": True, "message": "bad log"})
-    failed = env.client.post("/analyze/paid", data=form)
-    assert failed.status_code == 400, failed.text[:300]
+    form = _paid_form(env, uid, csrf)
+    with env.sessions() as db:
+        op = C.admit_paid_operation(
+            db, uid, "additional_analysis", form["idempotency_key"],
+            form["file_hash"], 1, uuid.UUID(form["consent_id"]),
+            "seed-worker")
+        db.commit()
+        op_id = op.id
+    assert _http_balance(env) == 9  # 1 credit reserved by the admission
+    with env.sessions() as db:
+        C.release_operation(db, op_id, "seed-worker", "analysis_failed")
+        db.commit()
     assert _http_balance(env) == 10  # reservation released, nothing settled
+    calls = []
+    monkeypatch.setattr(main, "analyze_upload",
+                        lambda *a: calls.append(a) or {"error": True, "message": "bad log"})
+    failed = env.client.post("/analyze/paid", data=form)
+    assert failed.status_code == 409, failed.text[:300]
+    assert calls == []  # the failed identity never re-executes
+    assert _http_balance(env) == 10
+    with env.sessions() as db:
+        assert db.get(M.Operation, op_id).status == "failed"
