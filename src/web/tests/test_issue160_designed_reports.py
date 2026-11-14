@@ -538,10 +538,10 @@ def test_8_web_card_structure():
 
 
 def test_8_actions_menu_preserved_verbatim(auth_env):
-    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): the owned
-    # artifact is dollar-paid, so its exports are included — the
-    # menu structure is preserved verbatim, but the Export confirm
-    # copy is the export-unlocked (free) copy, not the 2-credit one.
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product; Phase C,
+    # Decision 4: exports free for ALL reports): the menu structure
+    # is preserved verbatim, but the Export confirm copy is the
+    # Phase C free copy, not the 2-credit or export-unlocked one.
     _, _user_id, rid, csrf = _setup(auth_env)
     from product_seed import seed_entitlement_for_source
     seed_entitlement_for_source(auth_env.sessions, rid)
@@ -563,8 +563,14 @@ def test_8_actions_menu_preserved_verbatim(auth_env):
                    f"/reports/{analysis_id}/exports/csv",
                    f"/reports/{analysis_id}/exports/json"):
         assert f'action="{action}"' in html
+    # PREMISE CHANGED (#164 Phase C, Decision 4 / C2): exports are
+    # free for ALL reports, so every export form carries the single
+    # free confirm copy — the export-unlocked wording (which implied
+    # a paid unlock state) and the 2-credit wording are both gone.
+    assert html.count('data-confirm="Exports are free for this '
+                      'report."') == 3
     assert ('data-confirm="This report is export-unlocked — the PDF '
-            'download is free."') in html
+            'download is free."') not in html
     assert ('data-confirm="Export costs 2 credits and unlocks PDF, CSV '
             'and JSON for this report."') not in html
     assert 'class="severity-chip"' in html
