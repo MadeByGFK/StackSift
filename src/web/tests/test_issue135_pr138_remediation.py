@@ -203,6 +203,13 @@ def test_f4_share_hash_binds_format_and_legacy_matches_only_txt():
 def test_f4_retention_replay_with_legacy_hash_returns_recorded_success(paid_env):
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
+    # PREMISE CHANGED (#164 Phase C): the signup grant is removed and
+    # /credits/balance is retired (410), so the balance the replay
+    # must not touch is seeded directly in the fixture (10 credits);
+    # _http_balance now reads that ledger balance from the DB. The
+    # subject is preserved: a completed pre-cutover extension still
+    # replays its recorded success after the Phase C 410 fence.
+    _grant(env, uid, 10)
     rid = _make_report(env, uid)
     integrity, expires_at = _source_row(env, rid)
     new_expiry = expires_at + timedelta(
@@ -216,6 +223,7 @@ def test_f4_retention_replay_with_legacy_hash_returns_recorded_success(paid_env)
             resulting_expiry=new_expiry))
         db.commit()
     balance_before = _http_balance(env)
+    assert balance_before == 10  # the seeded legacy balance
     resp = env.client.post(
         f"/reports/{rid}/retention",
         data={"csrf_token": csrf, "idempotency_key": "f4-legacy-retention"})
