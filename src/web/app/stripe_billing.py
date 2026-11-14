@@ -532,8 +532,9 @@ def create_product_checkout_session(
     (``checkout:product:{purchase_id}``), never to a minute, so a retry
     can never bind to a different purchase/source. Metadata carries
     ``kind=product`` (A3) on both the session and the PaymentIntent.
-    F4: immediate payment methods only (card) — no delayed/async
-    settlement methods are offered in Phase A.
+    F4: no ``payment_method_types`` param is sent — Stripe rejects it
+    on session creation; payment methods are governed by the Stripe
+    account's payment-method settings (Dashboard).
     """
     entry = PRODUCT_SKUS.get(sku)
     if entry is None:
@@ -545,7 +546,6 @@ def create_product_checkout_session(
     idempotency_key = f"checkout:product:{purchase_id}"
     data = {
         "mode": "payment",
-        "payment_method_types[0]": "card",
         "line_items[0][price]": price_id,
         "line_items[0][quantity]": "1",
         "success_url": success_url,
