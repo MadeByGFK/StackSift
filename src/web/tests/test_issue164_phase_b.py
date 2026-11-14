@@ -361,6 +361,13 @@ def test_checkout_session_metadata_carries_digest(p164b_env):
     assert data.get("metadata[content_digest]") == digest
     assert data.get("payment_intent_data[metadata][content_digest]") == digest
     assert data.get("metadata[sku]") == "compare"
+    # PMT fix: Stripe rejects payment_method_types on Checkout Session
+    # creation — the product session must send none, while still
+    # carrying the price id, mode and success/cancel URLs.
+    assert not any(k.startswith("payment_method_types") for k in data)
+    assert data["mode"] == "payment"
+    assert data["line_items[0][price]"] == PRICE_BY_SKU["compare"]
+    assert data["success_url"] and data["cancel_url"]
 
 
 def test_settlement_creates_digest_entitlement_with_30d_window(p164b_env):

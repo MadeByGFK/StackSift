@@ -282,6 +282,14 @@ def test_checkout_creation_pending_first_metadata_and_key(p164_env, monkeypatch)
     assert data["metadata[kind]"] == "product"
     assert data["metadata[sku]"] == "investigation_report"
     assert data["payment_intent_data[metadata][kind]"] == "product"
+    # PMT fix: Stripe rejects payment_method_types on Checkout Session
+    # creation — the product session must send none, while still
+    # carrying the price id, mode and success/cancel URLs.
+    assert not any(k.startswith("payment_method_types") for k in data)
+    assert data["mode"] == "payment"
+    assert data["line_items[0][price]"] == PRICE_ID
+    assert "checkout=success" in data["success_url"]
+    assert "checkout=cancelled" in data["cancel_url"]
     assert captured[0]["headers"]["Idempotency-Key"] == f"checkout:product:{body['purchase_id']}"
     from app.credits import _as_aware
     assert datetime.fromisoformat(body["redemption_deadline"]) == _as_aware(expected_deadline)
