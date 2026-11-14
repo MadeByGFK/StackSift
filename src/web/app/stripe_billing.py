@@ -94,6 +94,21 @@ class CheckoutError(Exception):
     """Checkout cannot proceed (misconfiguration or Stripe failure)."""
 
 
+class CheckoutIdempotencyError(CheckoutError):
+    """Stripe rejected the request with ``error.type ==
+    "idempotency_error"`` (issue #164 idempotency-supersede fix).
+
+    The idempotency key bound to a purchase row was first used with a
+    different parameter set, so EVERY retry under that key fails the
+    same way until the key expires (~24h). This is the ONE checkout
+    failure that is safe to recover from by superseding the local
+    purchase row (a new row mints a new key); all other failures keep
+    the generic CheckoutError behaviour. The user-facing wording on
+    final failure stays the generic 503 — this subclass is an
+    internal signal only, and it never carries the raw Stripe body.
+    """
+
+
 class CheckoutNotConfigured(CheckoutError):
     """Stripe is not configured yet — fail closed, no partial checkout."""
 
@@ -209,6 +224,24 @@ def _stripe_error_detail(resp) -> str:
         message = _EMAIL_RE.sub("[redacted-email]", str(message))
         parts.append(f"message={message}")
     return " ".join(parts) or "empty-error"
+
+
+def _stripe_error_type(resp) -> str | None:
+    """The structured ``error.type`` of a Stripe error body, or None.
+
+    Parses via the same structured-error shape as
+    ``_stripe_error_detail``; the raw body is never returned or
+    logged through this helper either.
+    """
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    err = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(err, dict):
+        return None
+    value = err.get("type")
+    return value if isinstance(value, str) else None
 
 
 def verify_stripe_signature(
@@ -517,6 +550,18 @@ def fetch_checkout_session(session_id: str) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def retrieve_checkout_session(session_id: str) -> dict:
+    """Retrieve a Checkout Session (issue #164 supersede fix, §2a).
+
+    The name the supersede spec uses for the existing retrieval —
+    a thin alias of ``fetch_checkout_session`` so both checkout
+    routes and the billing primitives share ONE implementation
+    (same fail-closed CheckoutError on transport/API failure: an
+    unconfirmed session is never evidence for superseding).
+    """
+    return fetch_checkout_session(session_id)
+
+
 def create_product_checkout_session(
     *,
     user_id,
@@ -583,6 +628,14 @@ def create_product_checkout_session(
     if resp.status_code != 200:
         detail = _stripe_error_detail(resp)
         logger.error("Stripe product checkout returned HTTP %s (%s)", resp.status_code, detail)
+        if _stripe_error_type(resp) == "idempotency_error":
+            # Issue #164 supersede fix (§1): this key can NEVER
+            # succeed with the current parameter set — surface it as
+            # the distinct subclass so the checkout routes can run
+            # the (single, safety-gated) supersede path. The detail
+            # logged above is the structured summary only; the raw
+            # body is never logged or returned.
+            raise CheckoutIdempotencyError("Stripe request failed")
         raise CheckoutError("Stripe request failed")
     body = resp.json()
     url = body.get("url")
