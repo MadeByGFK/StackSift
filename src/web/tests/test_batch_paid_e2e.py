@@ -317,8 +317,8 @@ def test_full_batch_flow_dollar_paid(batch_env):
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:500]
     # Dollar quote copy (Phase B): flat $5, entitlement held -> Run path.
-    assert "3 files. One flat price covers the whole batch." in r.text
-    assert "One flat price covers the whole batch." in r.text
+    assert "One combined report, in upload order." in r.text  # S6/S7 CALL-1 intro
+    assert "One combined report, in upload order." in r.text
     assert "No charge if the batch fails" in r.text
     assert "Analyze 3 files \u2014 already paid" in r.text
     assert "free hourly allowance" not in r.text
@@ -373,7 +373,7 @@ def test_batch_dollar_ignores_free_allowance(batch_env):
     _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:300]
-    assert "One flat price covers the whole batch." in r.text
+    assert "One combined report, in upload order." in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:300]
@@ -429,9 +429,9 @@ def test_batch_count_limits(batch_env):
     assert "at most 5 files" in r.text
     # N=2 and N=5 pass validation at the same flat $5 (Decision 3).
     r = _post_batch(env, [("a.log", LOG_1), ("b.log", LOG_2)])
-    assert r.status_code == 402 and "One flat price covers the whole batch." in r.text, r.text[:300]
+    assert r.status_code == 402 and "One combined report, in upload order." in r.text, r.text[:300]
     r = _post_batch(env, [(f"f{i}.log", SMALL) for i in range(5)])
-    assert r.status_code == 402 and "One flat price covers the whole batch." in r.text, r.text[:300]
+    assert r.status_code == 402 and "One combined report, in upload order." in r.text, r.text[:300]
 
 
 def test_batch_boundary_equality_50000_lines_passes(batch_env):
@@ -440,7 +440,7 @@ def test_batch_boundary_equality_50000_lines_passes(batch_env):
     exact = b"2024-01-01 10:00:00 INFO heartbeat ok\n" * 50000
     r = _post_batch(env, [("big.log", exact), ("small.log", SMALL)])
     assert r.status_code == 402, r.text[:300]
-    assert "One flat price covers the whole batch." in r.text
+    assert "One combined report, in upload order." in r.text
 
 
 # --- failure release ---------------------------------------------------------------
@@ -512,8 +512,23 @@ def test_batch_no_entitlement_quote_offers_checkout_and_confirm_402(batch_env):
     r = _post_batch(env, _three())
     assert r.status_code == 402, r.text[:400]
     assert "product-checkout-form" in r.text  # buy path, not credits
-    assert "Buy \u2014 $5" in r.text
-    assert "/credits" not in r.text
+    assert "Pay $5" in r.text
+    # PREMISE CHANGED (S6/S7 port, amendment A1): the ported consent
+    # page now includes the shared auth_form_script.html in
+    # badge-suppressed mode, whose retained PDF-handler fallback still
+    # names '/credits' in script source — the old blanket string
+    # absence no longer states this test's premise. The premise (the
+    # quote page offers NO credit purchase) is now asserted on the
+    # rendered controls: no badge element, no credits link/control,
+    # and the executed-JS suppression is proven in
+    # test_issue164_s6s7_browser.py (A1).
+    assert 'id="credit-badge"' not in r.text
+    assert '<a href="/credits"' not in r.text
+    # The rendered Buy-credits CTA (batch.html's buy_credits branch),
+    # not the bare words: the retained PDF-handler script source sets
+    # a modal button's textContent to 'Buy credits' on every page.
+    assert 'buy-credits-cta' not in r.text
+    assert '>Buy credits</a>' not in r.text
     # The checkout variant renders no consent form; the zero-cost
     # consent exists server-side — take its id/hash from the DB.
     with env.sessions() as db:
@@ -557,7 +572,7 @@ def test_batch_quote_stable_across_allowance_change(batch_env):
     _, uid, _ = _signup_verify_login(env)
     _seed_batch_entitlement(env, uid, _three())
     r = _post_batch(env, _three())
-    assert "One flat price covers the whole batch." in r.text
+    assert "One combined report, in upload order." in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
     _seed_free(env, uid, 10)  # allowance consumed elsewhere
     confirmed = _confirm(env, consent_id, file_hash, csrf)
@@ -596,7 +611,7 @@ def test_order_duplicates_and_identical_files(batch_env):
     _seed_batch_entitlement(env, uid, files)
     r = _post_batch(env, files)
     assert r.status_code == 402, r.text[:300]
-    assert "One flat price covers the whole batch." in r.text  # flat price regardless of duplicates
+    assert "One combined report, in upload order." in r.text  # flat price regardless of duplicates
     consent_id, file_hash, csrf = _consent_fields(r.text)
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:400]

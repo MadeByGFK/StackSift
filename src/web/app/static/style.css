@@ -330,6 +330,62 @@ table.issues tr:last-child td { border-bottom: none; }
 .ss-text-right { text-align: right; }
 .ss-count-cell { text-align: right; color: var(--muted); }
 
+/* ---- Issue #164 S6/S7 (Batch / Compare surface design alignment) ----
+   Every rule in this block is scoped to the Batch/Compare surfaces:
+   all selectors carry the .s6- prefix, and the .s6- classes exist only
+   in batch.html / compare.html plus the Batch/Compare product renders
+   of paid_consent.html and product_return.html (A3: the new consent /
+   return composition is operation-scoped — the credit branch and the
+   Oversize branch of those shared templates keep their existing
+   inline styles and never carry .s6- classes). No shared selector,
+   token, or :root value is touched. Values reuse the live tokens only
+   (navy/gold house system). Placement mirrors the S3 note: this block
+   sits BEFORE the S3 block so the S3 (marker-to-S2), S2 (marker-to-S4)
+   and S4 (marker-to-EOF) scope-slice tests all stay green. */
+.s6-eyebrow { font-family: var(--font-code); color: var(--accent); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin: 0 0 12px; }
+.s6-panel { background: var(--panel); border: 1px solid var(--border); border-top: 3px solid var(--accent); border-radius: var(--radius); padding: 24px; margin-top: 26px; }
+.s6-panel h1 { margin: 0 0 10px; }
+.s6-sub { color: var(--muted); max-width: 640px; }
+.s6-inline-link { color: var(--accent); }
+.s6-field-label { display: block; font-family: var(--font-code); color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin: 28px 0 0; }
+.s6-dropzone { box-shadow: inset 0 0 0 1px var(--panel); padding: 52px 24px; margin-top: 12px; }
+.s6-medallion { display: inline-flex; align-items: center; justify-content: center; width: 46px; height: 46px; border-radius: 50%; background: var(--accent); color: #0a1830; margin: 0 auto 12px; }
+.s6-file-input:focus-visible + .s6-dropzone { outline: 3px solid var(--accent); outline-offset: 3px; border-color: var(--accent); }
+.s6-staged { display: grid; gap: 10px; margin-top: 14px; }
+.s6-file-row { display: flex; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.s6-file-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; word-break: break-all; }
+.s6-file-meta { color: var(--muted); font-family: var(--font-code); font-size: 11px; white-space: nowrap; }
+.s6-remove { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 2px 9px; font-size: 14px; cursor: pointer; flex: none; }
+.s6-remove:hover { color: var(--text); border-color: var(--accent); }
+@media (max-width: 560px) { .s6-file-row { flex-wrap: wrap; } }
+.s6-cta { display: flex; justify-content: flex-end; margin-top: 24px; }
+.s6-btn-primary { background: var(--accent); color: #0a1830; font-size: 16px; font-weight: 700; padding: 12px 26px; border-radius: 8px; border: none; cursor: pointer; }
+.s6-btn-primary:hover { filter: brightness(1.1); }
+@media (max-width: 720px) { .s6-cta > * { width: 100%; } }
+.s6-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; align-items: start; }
+@media (max-width: 720px) { .s6-compare-grid { grid-template-columns: 1fr; } }
+.s6-shell { display: flex; justify-content: center; padding: 24px 20px 56px; }
+.s6-consent-panel { width: 100%; max-width: 480px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 30px 30px 24px; text-align: center; }
+@media (max-width: 720px) { .s6-consent-panel { padding: 22px 18px; } }
+.s6-consent-panel h1 { margin: 0 0 8px; font-size: 22px; }
+.s6-intro { color: var(--muted); margin: 0; }
+.s6-files { display: grid; gap: 8px; margin: 16px 0; text-align: left; }
+.s6-chip { font-family: var(--font-code); font-size: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; word-break: break-all; }
+.s6-meta { color: var(--muted); font-size: 13px; margin: 8px 0; }
+.s6-cost { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 18px 0; margin: 18px 0; }
+.s6-cost strong { display: block; font-size: 38px; font-weight: 800; color: var(--accent); line-height: 1.1; }
+.s6-cost p { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+.s6-lead { font-size: 13px; text-align: center; margin: 0 0 10px; }
+.s6-promise { font-size: 12px; color: var(--muted); line-height: 1.55; text-align: center; margin: 0; }
+.s6-actions { display: flex; gap: 10px; justify-content: center; margin-top: 18px; }
+.s6-actions > * { flex: 1; }
+@media (max-width: 720px) { .s6-actions { flex-direction: column; } }
+.s6-btn-confirm { background: var(--accent); color: #1a1a2e; border: none; padding: 12px 24px; border-radius: 8px; font-weight: 700; font-size: 1rem; cursor: pointer; font-family: inherit; }
+.s6-btn-confirm:hover { filter: brightness(1.1); }
+.s6-btn-cancel { border: 1px solid var(--border); color: var(--text); background: transparent; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 1rem; cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; justify-content: center; }
+.s6-btn-cancel:hover { border-color: var(--accent); }
+.s6-foot { font-size: 11px; color: var(--muted); text-align: center; margin: 16px 0 0; }
+.s6-note { margin-top: 20px; font-size: 0.85rem; color: var(--muted); }
 /* ---- Issue #170 S3 (My Reports surface design alignment) ----
    Every rule in this block is scoped to the My Reports surface: all
    selectors carry the .s3- prefix, and the .s3- classes exist only

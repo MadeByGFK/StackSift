@@ -3,7 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{% if product_mode and operation_type == "batch" %}
+<title>Confirm batch analysis | stacksift.</title>
+<meta name="description" content="Review the files and total before confirming a combined batch analysis.">
+{% elif product_mode and operation_type == "compare_logs" %}
+<title>Confirm comparison | stacksift.</title>
+<meta name="description" content="Review both logs and the total before confirming a comparison.">
+{% else %}
 <title>StackSift — Confirm</title>
+{% endif %}
 <link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/style.css?v=4">
@@ -23,6 +31,94 @@
 </style>
 </head>
 <body>
+{% if product_mode and operation_type in ["batch", "compare_logs"] %}
+{# Issue #164 S6/S7 port: the Batch/Compare product renders get the
+   design composition (header + s6- panel, spec items K1-K13). This
+   branch is operation-scoped (amendment A3): the credit branch and
+   the Oversize product render keep the legacy composition below,
+   byte-stable apart from the shared CALL-3 "Pay $5" label. #}
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/credits">Pricing</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+</div>
+<main class="s6-shell">
+  <section class="s6-consent-panel" aria-labelledby="consent-title">
+  <h1 id="consent-title">{{ heading }}</h1>
+  <p class="s6-intro">{{ intro }}</p>
+  <div class="s6-files">
+    <div class="s6-chip">{{ filename }}</div>
+    {% if file_list %}
+    {% for entry in file_list %}
+    <div class="s6-chip">{{ entry }}</div>
+    {% endfor %}
+    {% endif %}
+  </div>
+  {% if size_line %}<p class="s6-meta">{{ size_line }}</p>{% endif %}
+  {% if limits_line %}<p class="s6-meta">{{ limits_line }}</p>{% endif %}
+  <div class="s6-cost"><strong>{{ cost_label }}</strong><p>{{ cost_sentence }}</p></div>
+  {% if product_checkout %}
+  <p class="s6-lead">{{ lead_in }}</p>
+  <p class="s6-promise" id="product-checkout-promise">{{ promise }}</p>
+  <form id="product-checkout-form" class="s6-actions">
+    <input type="hidden" name="sku" value="{{ product_sku }}">
+    <input type="hidden" name="content_digest" value="{{ file_hash }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="s6-btn-confirm">{{ confirm_label }}</button>
+    <a href="/" class="s6-btn-cancel">{{ cancel_label }}</a>
+  </form>
+  <p class="s6-note" id="product-checkout-error" role="alert"></p>
+  <script>
+  document.getElementById('product-checkout-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var form = ev.target;
+    var body = new URLSearchParams(new FormData(form));
+    fetch('/products/checkout', {method: 'POST', body: body, credentials: 'same-origin'})
+      .then(function (r) { return r.json().then(function (j) { return {ok: r.ok, j: j}; }); })
+      .then(function (res) {
+        if (res.ok && res.j.checkout_url) { window.location = res.j.checkout_url; return; }
+        document.getElementById('product-checkout-error').textContent =
+          (res.j && res.j.error) || 'Checkout is unavailable right now.';
+      })
+      .catch(function () {
+        document.getElementById('product-checkout-error').textContent =
+          'Checkout is unavailable right now.';
+      });
+  });
+  </script>
+  {% else %}
+  <form method="post" action="{{ confirm_action }}" class="s6-actions">
+    <input type="hidden" name="consent_id" value="{{ consent_id }}">
+    <input type="hidden" name="file_hash" value="{{ file_hash }}">
+    <input type="hidden" name="idempotency_key" value="{{ consent_id }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="s6-btn-confirm">{{ confirm_label }}</button>
+    <a href="/" class="s6-btn-cancel">{{ cancel_label }}</a>
+  </form>
+  {% endif %}
+  {% if footnote %}<p class="s6-foot">{{ footnote }}</p>{% endif %}
+  {% if note %}<p class="s6-note">{{ note }}</p>{% endif %}
+  </section>
+</main>
+{% set suppress_credit_badge = true %}
+{% include "auth_form_script.html" %}
+{% include "nav_script.html" %}
+{% else %}
 <div class="consent-box">
   {# Server-selected operation policy (issue #104, trim T8). The
      additional_analysis strings below stay byte-identical to the
@@ -110,5 +206,6 @@
   {% endif %}
   <p class="consent-note">{{ note }}</p>
 </div>
+{% endif %}
 </body>
 </html>

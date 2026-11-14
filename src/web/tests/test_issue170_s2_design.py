@@ -161,16 +161,23 @@ def test_s2_css_block_is_analyze_scoped():
 
 def test_s2_compare_batch_panels_only():
     """Teeth for the opt-in + gates for parity: compare/batch gain
-    the shared panel class and nothing else changes."""
+    the shared panel class and nothing else changes.
+
+    PREMISE CHANGED (S6/S7 port, spec v1.1 amendment A8): the S6/S7
+    fidelity port replaces the S2 panel opt-in on these two templates
+    with the full S6 composition, so the '<section class="s2-panel">'
+    presentation assertion is superseded by the s6-panel assertion
+    below. The form action / field names / accept list / CSRF
+    assertions are premise-PRESERVED and unchanged."""
     for src, name in ((COMPARE, "compare.html"), (BATCH, "batch.html")):
-        assert '<section class="s2-panel">' in src, name
+        assert '<section class="s6-panel">' in src, name
     chtml = _render("compare.html")
-    assert '<section class="s2-panel">' in chtml
+    assert '<section class="s6-panel">' in chtml
     assert 'action="/compare"' in chtml
     assert 'name="file_a"' in chtml and 'name="file_b"' in chtml
     assert 'accept=".log,.txt,.text"' in chtml
     bhtml = _render("batch.html")
-    assert '<section class="s2-panel">' in bhtml
+    assert '<section class="s6-panel">' in bhtml
     assert 'action="/batch"' in bhtml
     assert 'name="files"' in bhtml and "multiple" in bhtml
     assert 'name="csrf_token"' in bhtml

@@ -15,11 +15,18 @@ CSS = (APP / "static" / "style.css").read_text()
 
 # Every template carrying the site header: the 13 shared-`header.top`
 # pages plus reports.html (its own header family, same patterns).
+# Extended intentionally by the S6/S7 port (spec v1.1 amendment A8)
+# with the newly header-bearing Batch/Compare templates: batch.html,
+# compare.html, and product_return.html (whose header renders on its
+# Batch/Compare states). paid_consent.html is deliberately NOT in
+# this list: its header renders only on Batch/Compare product
+# renders, which test_paid_consent_* below pins per-branch.
 HEADER_TEMPLATES = [
     "forgot.html", "index.html", "login.html", "oauth_error.html",
     "pricing.html", "privacy.html", "report.html", "reports.html",
     "reset.html", "settings.html", "signup.html", "support.html",
     "terms.html", "verify.html",
+    "batch.html", "compare.html", "product_return.html",
 ]
 LOGO_ANCHOR = '<a href="/" class="logo">stacksift<span>.</span></a>'
 TOGGLE_RE = re.compile(
@@ -51,8 +58,48 @@ def test_every_header_template_includes_nav_script():
         assert "nav_script.html" in _read(name), name
 
 
+def _render_consent(**overrides):
+    from app.main import templates
+    ctx = {
+        "current_user": object(), "csrf_token": "csrf-test",
+        "heading": "H", "intro": "I", "filename": "f.log",
+        "file_list": None, "size_line": None, "limits_line": None,
+        "cost_label": "$5", "cost_sentence": "S", "product_mode": False,
+        "product_checkout": False, "product_sku": "compare",
+        "file_hash": "h", "consent_id": "c", "confirm_label": "Use 1 credit",
+        "cancel_label": "Cancel", "operation_type": "additional_analysis",
+        "promise": "", "confirm_action": "/analyze/paid", "note": "N",
+        "balance": 3, "eligible": 3, "lead_in": "", "footnote": "",
+    }
+    ctx.update(overrides)
+    return templates.env.get_template("paid_consent.html").render(**ctx)
+
+
 def test_paid_consent_has_no_header_to_convert():
-    html = _read("paid_consent.html")
+    """PREMISE CHANGED (S6/S7 port, spec v1.1 amendment A8): the
+    template SOURCE now carries a header for its Batch/Compare
+    product renders, so the old source assertion is replaced by its
+    amended form — a CREDIT render still carries no header (the
+    no-header premise is preserved where it still holds), asserted
+    on rendered output."""
+    html = _render_consent()
+    assert 'class="logo"' not in html
+    assert "nav-toggle" not in html
+
+
+def test_paid_consent_product_render_has_header():
+    """A8's added positive assertions: Batch/Compare product renders
+    of paid_consent.html carry the standard header; an Oversize
+    product render does NOT (amendment A3 scoping)."""
+    for op in ("batch", "compare_logs"):
+        html = _render_consent(
+            product_mode=True, product_checkout=True, operation_type=op)
+        assert LOGO_ANCHOR in html, op
+        assert TOGGLE_RE.search(html), op
+        assert '<nav class="nav-links" id="site-nav">' in html, op
+    html = _render_consent(
+        product_mode=True, product_checkout=True,
+        operation_type="oversize_analysis")
     assert 'class="logo"' not in html
     assert "nav-toggle" not in html
 

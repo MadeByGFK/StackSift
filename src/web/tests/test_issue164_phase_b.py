@@ -452,7 +452,7 @@ def test_quote_step_shows_checkout_then_run_after_settlement(p164b_env):
     r = _post_compare(env)
     assert r.status_code == 402, r.text[:300]
     assert "product-checkout-form" in r.text
-    assert "Buy \u2014 $5" in r.text
+    assert "Pay $5" in r.text
     from app import stripe_billing as sb
     assert sb.PAY_NOW_PROMISE in r.text
     _buy_and_settle(env, csrf, "compare", _compare_digest())

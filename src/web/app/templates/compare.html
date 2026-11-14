@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StackSift — Compare two logs</title>
+<title>Compare two logs | stacksift.</title>
+<meta name="description" content="Upload a before and after log and see what changed between them.">
 <link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
 <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
@@ -11,33 +12,135 @@
 <div class="wrap">
   <header class="top">
     <a href="/" class="logo">stacksift<span>.</span></a>
-    <nav class="nav-links">
-      <a href="/reports">My Reports</a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/credits">Pricing</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
     </nav>
   </header>
 
-  <section class="s2-panel">
+  <section class="s6-panel">
+    <p class="s6-eyebrow">Compare</p>
     <h1>Compare two logs</h1>
-    <p>Upload A (before) and B (after). Comparison costs $5 flat — even if the logs are identical or show no material
-    differences. Payment is captured at checkout; if generation fails,
-    your purchase is never consumed and you can retry. Both files are subject to the free limits
+    <p class="s6-sub">Upload A (before) and B (after). Comparison costs $5, charged
+    only on success — even if the logs are identical or show no material
+    differences. Both files are subject to the free limits
     (10 MB / 50,000 lines each). Existing reports cannot be compared
     retrospectively: this is upload-only in v1.</p>
     {% if error %}
     <div class="error" role="alert">{{ error }}</div>
     {% endif %}
     <form method="post" action="/compare" enctype="multipart/form-data">
-      <div>
-        <label for="file_a">A — Before (baseline)</label>
-        <input type="file" id="file_a" name="file_a" accept=".log,.txt,.text" required>
+      <div class="s6-compare-grid">
+        <div>
+          <span class="s6-field-label">A — Before (baseline)</span>
+          <input type="file" id="file_a" name="file_a" accept=".log,.txt,.text" required class="visually-hidden s6-file-input">
+          <label class="dropzone s6-dropzone" id="zone-a" for="file_a" aria-label="Upload log A">
+            <span class="s6-medallion" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>
+            <span class="big">Drag and drop a log file here</span>
+            <span class="small">or browse — one .log, .txt, or .text file</span>
+          </label>
+          <div class="s6-staged" id="staged-a" aria-label="Staged file A"></div>
+        </div>
+        <div>
+          <span class="s6-field-label">B — After</span>
+          <input type="file" id="file_b" name="file_b" accept=".log,.txt,.text" required class="visually-hidden s6-file-input">
+          <label class="dropzone s6-dropzone" id="zone-b" for="file_b" aria-label="Upload log B">
+            <span class="s6-medallion" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>
+            <span class="big">Drag and drop a log file here</span>
+            <span class="small">or browse — one .log, .txt, or .text file</span>
+          </label>
+          <div class="s6-staged" id="staged-b" aria-label="Staged file B"></div>
+        </div>
       </div>
-      <div>
-        <label for="file_b">B — After</label>
-        <input type="file" id="file_b" name="file_b" accept=".log,.txt,.text" required>
+      <div class="s6-cta">
+        <button type="submit" class="s6-btn-primary">Compare ($5)</button>
       </div>
-      <button type="submit">Compare ($5)</button>
     </form>
   </section>
 </div>
+<script>
+// S7 Compare staged rows: each zone is single-file. The visible row,
+// the hidden input's FileList and the submission are three views of
+// ONE staged file per zone; every mutation re-syncs all three.
+// Dropping several files into one zone keeps the LAST dropped file
+// (named single-file-zone behaviour, spec v1.1 RT-13). Filenames
+// render via textContent only — never as HTML.
+(function () {
+  function fmtSize(n) {
+    if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+  function wireZone(inputId, zoneId, stagedId) {
+    var fi = document.getElementById(inputId);
+    var dz = document.getElementById(zoneId);
+    var stagedEl = document.getElementById(stagedId);
+    var staged = null;
+    function render() {
+      stagedEl.textContent = '';
+      if (!staged) return;
+      var row = document.createElement('div');
+      row.className = 's6-file-row';
+      var name = document.createElement('span');
+      name.className = 's6-file-name';
+      name.textContent = staged.name;
+      var meta = document.createElement('span');
+      meta.className = 's6-file-meta';
+      meta.textContent = fmtSize(staged.size);
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 's6-remove';
+      btn.setAttribute('aria-label', 'Remove ' + staged.name);
+      btn.textContent = '×';
+      btn.addEventListener('click', function () {
+        staged = null;
+        sync();
+      });
+      row.appendChild(name);
+      row.appendChild(meta);
+      row.appendChild(btn);
+      stagedEl.appendChild(row);
+    }
+    function sync() {
+      var dt = new DataTransfer();
+      if (staged) dt.items.add(staged);
+      fi.files = dt.files;
+      render();
+    }
+    fi.addEventListener('change', function () {
+      staged = fi.files.length ? fi.files[0] : null;
+      render();
+    });
+    ['dragenter', 'dragover'].forEach(function (e) {
+      dz.addEventListener(e, function (ev) { ev.preventDefault(); dz.classList.add('dragover'); });
+    });
+    ['dragleave', 'drop'].forEach(function (e) {
+      dz.addEventListener(e, function (ev) { ev.preventDefault(); dz.classList.remove('dragover'); });
+    });
+    dz.addEventListener('drop', function (ev) {
+      if (ev.dataTransfer.files.length) {
+        staged = ev.dataTransfer.files[ev.dataTransfer.files.length - 1];
+        sync();
+      }
+    });
+  }
+  wireZone('file_a', 'zone-a', 'staged-a');
+  wireZone('file_b', 'zone-b', 'staged-b');
+})();
+</script>
+{% set suppress_credit_badge = true %}
+{% include "auth_form_script.html" %}
+{% include "nav_script.html" %}
 </body>
 </html>

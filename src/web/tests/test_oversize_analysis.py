@@ -247,7 +247,7 @@ def test_byte_only_oversize_quotes_5_dollars(oversize_env):
     r = _post_oversize(env, content)
     assert r.status_code == 402, r.text[:300]
     assert "Oversize analysis" in r.text
-    assert "Buy \u2014 $5" in r.text  # checkout until an entitlement settles
+    assert "Pay $5" in r.text  # checkout until an entitlement settles
     assert "Use 3 credits" not in r.text
     assert "Analyze up to 100 MB / 500,000 lines." in r.text
     assert "No charge if the analysis fails." in r.text
@@ -265,7 +265,7 @@ def test_line_only_oversize_quotes_5_with_quota_remaining(oversize_env):
     # $5: oversize never converts into a free run.
     r = _post_oversize(env, _line_content(50001))
     assert r.status_code == 402, r.text[:300]
-    assert "Buy \u2014 $5" in r.text
+    assert "Pay $5" in r.text
 
 
 def test_additional_analysis_hard_cap_wording(oversize_env):
@@ -609,7 +609,7 @@ def test_cancel_oversize_releases_one_live_lockout(oversize_env):
     # charge and no operation from the cancelled consent.
     r = _post_oversize(env, _line_content(50002))
     assert r.status_code == 402, r.text[:300]
-    assert "Buy \u2014 $5" in r.text  # fresh dollar quote, no lockout
+    assert "Pay $5" in r.text  # fresh dollar quote, no lockout
     assert _http_balance(env) == 0
     assert _ops(env, uid) == []
 
