@@ -639,10 +639,15 @@ async def investigation_checkout(
                 "redemption_deadline": (credits_helpers._as_aware(source.expires_at) + timedelta(days=30)).isoformat(),
                 "promise": stripe_billing.PAY_NOW_PROMISE,
             })
-        if not purchase.stripe_session_id:
-            purchase.stripe_session_id = session_id
-        if not purchase.stripe_price_id:
-            purchase.stripe_price_id = stripe_billing.product_price_id(sku)
+        # Remediation R1 (I2): coordinated backfill — the admission
+        # lock + FOR-UPDATE pending re-check live in
+        # pb.backfill_product_purchase_session (the attempt already
+        # applied it; this re-application is idempotent and supplies
+        # the price snapshot). No unlocked write of the session id
+        # remains on this route.
+        pb.backfill_product_purchase_session(
+            db, purchase.id, session_id=session_id,
+            price_id=stripe_billing.product_price_id(sku))
         db.commit()
         if reused and not attempt.superseded:
             # Session-retrieval retry (A7/P2-1): the pending row was
@@ -852,10 +857,13 @@ async def product_checkout(
                 "session_status": "complete",
                 "promise": stripe_billing.PAY_NOW_PROMISE,
             })
-        if not purchase.stripe_session_id:
-            purchase.stripe_session_id = session_id
-        if not purchase.stripe_price_id:
-            purchase.stripe_price_id = stripe_billing.product_price_id(sku)
+        # Remediation R1 (I2): coordinated backfill, as on the
+        # Investigation Report route — see
+        # pb.backfill_product_purchase_session. No unlocked write of
+        # the session id remains on this route.
+        pb.backfill_product_purchase_session(
+            db, purchase.id, session_id=session_id,
+            price_id=stripe_billing.product_price_id(sku))
         db.commit()
     except pb.DuplicateEntitlement as dup:
         db.rollback()

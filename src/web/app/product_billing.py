@@ -267,6 +267,26 @@ def create_pending_product_purchase(db: Session, user_id, sku: str,
     return purchase, False
 
 
+class SupersedeBlockedByLiveSession(Exception):
+    """Internal signal (remediation R1, invariant I1): under the
+    supersede lock the row carries a Stripe session that is still
+    open or already complete, so it must NOT be marked failed.
+
+    Raised by ``supersede_pending_product_purchase`` BEFORE any
+    mutation; ``attempt_product_checkout_session`` converts it into
+    the matching outward attempt outcome (``existing_open`` /
+    ``already_complete``) for the locked row. Never user-facing and
+    never carries a raw Stripe body — only the session id and its
+    checkout URL, which the §2a gate branch already returns.
+    """
+
+    def __init__(self, *, state, session_id, checkout_url):
+        super().__init__(state)
+        self.state = state
+        self.session_id = session_id
+        self.checkout_url = checkout_url
+
+
 def supersede_pending_product_purchase(db: Session, purchase_id):
     """Supersede a poisoned pending purchase (issue #164, §2b).
 
@@ -324,6 +344,40 @@ def supersede_pending_product_purchase(db: Session, purchase_id):
         raise stripe_billing.CheckoutError(
             "purchase to supersede is not pending")
     else:
+        if locked.stripe_session_id:
+            # Remediation R1 (I1): revalidate the session gate UNDER
+            # the supersede lock, on the FOR-UPDATE locked row. The
+            # §2a gate read in attempt_product_checkout_session is an
+            # unlocked db.get, and a concurrent request can backfill
+            # a session id onto this row in the window between that
+            # read and this lock (both routes backfilled after
+            # attempt returned). The locked row is the first read
+            # that cannot miss such a backfill, so the decision to
+            # mark failed is made HERE, from the locked row's
+            # session: open -> do not supersede (existing_open);
+            # complete -> do not supersede (already_complete);
+            # retrieval failure / unconfirmed state -> fail closed
+            # with the generic CheckoutError, row stays pending.
+            # Only a conclusively expired session (the existing
+            # _session_conclusively_expired semantics, applied to
+            # the locked row) proceeds to the mark below.
+            session = stripe_billing.retrieve_checkout_session(
+                locked.stripe_session_id)
+            status = session.get("status")
+            if status == "open":
+                raise SupersedeBlockedByLiveSession(
+                    state="existing_open",
+                    session_id=locked.stripe_session_id,
+                    checkout_url=session.get("url"))
+            if status == "complete":
+                raise SupersedeBlockedByLiveSession(
+                    state="already_complete",
+                    session_id=locked.stripe_session_id,
+                    checkout_url=session.get("url"))
+            if status != "expired" and \
+                    not _session_conclusively_expired(locked):
+                raise stripe_billing.CheckoutError(
+                    "Stripe request failed")
         locked.status = "failed"
         db.flush()
     new_purchase, _reused = create_pending_product_purchase(
@@ -331,6 +385,42 @@ def supersede_pending_product_purchase(db: Session, purchase_id):
         source_result_id=locked.source_result_id,
         content_digest=locked.content_digest)
     return new_purchase
+
+
+def backfill_product_purchase_session(db: Session, purchase_id, *,
+                                      session_id, price_id=None) -> bool:
+    """Coordinated session-id backfill (remediation R1, invariant I2).
+
+    The ONLY write of ``stripe_session_id`` / ``stripe_price_id``
+    onto an existing product purchase row outside settlement (which
+    already writes under the same locks). Takes the row's admission
+    lock FIRST (the shared lock order), then re-reads the row
+    FOR UPDATE with ``populate_existing=True`` and writes ONLY when
+    the locked row is still ``pending`` and does not already carry a
+    session id. A backfill that arrives after the row was superseded
+    (or settled) writes nothing and returns False, so a session id
+    can never land on a non-pending row. Returns True when the row
+    carries ``session_id`` after the call. The caller commits.
+    """
+    seed = db.get(models.ProductPurchase, purchase_id)
+    if seed is None:
+        return False
+    binding = (seed.content_digest if seed.content_digest is not None
+               else seed.source_result_id)
+    lock_product_admission(db, seed.user_id, binding, seed.sku)
+    locked = db.execute(
+        select(models.ProductPurchase).where(
+            models.ProductPurchase.id == purchase_id).with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+    if locked.status != "pending":
+        return False
+    if not locked.stripe_session_id:
+        locked.stripe_session_id = session_id
+    if price_id and not locked.stripe_price_id:
+        locked.stripe_price_id = price_id
+    db.flush()
+    return locked.stripe_session_id == session_id
 
 
 class CheckoutSessionAttempt:
@@ -414,7 +504,25 @@ def attempt_product_checkout_session(db: Session, purchase_id, *,
         # The supersede is committed BEFORE the retry so a failed
         # retry leaves old=failed + new=pending durable (no rollback
         # can resurrect the poisoned row or mint a third row, §2c).
-        new_purchase = supersede_pending_product_purchase(db, purchase.id)
+        try:
+            new_purchase = supersede_pending_product_purchase(
+                db, purchase.id)
+        except SupersedeBlockedByLiveSession as blocked:
+            # Remediation R1 (I1): a session id landed on the row in
+            # the window between the unlocked §2a gate read above
+            # and the supersede lock, and that session is open or
+            # complete. Nothing was marked and nothing was created:
+            # release the locks and return the locked row's outcome,
+            # exactly as the §2a gate branch would have had the
+            # backfill landed before the gate read.
+            db.rollback()
+            purchase = db.get(models.ProductPurchase, purchase_id)
+            if purchase is None:
+                raise stripe_billing.CheckoutError("purchase not found")
+            return CheckoutSessionAttempt(
+                checkout_url=blocked.checkout_url,
+                session_id=blocked.session_id,
+                purchase=purchase, state=blocked.state)
         db.commit()
         new_purchase = db.get(models.ProductPurchase, new_purchase.id)
         try:
@@ -422,9 +530,24 @@ def attempt_product_checkout_session(db: Session, purchase_id, *,
         except Exception:
             db.rollback()
             raise
+        # Remediation R1 (I2): the attempt owns the backfill — under
+        # the admission lock with a pending re-check — and commits
+        # it here, so no route-side write can land in a later,
+        # unlocked window. The routes' backfill call is now an
+        # idempotent re-application of this same coordinated write.
+        backfill_product_purchase_session(
+            db, new_purchase.id, session_id=session_id)
+        db.commit()
+        new_purchase = db.get(models.ProductPurchase, new_purchase.id)
         return CheckoutSessionAttempt(
             checkout_url=checkout_url, session_id=session_id,
             purchase=new_purchase, state="created", superseded=True)
+    # Remediation R1 (I2): attempt-owned coordinated backfill, as on
+    # the supersede path above (see backfill_product_purchase_session).
+    backfill_product_purchase_session(db, purchase.id,
+                                      session_id=session_id)
+    db.commit()
+    purchase = db.get(models.ProductPurchase, purchase_id)
     return CheckoutSessionAttempt(
         checkout_url=checkout_url, session_id=session_id,
         purchase=purchase, state="created")
