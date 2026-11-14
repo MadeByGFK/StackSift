@@ -103,12 +103,18 @@ def test_report_page_single_actions_menu_holds_all_actions(auth_env):
     assert ">Analysis</button>" not in cluster
     assert ">Export PDF" in cluster and ">Export CSV" in cluster
     assert ">Export JSON" in cluster
-    # Gold PDF control + unlock-state tag (locked here: 2 credits).
+    # Gold PDF control + Free tag. PREMISE CHANGED (#164 Phase C,
+    # Decision 4): exports are free for ALL reports — there is no
+    # locked state and no 2-credit tag.
     assert 'class="s1-btn-gold" data-export="pdf"' in cluster
-    assert "2 credits" in cluster
-    # The #129 confirmation behaviour is intact on every export form.
+    assert ">Free</span>" in cluster
+    assert "2 credits" not in cluster
+    # The #129 confirmation behaviour is intact on every export form,
+    # with the Phase C free confirm copy.
     assert cluster.count("data-confirm") == 3
-    assert "Export costs 2 credits and unlocks PDF, CSV and JSON" in cluster
+    assert cluster.count('data-confirm="Exports are free for this '
+                         'report."') == 3
+    assert "Export costs 2 credits and unlocks PDF, CSV and JSON" not in cluster
     # The modals the controls open are still on the page, unchanged.
     assert 'id="analysis-modal"' in text
     assert 'id="share-modal"' in text
@@ -189,7 +195,10 @@ def test_batch_and_compare_keep_single_direct_pdf_button():
         material_change={"version": 1, "min_absolute": 3,
                          "min_fraction_of_a": 0.5})
     for html in (batch_html, compare_html):
-        assert "Export PDF (2 credits)" in html
+        # PREMISE CHANGED (#164 Phase C, Decision 4 / C2): the owner
+        # PDF export is free — the label says so, not 2 credits.
+        assert "Export PDF (free)" in html
+        assert "Export PDF (2 credits)" not in html
         assert 'id="actions-btn"' not in html
         assert 'id="actions-menu"' not in html
         assert html.count('action="/reports/') == 1
@@ -214,15 +223,26 @@ def test_my_reports_row_keeps_full_actions_and_deep_dive_suppression(auth_env):
         assert len(matches) == 1, report_id
         return matches[0]
 
-    normal = _card_for(str(rid))
-    # PREMISE CHANGED (S3-G1): no Export dropdown — direct inline
-    # Export PDF/CSV/JSON forms with uniform quiet submits.
-    assert "export-toggle" not in normal and "menu-wrap" not in normal
+    # Slice at </tbody> (the s3 _row_for convention): the last row's
+    # split segment otherwise runs into the page scripts, which
+    # mention the export hooks by name.
+    normal = _card_for(str(rid)).split("</tbody>")[0]
+    # PREMISE CHANGED (S3-M1, founder ruling 2026-11-10 — supersedes
+    # the S3-G1 direct-control premise this test previously pinned):
+    # Export is ONE button with a dropdown panel holding the three
+    # export forms. PREMISE CHANGED (#164 Phase C, Decision 5): the
+    # Extend control is removed from every row (retention extensions
+    # are no longer sold).
+    assert normal.count("data-s3-export-btn") == 1
+    assert normal.count("data-s3-export-menu") == 1
     assert ">Export PDF</button>" in normal
     assert ">Export CSV</button>" in normal
     assert ">Export JSON</button>" in normal
+    assert normal.count('data-confirm="Exports are free for this '
+                        'report."') == 3
     assert "share-open" in normal and ">Share</button>" in normal
-    assert f"/reports/{rid}/retention" in normal and ">Extend</button>" in normal
+    assert f"/reports/{rid}/retention" not in normal
+    assert ">Extend</button>" not in normal
     # PR #139 remediation F2 + Extend guard: deep_dive rows keep
     # neither Share nor Extend (both routes 404 for those rows).
     deep = _card_for(str(analysis_id))
@@ -235,10 +255,15 @@ def test_settings_keeps_account_features(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get("/settings")
     assert page.status_code == 200
-    for marker in ("Account settings", "Credits", 'id="purchase-history"',
+    # PREMISE CHANGED (#164 Phase C, Decision 9): §02 is Purchases,
+    # not Credits, and no balance/Buy-credits copy remains.
+    for marker in ("Account settings", "Purchases", 'id="purchase-history"',
                    "Purchase history", 'id="report-access"', "Report Access",
-                   "Connected accounts", "Active sessions"):
+                   "Connected accounts", "Active sessions",
+                   "Pay per report — no subscription."):
         assert marker in page.text, marker
+    assert "Buy credits" not in page.text
+    assert "Your current balance" not in page.text
 
 
 # --- Node harnesses: menu behaviour + the PDF re-enable fix -------------------
