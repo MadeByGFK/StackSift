@@ -212,12 +212,22 @@ def test_g1_direct_controls_replace_actions_menu():
     assert 'id="analysis-btn"' not in cluster
     assert ">Analysis</button>" not in cluster
     assert 'id="share-btn"' in cluster
-    # Unlocked state flips the tags to Free.
+    # PREMISE CHANGED (#164 Phase C, Decision 4 / C2): exports are
+    # free for ALL reports — the Free tags and the free confirm copy
+    # render in BOTH states; there is no locked state and no
+    # "export-unlocked" marker anymore.
+    assert ">Free</span>" in cluster
+    assert cluster.count('data-confirm="Exports are free for this '
+                         'report."') == 3
+    assert "export-unlocked" not in cluster
+    assert "2 credits" not in cluster
     unlocked = _owned(export_unlocked=True)
     ucluster = unlocked[unlocked.index('data-s1-actions'):
                         unlocked.index('id="analysis-modal"')]
     assert ">Free</span>" in ucluster
-    assert "export-unlocked" in ucluster
+    assert ucluster.count('data-confirm="Exports are free for this '
+                          'report."') == 3
+    assert "export-unlocked" not in ucluster
 
 
 def test_g2_breadcrumb_and_c2_eyebrow_and_c1_head_meta():
@@ -372,7 +382,7 @@ def test_s2_hero_copy_and_tagline():
     assert "Drop in a log file.<br>" not in html
 
 
-def test_s4_page_head_and_field_rows_plan_deferred():
+def test_s4_page_head_and_field_rows_plan_dollar():
     user = SimpleNamespace(email="owner@example.com",
                            display_name=None, email_verified=True)
     html = templates.env.get_template("settings.html").render(
@@ -386,8 +396,13 @@ def test_s4_page_head_and_field_rows_plan_deferred():
     assert "<h1>Settings</h1>" in html
     assert 'class="s4-field-label">Email<' in html
     assert 'class="s4-field-label">Plan<' in html
-    # S4-C1 deferred: truthful interim text, NOT the dollar-model line.
-    assert "Credit packs — 7 credits available" in html
+    # PREMISE CHANGED (#164 Phase C, Decision 9): the S4-C1 deferral
+    # is over — the Plan row carries the ruled dollar-model line and
+    # no balance figure, whatever balance context is passed in.
+    assert ("Pay per report — no subscription. Paid reports include "
+            "90-day retention and free exports.") in html
+    assert "Credit packs —" not in html
+    assert "credits available" not in html
     assert "Free analysis · pay per deliverable" not in html
     assert 'class="s4-field-label">Log out<' in html
     # S4-C2 deferred: no share-default toggle built.
@@ -497,10 +512,11 @@ def test_pr178_two_results_same_day_distinct_sequential_ss_ids():
         db.close()
 
 
-def test_pr178_settings_plan_row_shows_eligible_not_balance():
-    # F2 teeth: where balance != eligible (e.g. a spend-restricted
-    # account or a grant queued for revocation), the Plan row's
-    # "credits available" claim must show the ELIGIBLE number.
+def test_pr178_settings_plan_row_shows_dollar_plan_not_balance():
+    # PREMISE CHANGED (#164 Phase C, Decision 9): the F2 question is
+    # moot — the Plan row shows NO balance figure at all (neither
+    # the balance nor the eligible number), only the ruled
+    # dollar-model line, whatever balance context is passed in.
     user = SimpleNamespace(email="owner@example.com",
                            display_name=None, email_verified=True)
     html = templates.env.get_template("settings.html").render(
@@ -509,5 +525,8 @@ def test_pr178_settings_plan_row_shows_eligible_not_balance():
         linked_providers=set(),
         balance_summary={"balance": 10, "eligible": 3},
         purchases=[], pack_names={}, share_links=[])
-    assert "Credit packs — 3 credits available" in html
+    assert ("Pay per report — no subscription. Paid reports include "
+            "90-day retention and free exports.") in html
+    assert "Credit packs — 3 credits available" not in html
     assert "Credit packs — 10 credits available" not in html
+    assert "credits available" not in html
