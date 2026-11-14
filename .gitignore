@@ -9,3 +9,5 @@ build/
 reports/
 .DS_Store
 .vscode/
+# Local test-run database artifact — never commit
+stacksift.db
