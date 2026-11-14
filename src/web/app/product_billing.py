@@ -535,8 +535,26 @@ def attempt_product_checkout_session(db: Session, purchase_id, *,
         # it here, so no route-side write can land in a later,
         # unlocked window. The routes' backfill call is now an
         # idempotent re-application of this same coordinated write.
-        backfill_product_purchase_session(
+        # Remediation R2 (J1): the backfill result is CHECKED. The
+        # F1 loss is a backfill refused because a concurrent
+        # supersede committed first: re-read the row, and if it is
+        # no longer pending, fail closed with the generic
+        # CheckoutError (-> 503) rather than return this session's
+        # (still payable) URL for a dead row — the buyer's retry
+        # then follows the live row's path. A False while the row
+        # is still pending means it already carries a session id
+        # (the P2-1 reuse premise: a successful re-create under the
+        # row's own idempotency key returns that same session at
+        # Stripe), which is not a supersede loss and keeps the
+        # existing return behaviour.
+        wrote = backfill_product_purchase_session(
             db, new_purchase.id, session_id=session_id)
+        if not wrote:
+            db.rollback()
+            current = db.get(models.ProductPurchase, new_purchase.id)
+            if current is None or current.status != "pending":
+                raise stripe_billing.CheckoutError(
+                    "Stripe request failed")
         db.commit()
         new_purchase = db.get(models.ProductPurchase, new_purchase.id)
         return CheckoutSessionAttempt(
@@ -544,8 +562,19 @@ def attempt_product_checkout_session(db: Session, purchase_id, *,
             purchase=new_purchase, state="created", superseded=True)
     # Remediation R1 (I2): attempt-owned coordinated backfill, as on
     # the supersede path above (see backfill_product_purchase_session).
-    backfill_product_purchase_session(db, purchase.id,
-                                      session_id=session_id)
+    # Remediation R2 (J1): the result is CHECKED, exactly as on the
+    # supersede-retry path — a backfill lost to a committed
+    # supersede (re-read row no longer pending) must never surface
+    # this session's URL as "created" for a dead row. Re-read the
+    # row and fail closed with the generic CheckoutError; a False
+    # on a still-pending row is the P2-1 reuse case above.
+    wrote = backfill_product_purchase_session(db, purchase.id,
+                                              session_id=session_id)
+    if not wrote:
+        db.rollback()
+        current = db.get(models.ProductPurchase, purchase.id)
+        if current is None or current.status != "pending":
+            raise stripe_billing.CheckoutError("Stripe request failed")
     db.commit()
     purchase = db.get(models.ProductPurchase, purchase_id)
     return CheckoutSessionAttempt(

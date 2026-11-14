@@ -91,6 +91,10 @@
     fetch('/products/checkout', {method: 'POST', body: body, credentials: 'same-origin'})
       .then(function (r) { return r.json().then(function (j) { return {ok: r.ok, j: j}; }); })
       .then(function (res) {
+        if (res.ok && res.j.session_status === 'complete') {
+          var landing = res.j.return_url || res.j.checkout_url;
+          if (landing) { window.location = landing; return; }
+        }
         if (res.ok && res.j.checkout_url) { window.location = res.j.checkout_url; return; }
         document.getElementById('product-checkout-error').textContent =
           (res.j && res.j.error) || 'Checkout is unavailable right now.';
@@ -165,6 +169,10 @@
     fetch('/products/checkout', {method: 'POST', body: body, credentials: 'same-origin'})
       .then(function (r) { return r.json().then(function (j) { return {ok: r.ok, j: j}; }); })
       .then(function (res) {
+        if (res.ok && res.j.session_status === 'complete') {
+          var landing = res.j.return_url || res.j.checkout_url;
+          if (landing) { window.location = landing; return; }
+        }
         if (res.ok && res.j.checkout_url) { window.location = res.j.checkout_url; return; }
         document.getElementById('product-checkout-error').textContent =
           (res.j && res.j.error) || 'Checkout is unavailable right now.';
