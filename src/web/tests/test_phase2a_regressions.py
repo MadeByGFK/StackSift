@@ -67,12 +67,75 @@ def balance(env):
         return C.get_balance_summary(db, env.uid)['balance']
 
 
+# --- Phase C re-base helpers -------------------------------------------------
+# Issue #164 Phase C (C1): an unconsumed additional-analysis consent
+# presented after cutover is refused 429 — new admissions are never
+# executed and never debit. The PRESERVED subjects below are the
+# settlement/replay of operations admitted BEFORE cutover and of
+# completed free requests, so fixtures admit/settle them directly
+# (mirroring test_issue164_phase_c.py); the HTTP calls then exercise
+# the already-admitted replay lookup, which precedes the refusal.
+
+def _report_data(env):
+    data = main.analyze_upload('test.log', SAMPLE_LOG.encode())
+    env.calls.clear()  # fixture generation is not an HTTP execution
+    return data
+
+
+def seed_completed_paid(env, form, worker='seed-worker'):
+    """Admit + settle a paid operation on its recorded credit terms."""
+    with env.sessions() as db:
+        op = C.admit_paid_operation(db, env.uid, 'additional_analysis',
+            form['idempotency_key'], form['file_hash'], 1,
+            uuid.UUID(form['consent_id']), worker)
+        result = C.store_result(db, env.uid, op.id, _report_data(env))
+        C.complete_operation(db, op.id, worker, result.id)
+        db.commit()
+        return op.id
+
+
+def seed_failed_paid(env, form, worker='seed-worker'):
+    """Admit a paid operation, then settle it as failed (release)."""
+    with env.sessions() as db:
+        op = C.admit_paid_operation(db, env.uid, 'additional_analysis',
+            form['idempotency_key'], form['file_hash'], 1,
+            uuid.UUID(form['consent_id']), worker)
+        db.commit()
+        C.release_operation(db, op.id, worker, 'analysis_failed')
+        db.commit()
+        return op.id
+
+
+def seed_completed_free(env, form):
+    """Record a completed free request under the form's identity."""
+    from datetime import datetime, timezone
+    with env.sessions() as db:
+        db.add(M.FreeRequest(request_id=form['idempotency_key'],
+            user_id=env.uid, fingerprint=form['file_hash'],
+            status='in_progress', quota_bucket_trusted_ip='127.0.0.1',
+            quota_bucket_window_start=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            deadline=C._utcnow() + timedelta(minutes=5),
+            created_at=C._utcnow()))
+        db.commit()
+        result = A.finish_free(db, form['idempotency_key'], _report_data(env))
+        db.commit()
+        return result.id
+
+
 def test_new_paid_executes_and_replays_without_upload(env):
+    # PREMISE CHANGED (#164 Phase C, C1): the execution leg is a
+    # pre-cutover admitted operation, settled directly in the
+    # fixture on its recorded terms (one 1-credit debit: 20 -> 19).
+    # The HTTP subject is preserved and strengthened: the recorded
+    # outcome replays WITHOUT the pending upload (deleted before the
+    # first POST) and without re-executing the analyzer.
     quota(env); form = quote(env)
+    seed_completed_paid(env, form)
+    main._delete_paid_pending(form['consent_id'])
+    assert balance(env) == 19
     first = env.client.post('/analyze/paid', data=form)
     assert first.status_code == 200, first.text
-    assert len(env.calls) == 1 and balance(env) == 19
-    assert main._load_paid_pending(form['consent_id']) is None
+    assert len(env.calls) == 0 and balance(env) == 19
     # Free quota now available must not change the saved paid outcome.
     with env.sessions() as db:
         for fr in db.scalars(select(M.FreeRequest)):
@@ -80,22 +143,28 @@ def test_new_paid_executes_and_replays_without_upload(env):
         db.commit()
     retry = env.client.post('/analyze/paid', data=form)
     assert retry.status_code == 200
-    assert len(env.calls) == 1 and balance(env) == 19
+    assert len(env.calls) == 0 and balance(env) == 19
     with env.sessions() as db:
         result = db.scalars(select(M.Result)).one()
         result.expires_at = C._utcnow()-timedelta(seconds=1); db.commit()
     assert env.client.post('/analyze/paid', data=form).status_code == 410
-    assert len(env.calls) == 1 and balance(env) == 19
+    assert len(env.calls) == 0 and balance(env) == 19
 
 
 def test_failed_paid_retry_cannot_execute_again(env, monkeypatch):
+    # PREMISE CHANGED (#164 Phase C, C1): the failed operation is a
+    # pre-cutover admission settled as failed directly in the
+    # fixture (admit -> release: the reservation is returned, balance
+    # back to 20). Every HTTP retry of that failed identity is a 409
+    # replay that executes nothing — the analyzer is never called.
     quota(env); form = quote(env)
+    seed_failed_paid(env, form)
+    assert balance(env) == 20
     calls = []
     monkeypatch.setattr(main, 'analyze_upload', lambda *a: calls.append(a) or {'error': True, 'message': 'bad log'})
-    assert env.client.post('/analyze/paid', data=form).status_code == 400
     for _ in range(3):
         assert env.client.post('/analyze/paid', data=form).status_code == 409
-    assert len(calls) == 1 and balance(env) == 20
+    assert len(calls) == 0 and balance(env) == 20
     with env.sessions() as db:
         assert db.scalar(select(M.RateBucket.attempts)) == 1
 
@@ -113,11 +182,18 @@ def test_inflight_retry_and_conflicting_input(env):
 
 
 def test_free_first_retry_is_durable_and_never_turns_paid(env):
+    # PREMISE CHANGED (#164 Phase C, C1): the /analyze/paid free-first
+    # admission path is retired — a bare consent now refuses 429.
+    # The preserved subject is the durable FREE outcome itself: a
+    # completed free request recorded under this identity (seeded
+    # directly) replays over HTTP, stays free after the quota is
+    # exhausted, and never becomes a paid operation or a debit.
     form = quote(env)
+    seed_completed_free(env, form)
     assert env.client.post('/analyze/paid', data=form).status_code == 200
     quota(env)
     assert env.client.post('/analyze/paid', data=form).status_code == 200
-    assert len(env.calls) == 1 and balance(env) == 20
+    assert len(env.calls) == 0 and balance(env) == 20
     with env.sessions() as db:
         assert db.scalar(select(func.count()).select_from(M.Operation)) == 0
 
@@ -241,12 +317,21 @@ def test_postgres_duplicate_admission_and_completion_recovery_race(env):
 
 
 def test_free_consent_cannot_authorize_later_paid_request(env):
+    # PREMISE CHANGED (#164 Phase C, C1): the first request's outcome
+    # is a completed free request seeded under its identity (its
+    # replay is the free 200); a later request under a DIFFERENT key
+    # carrying the same consent is a bare unconsumed-consent
+    # presentation and is refused 429 — it executes nothing, creates
+    # no operation, and debits nothing.
     form = quote(env)
+    seed_completed_free(env, form)
     assert env.client.post('/analyze/paid', data=form).status_code == 200
     quota(env)
     other = dict(form, idempotency_key='another-key')
-    assert env.client.post('/analyze/paid', data=other).status_code != 200
-    assert len(env.calls) == 1 and balance(env) == 20
+    assert env.client.post('/analyze/paid', data=other).status_code == 429
+    assert len(env.calls) == 0 and balance(env) == 20
+    with env.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(M.Operation)) == 0
 
 
 def test_retention_removes_payload_but_keeps_identity(env):
@@ -264,18 +349,31 @@ def test_retention_removes_payload_but_keeps_identity(env):
 
 
 def test_lost_http_response_does_not_refund_or_reexecute(env, monkeypatch):
+    # PREMISE CHANGED (#164 Phase C, C1): the committed outcome whose
+    # response is lost is a pre-cutover admitted operation settled
+    # directly in the fixture (balance 19). Losing the REPLAY
+    # response must neither refund the recorded settlement nor
+    # re-execute the analyzer; the retry replays the same outcome.
     quota(env); form = quote(env)
+    seed_completed_paid(env, form)
     original = main._analysis_response
     def lost_response(request, status, data=None, *args, **kwargs):
         if data is not None:
             raise RuntimeError('simulated response loss after commit')
         return original(request, status, data, *args, **kwargs)
     monkeypatch.setattr(main, '_analysis_response', lost_response)
-    assert env.client.post('/analyze/paid', data=form).status_code == 500
-    assert len(env.calls) == 1 and balance(env) == 19
+    # The replay branch sits inside _durable_analysis's guarded
+    # section, so the raised response-builder surfaces as its
+    # generic 503 (the execution path's final return propagated as
+    # 500); either way the recorded outcome is NOT delivered, and
+    # the settlement below is untouched by the loss.
+    assert env.client.post('/analyze/paid', data=form).status_code == 503
+    assert len(env.calls) == 0 and balance(env) == 19
     monkeypatch.setattr(main, '_analysis_response', original)
     assert env.client.post('/analyze/paid', data=form).status_code == 200
-    assert len(env.calls) == 1 and balance(env) == 19
+    assert len(env.calls) == 0 and balance(env) == 19
+    with env.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(M.Operation)) == 1
 
 
 def test_postgres_snapshot_during_concurrent_grant(env):
