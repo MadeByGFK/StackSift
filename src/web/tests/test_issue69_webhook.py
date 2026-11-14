@@ -15,6 +15,12 @@
 
 Stripe is faked at the httpx boundary for checkout; webhook events are
 constructed locally and HMAC-signed exactly the way Stripe signs them.
+
+Issue #164 Phase C: pack settlement for pre-cutover purchases is
+PRESERVED — every settlement/replay test below is unchanged and seeds
+its pending purchase directly. Only the three checkout-route tests at
+the bottom are re-based: the route is retired (410, no Stripe call,
+no purchase row).
 """
 import hashlib
 import hmac
@@ -433,7 +439,13 @@ def test_settlement_backfills_missing_session_id(webhook_env):
         assert summary["balance"] == 25
 
 
-# --- checkout route now records the pending purchase ------------------------
+# --- checkout route retirement (issue #164 Phase C) -------------------------
+# The route used to record a pending purchase before calling Stripe.
+# Pack sales are now closed: the route fails closed with 410 before any
+# Stripe call and before any purchase row, in every configuration.
+# Settlement of PRE-CUTOVER purchases is preserved — the tests above
+# seed pending purchases directly via create_pending_purchase and
+# settle them through the webhook, exactly as before.
 
 class _FakeStripeResponse:
     def __init__(self, status_code=200, payload=None):
@@ -448,6 +460,9 @@ class _FakeStripeResponse:
 
 
 def test_checkout_creates_pending_purchase_with_session_id(webhook_env, monkeypatch):
+    # Phase C premise: NO pending purchase and NO session — 410, zero
+    # Stripe calls, zero purchase rows (the settlement join key never
+    # leaves the server because no session is ever created).
     from app import stripe_billing
     from app import models
 
@@ -461,50 +476,49 @@ def test_checkout_creates_pending_purchase_with_session_id(webhook_env, monkeypa
     monkeypatch.setattr(stripe_billing.httpx, "post", _post)
     resp = webhook_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["checkout_url"] == "https://checkout.stripe.com/pay/cs_test_123"
-
-    sent_meta = captured[0]["data"]
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
+    assert captured == []
     with webhook_env.sessions() as db:
-        purchases = db.query(models.CreditPurchase).all()
-        assert len(purchases) == 1
-        p = purchases[0]
-        assert str(p.user_id) == user_id
-        assert p.pack_id == "starter"
-        assert p.credits == 10
-        assert p.status == "pending"
-        assert p.stripe_session_id == "cs_test_123"
-        # The settlement join key rode in the session metadata.
-        assert sent_meta["metadata[purchase_id]"] == str(p.id)
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_checkout_stripe_failure_keeps_pending_attempt(webhook_env, monkeypatch):
+    # Phase C premise: retirement precedes Stripe entirely — even with
+    # Stripe rigged to fail, the route never calls it and records no
+    # pending attempt row (the old test asserted the pending row
+    # survived a Stripe 500; there is no attempt to survive now).
     from app import stripe_billing
     from app import models
 
     user_id, csrf = _login(webhook_env)
+    calls = []
 
     def _boom(*a, **k):
+        calls.append(a)
         return _FakeStripeResponse(status_code=500, payload={"error": {}})
 
     monkeypatch.setattr(stripe_billing.httpx, "post", _boom)
     resp = webhook_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
-    assert resp.status_code == 503
+    assert resp.status_code == 410
+    assert "retired" in resp.json()["error"].lower()
+    assert calls == []
     with webhook_env.sessions() as db:
-        purchases = db.query(models.CreditPurchase).all()
-        assert len(purchases) == 1
-        assert purchases[0].status == "pending"
-        assert purchases[0].stripe_session_id is None
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_checkout_unconfigured_creates_no_purchase_row(webhook_env, monkeypatch):
+    # Phase C premise: unconfigured Stripe changes nothing — the
+    # retirement 410 comes first, and (as the old 503 test asserted)
+    # no purchase row is created.
     from app import models
 
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     _, csrf = _login(webhook_env)
     resp = webhook_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
-    assert resp.status_code == 503
+    assert resp.status_code == 410
+    assert "retired" in resp.json()["error"].lower()
     with webhook_env.sessions() as db:
         assert db.query(models.CreditPurchase).count() == 0

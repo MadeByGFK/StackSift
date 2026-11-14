@@ -21,6 +21,7 @@ from test_structured_export_e2e import (
     _grant,
     _ops,
     _sample_payload,
+    _seed_completed_structured_artifact,
     _session_csrf,
     _setup,
 )
@@ -48,8 +49,12 @@ def test_validate_exportable_does_not_call_generate_export(monkeypatch):
 
 
 def test_402_path_does_not_call_generate_export(auth_env, monkeypatch):
+    # PREMISE CHANGED (issue #164 Phase C): there is no 402 path —
+    # a spend-restricted user (positive balance, zero eligible)
+    # exports FREE: the generator runs exactly once (the free
+    # generation; validation does not call it), and no operation or
+    # artifact is left behind.
     _, user_id, rid, csrf = _setup(auth_env)
-    # Spend-restricted: positive balance, zero eligible -> 402.
     from app import models
     db = auth_env.sessions()
     try:
@@ -65,21 +70,25 @@ def test_402_path_does_not_call_generate_export(auth_env, monkeypatch):
         return real(*a, **k)
     monkeypatch.setattr(se, "generate_export", counting)
     r = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    assert r.status_code == 402, r.text[:300]
-    assert calls["n"] == 0
+    assert r.status_code == 200, r.text[:300]
+    assert calls["n"] == 1
     assert _ops(auth_env, user_id) == [] and _artifacts(auth_env, user_id) == []
 
 
 def test_completed_replay_does_not_call_generate_export(auth_env, monkeypatch):
+    # PREMISE PRESERVED, setup re-based (Phase C): replay of a
+    # SEEDED completed operation serves its stored artifact without
+    # running the generator (a free export stores nothing, so the
+    # completed attempt is seeded directly).
     _, user_id, rid, csrf = _setup(auth_env)
-    r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    assert r1.status_code == 200, r1.text[:300]
+    _op_id, _artifact_id, seeded_bytes = _seed_completed_structured_artifact(
+        auth_env, user_id, rid, fmt="csv")
     def boom(*a, **k):
         raise se.StructuredExportError("generator must not run on replay")
     monkeypatch.setattr(se, "generate_export", boom)
     r2 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r2.status_code == 200, r2.text[:300]
-    assert r2.content == r1.content
+    assert r2.content == seeded_bytes
     assert len(_ops(auth_env, user_id)) == 1
 
 
@@ -145,17 +154,23 @@ def test_generation_failure_stores_bounded_stable_failure_code(auth_env, monkeyp
     monkeypatch.setattr(se, "payload_to_csv", flaky)
     r = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r.status_code == 500, r.text[:300]
-    # Release must have succeeded (SQLite does not enforce String(50),
-    # so the teeth here are the stored value itself, not a DB error):
-    # balance fully restored and the op is failed, not stuck reserved.
+    # PREMISE CHANGED (issue #164 Phase C): a free generation admits
+    # no operation, so there is nothing to release and nothing is
+    # stored — no failed op, no failure_code row, balance untouched.
+    # (The bounded-code rule still governs the legacy admission path
+    # wherever it remains reachable; it is unreachable here.)
     assert _balance(auth_env, user_id) == before
-    ops = _ops(auth_env, user_id)
-    assert len(ops) == 1 and ops[0].status == "failed"
-    assert ops[0].failure_code == "generation_failed"
-    assert len(ops[0].failure_code) <= 50
+    assert _ops(auth_env, user_id) == []
+    assert _artifacts(auth_env, user_id) == []
+    with auth_env.sessions() as db:
+        assert C.verify_account_invariants(db, user_id) == []
 
 
 def test_storage_failure_stores_bounded_stable_failure_code(auth_env, monkeypatch):
+    # PREMISE CHANGED (issue #164 Phase C): a free export never calls
+    # the store, so a storage failure cannot occur on this path —
+    # the export succeeds and stores nothing (no failed op, no
+    # failure_code row, balance untouched).
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     long_msg = "store boom " + ("y" * 300)
@@ -163,12 +178,10 @@ def test_storage_failure_stores_bounded_stable_failure_code(auth_env, monkeypatc
         C, "store_structured_export_result",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError(long_msg)))
     r = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    assert r.status_code == 500, r.text[:300]
+    assert r.status_code == 200, r.text[:300]
     assert _balance(auth_env, user_id) == before
-    ops = _ops(auth_env, user_id)
-    assert len(ops) == 1 and ops[0].status == "failed"
-    assert ops[0].failure_code == "storage_failed"
-    assert len(ops[0].failure_code) <= 50
+    assert _ops(auth_env, user_id) == []
+    assert _artifacts(auth_env, user_id) == []
 
 
 # ---------------------------------------------------------------------------
@@ -223,11 +236,13 @@ def _reseal(auth_env, result_id, mutate):
 
 
 def test_get_download_rejects_provenance_mismatch(auth_env):
+    # PREMISE PRESERVED, setup re-based (Phase C): the stored
+    # artifact is seeded directly (free exports store none).
     _, user_id, rid, csrf = _setup(auth_env)
-    r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    assert r1.status_code == 200, r1.text[:300]
-    url = r1.headers["x-export-download-url"]
-    export_id = uuid.UUID(url.rsplit("/", 1)[-1])
+    _op_id, artifact_id, _seeded = _seed_completed_structured_artifact(
+        auth_env, user_id, rid, fmt="csv")
+    url = f"/exports/{artifact_id}"
+    export_id = artifact_id
     assert auth_env.client.get(url).status_code == 200
     # Tamper only the provenance digest, re-sealing the envelope so
     # result_payload integrity still passes: GET must fail closed
@@ -238,10 +253,10 @@ def test_get_download_rejects_provenance_mismatch(auth_env):
 
 
 def test_post_replay_rejects_provenance_mismatch(auth_env):
+    # PREMISE PRESERVED, setup re-based (Phase C): seeded artifact.
     _, user_id, rid, csrf = _setup(auth_env)
-    r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    assert r1.status_code == 200, r1.text[:300]
-    export_id = uuid.UUID(r1.headers["x-export-download-url"].rsplit("/", 1)[-1])
+    _op_id, export_id, _seeded = _seed_completed_structured_artifact(
+        auth_env, user_id, rid, fmt="csv")
     _reseal(auth_env, export_id,
             lambda m: m.update(source_integrity_digest="f" * 64))
     r2 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
@@ -283,18 +298,27 @@ def test_route_locks_chain_before_admission_and_on_replay(auth_env, monkeypatch)
     order.clear()
     r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r1.status_code == 200, r1.text[:300]
-    assert order == ["lock", "admit"], order
-    # Replay: lock is taken (before discovery) and no new admission occurs.
+    # PREMISE CHANGED (issue #164 Phase C): the global:paid lock is
+    # still taken before discovery, but a free export is NEVER
+    # admitted — no admission on the first generation either.
+    assert order == ["lock"], order
+    # Second POST: lock is taken (before discovery) and, again, no
+    # admission occurs; the bytes are regenerated free, identical.
     order.clear()
     r2 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r2.status_code == 200 and r2.content == r1.content
     assert order == ["lock"], order
-    assert len(_ops(auth_env, user_id)) == 1
+    assert len(_ops(auth_env, user_id)) == 0
 
 
 def test_retry_chain_after_failure_charges_once(auth_env, monkeypatch):
     """After a failed attempt, the first retry completes and a second
-    retry discovers it under the lock and replays free (one charge)."""
+    retry discovers it under the lock and replays free (one charge).
+
+    PREMISE CHANGED (issue #164 Phase C): the charge is ZERO — a
+    failed free generation stores no operation, the retry generates
+    free, and a second retry serves identical bytes, still with no
+    operation ever created."""
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     real = se.payload_to_csv
@@ -312,6 +336,7 @@ def test_retry_chain_after_failure_charges_once(auth_env, monkeypatch):
     assert r2.status_code == 200, r2.text[:300]
     r3 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r3.status_code == 200 and r3.content == r2.content
-    assert _balance(auth_env, user_id) == before - 2
+    assert _balance(auth_env, user_id) == before
     completed = [o for o in _ops(auth_env, user_id) if o.status == "completed"]
-    assert len(completed) == 1
+    assert completed == []
+    assert _ops(auth_env, user_id) == []

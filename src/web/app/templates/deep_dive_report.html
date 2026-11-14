@@ -69,17 +69,17 @@
        direct export controls — gold PDF + CSV/JSON chips, tags
        following the unlock state; same forms/endpoints/confirms. #}
     <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
-          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="{% if export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="Exports are free for this report." style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
+            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">Free</span></button>
           </form>
-          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="{% if export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="Exports are free for this report." style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
+            <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">Free</span></button>
           </form>
-          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="{% if export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}" style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="Exports are free for this report." style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">{% if export_unlocked %}Free{% else %}2 credits{% endif %}</span></button>
+            <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">Free</span></button>
           </form>
 
       <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">

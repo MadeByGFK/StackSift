@@ -5,7 +5,7 @@ comparison journey is now paid by a $5 digest-bound product
 entitlement, never by credits. Drives the journey over HTTP for a
 real signed-up user:
 
-    signup -> verify (10-credit signup reward) -> login
+    signup -> verify (Phase C: signup grant removed, no credits) -> login
       -> seed a settled $5 "compare" purchase + entitlement for the
          pair digest (the webhook-settled state, seeded directly)
       -> POST /compare (two files) -> 402 consent page quoting $5
@@ -127,13 +127,21 @@ def _signup_verify_login(env, email_addr=None):
     env.client.headers["X-CSRF-Token"] = csrf
     with env.sessions() as db:
         uid = db.query(M.User).filter(M.User.email == email_addr).one().id
+    env.current_uid = uid
     return email_addr, uid, csrf
 
 
 def _http_balance(env):
-    r = env.client.get("/credits/balance")
-    assert r.status_code == 200, r.text[:300]
-    return r.json()["balance"]
+    """Phase C re-base: ``GET /credits/balance`` is retired (410) and
+    the signup grant is removed, so the ledger balance is read
+    directly from the DB for the currently signed-in user; a user
+    with no credit account has balance 0."""
+    uid = getattr(env, "current_uid", None)
+    assert uid is not None, "_http_balance before signup/login"
+    with env.sessions() as db:
+        account = db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == uid).first()
+        return account.balance if account is not None else 0
 
 
 def _post_compare(env, content_a=LOG_A, content_b=LOG_B):
@@ -219,14 +227,14 @@ def test_compare_requires_login(compare_env):
 def test_full_compare_flow_dollar_paid_and_retrievable(compare_env):
     env = compare_env
     _, uid, _ = _signup_verify_login(env)
-    assert _http_balance(env) == 10
+    assert _http_balance(env) == 0
     _seed_compare_entitlement(env, uid)
     r = _post_compare(env)
     assert r.status_code == 402, r.text[:300]
     assert "$5" in r.text
     assert "even if the logs are identical or show no material differences" in r.text
     consent_id, file_hash, csrf = _consent_fields(r.text)
-    assert _http_balance(env) == 10  # consent charges nothing
+    assert _http_balance(env) == 0  # consent charges nothing
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:500]
     assert "auth token expired" in confirmed.text  # new
@@ -234,7 +242,7 @@ def test_full_compare_flow_dollar_paid_and_retrievable(compare_env):
     assert "database connection failed" in confirmed.text  # volume change
     assert "Resolved means the pattern was not observed in B" in confirmed.text
     # Dollar premise: the credit balance and ledger never move.
-    assert _http_balance(env) == 10
+    assert _http_balance(env) == 0
     with env.sessions() as db:
         ent = db.query(M.Entitlement).filter(
             M.Entitlement.user_id == uid, M.Entitlement.sku == "compare").one()
@@ -249,12 +257,12 @@ def test_full_compare_flow_dollar_paid_and_retrievable(compare_env):
     assert pdf.content.startswith(b"%PDF")
     assert b"auth token expired" in pdf.content
     assert b"database connection failed" in pdf.content
-    assert _http_balance(env) == 10
+    assert _http_balance(env) == 0
     # Replay the same confirmation: no re-consumption, same report.
     replay = _confirm(env, consent_id, file_hash, csrf)
     assert replay.status_code == 200, replay.text[:300]
     assert _report_id_from(replay.text) == rid
-    assert _http_balance(env) == 10
+    assert _http_balance(env) == 0
 
 
 def test_identical_pair_still_costs_and_reports_no_material(compare_env):
@@ -270,7 +278,7 @@ def test_identical_pair_still_costs_and_reports_no_material(compare_env):
     confirmed = _confirm(env, consent_id, file_hash, csrf)
     assert confirmed.status_code == 200, confirmed.text[:500]
     assert "No material differences" in confirmed.text
-    assert _http_balance(env) == 10  # credits never move on this path
+    assert _http_balance(env) == 0  # credits never move on this path
     with env.sessions() as db:
         ent = db.query(M.Entitlement).filter(
             M.Entitlement.user_id == uid, M.Entitlement.sku == "compare").one()
@@ -288,7 +296,7 @@ def test_invalid_b_rejected_before_analysis_or_charge(compare_env, monkeypatch):
     r = _post_compare(env, content_b=oversize_b)
     assert r.status_code == 413, r.text[:300]
     assert calls == []
-    assert _http_balance(env) == 10
+    assert _http_balance(env) == 0
     with env.sessions() as db:
         assert db.query(M.Operation).filter(
             M.Operation.user_id == uid,
@@ -307,7 +315,7 @@ def test_compare_failure_releases_full_reservation(compare_env, monkeypatch):
                                      "message": "Comparison failed."}))
     failed = _confirm(env, consent_id, file_hash, csrf)
     assert failed.status_code == 400, failed.text[:300]
-    assert _http_balance(env) == 10  # credits never move on this path
+    assert _http_balance(env) == 0  # credits never move on this path
     with env.sessions() as db:
         assert db.query(M.Result).filter(
             M.Result.type == "comparison").count() == 0
@@ -327,7 +335,7 @@ def test_compare_forgery_and_cross_user(compare_env):
     # Input substitution: a different pair hash does not match the consent.
     bad = _confirm(env, consent_id, "0" * 64, csrf)
     assert bad.status_code == 409, bad.text[:300]
-    assert _http_balance(env) == 10
+    assert _http_balance(env) == 0
     # Cross-user consent: a second user cannot confirm the first's consent.
     _, _, csrf2 = _signup_verify_login(env, email_addr=f"cmp2_{uuid.uuid4().hex[:8]}@example.com")
     cross = _confirm(env, consent_id, file_hash, csrf2)

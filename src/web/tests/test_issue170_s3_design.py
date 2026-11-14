@@ -175,7 +175,13 @@ REPORTS = (APP / "templates" / "reports.html").read_text()
 _TS = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 _EXP = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
 
+# PREMISE CHANGED (#164 Phase C, Decision 4 / C2 + Decision 5):
+# exports are free for ALL reports, so every export form carries
+# the single free confirm text in both states; the locked and
+# per-format export-unlocked texts are retired. The Extend control
+# is removed (retention extensions are no longer sold).
 _LOCKED = "Export costs 2 credits and unlocks PDF, CSV and JSON for this report."
+_FREE_TEXT = "Exports are free for this report."
 _FREE = {
     "pdf": "This report is export-unlocked — the PDF download is free.",
     "csv": "This report is export-unlocked — the CSV download is free.",
@@ -347,8 +353,11 @@ def test_s3_normal_row_full_action_inventory():
     assert ">Export PDF</button>" in row
     assert ">Export CSV</button>" in row
     assert ">Export JSON</button>" in row
-    assert row.count("data-confirm") == 4  # 3 exports + Extend
-    assert row.count(f'data-confirm="{_LOCKED}"') == 3
+    # Phase C: 3 export confirms, all the free text; no Extend
+    # confirm (the control is removed).
+    assert row.count("data-confirm") == 3
+    assert row.count(f'data-confirm="{_FREE_TEXT}"') == 3
+    assert _LOCKED not in row
     # Rename (2026-11-09 naming ruling): the row action is the
     # deliverable's name; the bare "Analysis" label is gone, the
     # internal analysis-open class/ids are unchanged.
@@ -356,8 +365,11 @@ def test_s3_normal_row_full_action_inventory():
     assert ">Investigation Report</button>" in row
     assert ">Analysis</button>" not in row
     assert "share-open" in row and ">Share</button>" in row
-    assert f'action="/reports/{rid}/retention"' in row
-    assert ">Extend</button>" in row
+    # Phase C (Decision 5): no Extend control and no retention form
+    # on the row; the retention STATE hooks below remain.
+    assert f'action="/reports/{rid}/retention"' not in row
+    assert ">Extend</button>" not in row
+    assert "data-retention-form" not in row
     # Hooks present per row (A4 / spec parity list).
     assert row.count("data-retention-expiry-date") == 1
     assert row.count("data-retention-expiry-pill") == 1
@@ -376,7 +388,11 @@ def test_s3_mobilefix_single_export_button_and_menu():
     form or submit appears in the actions row outside the panel.
     No "Free" tag is rendered (S3-R2). Fails on the base tree,
     where exports are three direct row forms and no toggle/panel
-    exists at all."""
+    exists at all.
+
+    PREMISE CHANGED (#164 Phase C): the panel confirms are the
+    single free text (exports free for all reports), and the row
+    has no Extend submit — 7 quiet controls, not 8."""
     rid = "row-m1"
     html = _render([_report(id=rid)])
     row = _row_for(html, rid)
@@ -395,7 +411,8 @@ def test_s3_mobilefix_single_export_button_and_menu():
              panel.index(f'action="/reports/{rid}/exports/json"')]
     assert order == sorted(order), order
     assert panel.count('name="csrf_token"') == 3
-    assert panel.count(f'data-confirm="{_LOCKED}"') == 3
+    assert panel.count(f'data-confirm="{_FREE_TEXT}"') == 3
+    assert _LOCKED not in panel
     for label in ("Export PDF", "Export CSV", "Export JSON"):
         assert (f'class="btn btn-ghost s3-export-item">{label}</button>'
                 in panel), label
@@ -407,10 +424,11 @@ def test_s3_mobilefix_single_export_button_and_menu():
         if '</div>\n        </div>' in row else ""
     assert "Export PDF" not in outside and "s3-export-form" not in outside
     # Uniform quiet styling everywhere on the row: Open + Export
-    # toggle + 3 export submits + Investigation Report + Share +
-    # Extend submit = 8 quiet controls, no btn-primary.
-    assert row.count("btn btn-ghost") == 8
+    # toggle + 3 export submits + Investigation Report + Share
+    # = 7 quiet controls (Phase C: no Extend submit), no btn-primary.
+    assert row.count("btn btn-ghost") == 7
     assert "btn-primary" not in row
+    assert ">Extend</button>" not in row
     assert ">Free<" not in row and "Free</span>" not in row
     # The panel is styled in the house system (page tokens, panel
     # surface, border, radius) and positioned against its wrapper.
@@ -489,6 +507,8 @@ def test_s3_rowunder_actions_row_structure():
     Investigation Report / Share / Extend, every control quiet
     btn-ghost. The desktop CSS gives the actions row's spanning
     cell the group separator (the main row's cells carry none).
+    PREMISE CHANGED (#164 Phase C, Decision 5): Extend is removed
+    — the order is Open / Export / Investigation Report / Share.
     Fails on the pre-addendum tree (e632936c): the actions cell
     sits inside the main row and the thead has an Actions column.
     """
@@ -508,9 +528,10 @@ def test_s3_rowunder_actions_row_structure():
     order = [actions.index(">Open</a>"),
              actions.index("data-s3-export-btn"),
              actions.index(">Investigation Report</button>"),
-             actions.index(">Share</button>"),
-             actions.index(">Extend</button>")]
+             actions.index(">Share</button>")]
     assert order == sorted(order), order
+    assert ">Extend</button>" not in actions
+    assert "/retention" not in actions
     assert actions.count("btn btn-ghost") == \
         row.count("btn btn-ghost")  # all quiet controls are here
     inline = REPORTS[REPORTS.index("Issue #170 S3"):
@@ -637,11 +658,19 @@ def test_s3_g4_date_cell_two_lines():
 
 
 def test_s3_unlocked_row_export_confirms_are_free_text():
+    # PREMISE CHANGED (#164 Phase C): the free confirm is the single
+    # unified text in BOTH states — a locked row (export_unlocked
+    # False) carries it too, and the per-format export-unlocked
+    # texts are retired.
     rid = "row-unlocked"
     row = _row_for(_render([_report(id=rid, export_unlocked=True)]), rid)
+    assert row.count(f'data-confirm="{_FREE_TEXT}"') == 3
     for fmt in ("pdf", "csv", "json"):
-        assert f'data-confirm="{_FREE[fmt]}"' in row, fmt
+        assert _FREE[fmt] not in row, fmt
     assert _LOCKED not in row
+    locked = _row_for(_render([_report(id="row-locked")]), "row-locked")
+    assert locked.count(f'data-confirm="{_FREE_TEXT}"') == 3
+    assert _LOCKED not in locked
 
 
 def test_s3_comparison_and_batch_rows_omit_csv_json():
@@ -784,14 +813,16 @@ def test_s3_hooks_and_confirm_texts_verbatim():
     assert "data-menu" not in row
     assert row.count('aria-haspopup="true"') == 1
     assert row.count("data-s3-export-btn") == 1
-    assert f'data-confirm="{_EXTEND_CONFIRM}"' in row
-    assert "data-retention-form" in row
-    assert 'name="idempotency_key" value="retention-key"' in row
+    # PREMISE CHANGED (#164 Phase C, Decision 5): the Extend form,
+    # its confirm text and its idempotency key are gone from the row.
+    assert f'data-confirm="{_EXTEND_CONFIRM}"' not in row
+    assert "data-retention-form" not in row
+    assert 'name="idempotency_key" value="retention-key"' not in row
     assert 'data-create-key="create-key"' in row
     assert 'data-rotate-key="rotate-key"' in row
     assert 'data-revoke-key="revoke-key"' in row
     assert 'data-formats=""' in row and 'data-unlocked=""' in row
-    assert row.count('name="csrf_token"') == 4  # 3 exports + Extend
+    assert row.count('name="csrf_token"') == 3  # 3 exports only
     # Shared modals and their hooks survive verbatim.
     for marker in ('id="ss-confirm"', 'id="extend-modal"',
                    'id="analysis-modal"', 'id="share-modal"',
@@ -1337,7 +1368,11 @@ def test_s3_browser_extend_updates_only_that_row():
     assert out["bPill"] == "Expires in 7 days"
     assert out["bStatus"] == ""
     assert out["bStatusDisplay"] == "none"
-    assert "2 credits" in out["badge"]
+    # PREMISE CHANGED (#164 Phase C, C3): the badge refresh/decrement
+    # JS is removed with the badge and the retired balance API — a
+    # completed extension replay no longer touches any badge; the
+    # harness badge element keeps its initial text exactly.
+    assert out["badge"] == "\U0001fa99 3 credits"
 
 
 @pytestmark_js

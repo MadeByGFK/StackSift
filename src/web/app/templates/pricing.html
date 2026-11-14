@@ -6,7 +6,7 @@
 <title>Pricing | stacksift.</title>
 <link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
-<meta name="description" content="StackSift credits: free log analysis for everyone, premium capabilities with credits.">
+<meta name="description" content="StackSift pricing: free log analysis for everyone, and per-report dollar prices — Investigation Report $9, Compare $5, Batch $5, Large-File Analysis $5. Exports are free for all reports.">
 <link rel="stylesheet" href="/static/style.css?v=4">
 <style>
 .pricing-hero { text-align: center; padding: 48px 0 24px; }
@@ -27,56 +27,22 @@
 .free-banner ul li:last-child { border-bottom: none; }
 .free-banner ul li::before { content: "✓ "; color: var(--green); font-weight: 700; }
 @media (max-width: 640px) { .free-banner { flex-direction: column; align-items: stretch; } }
-.pack-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; margin: 24px 0; }
+.pack-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 24px 0; }
 @media (max-width: 800px) { .pack-grid { grid-template-columns: 1fr; } }
 .pack { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 28px; position: relative; text-align: center; }
-.pack.highlight { border-color: var(--accent); }
-.pack-badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #1a1a2e; font-size: 12px; font-weight: 700; padding: 4px 14px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
 .pack h3 { margin: 0 0 4px; font-size: 1.1rem; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
 .pack-price { font-size: 2.6rem; font-weight: 700; margin: 8px 0 0; }
-.pack-credits { font-size: 1.2rem; font-weight: 600; color: var(--accent); margin: 2px 0 8px; }
-.pack-econ { font-size: 0.9rem; color: var(--muted); margin-bottom: 12px; }
-.pack-value { display: inline-block; font-size: 0.85rem; font-weight: 700; color: #1a1a2e; background: var(--accent); border-radius: 20px; padding: 4px 12px; margin-bottom: 16px; }
-.pack-value.subtle { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 400; }
-.pack ul { list-style: none; padding: 0; margin: 0 0 16px; text-align: left; }
-.pack ul li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
-.pack ul li:last-child { border-bottom: none; }
-.pack ul li::before { content: "✓ "; color: var(--green); font-weight: 700; }
-.pack-soon { display: inline-block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); border: 1px dashed var(--border); border-radius: 20px; padding: 6px 16px; }
 .pack-note { text-align: center; color: var(--muted); font-size: 0.9rem; margin: 4px 0 20px; }
+.pack-soon { display: inline-block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); border: 1px dashed var(--border); border-radius: 20px; padding: 6px 16px; }
 .signup-cta { text-align: center; margin: 8px 0 32px; }
 .signup-cta .cta { display: inline-block; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; background: var(--accent); color: #1a1a2e; }
 .signup-cta .cta:hover { filter: brightness(1.1); }
 .signup-cta p { color: var(--muted); font-size: 0.9rem; margin-top: 10px; }
-/* ISSUE-68: buy-form styles for the per-pack checkout forms. */
-.pack-buy-form { margin: 0; }
-.pack-buy { display: inline-block; padding: 12px 32px; border-radius: 8px; font-weight: 700; background: var(--accent); color: #1a1a2e; border: none; cursor: pointer; font-size: 1rem; }
-.pack-buy:hover { filter: brightness(1.1); }
-.pack-buy:disabled { opacity: 0.6; cursor: wait; }
-.pack-status { margin: 10px 0 0; min-height: 1.2em; font-size: 0.85rem; color: var(--muted); }
-.pack-signup { display: inline-block; font-size: 0.85rem; font-weight: 600; color: var(--accent); text-decoration: none; border: 1px solid var(--border); border-radius: 20px; padding: 8px 20px; }
-.pack-signup:hover { border-color: var(--accent); }
-.checkout-banner { max-width: 640px; margin: 24px auto 0; padding: 14px 20px; border-radius: 10px; text-align: center; font-size: 0.95rem; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
-.checkout-banner.success { border-color: var(--green); background: rgba(63,185,80,.12); }
-/* ISSUE-71: ledger-derived balance strip for signed-in users. */
-.balance-strip { max-width: 640px; margin: 24px auto 0; padding: 14px 20px; border-radius: 10px; text-align: center; font-size: 1rem; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
-.balance-strip strong { color: var(--accent); font-size: 1.2rem; }
-.usage { margin: 32px 0; }
-.usage h2 { font-size: 1.4rem; margin: 0 0 4px; text-align: center; }
-.usage > p { text-align: center; color: var(--muted); font-size: 0.95rem; margin: 0 0 16px; }
-.usage table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-.usage th, .usage td { text-align: left; padding: 14px 20px; font-size: 0.95rem; border-bottom: 1px solid var(--border); }
-.usage tr:last-child th, .usage tr:last-child td { border-bottom: none; }
-.usage th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.5px; }
-.usage td.cost { font-weight: 700; white-space: nowrap; }
-.usage .muted { color: var(--muted); }
 .policies { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 32px 0; }
 @media (max-width: 640px) { .policies { grid-template-columns: 1fr; } }
 .policy { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
 .policy strong { display: block; font-size: 1rem; margin-bottom: 6px; }
 .policy span { color: var(--muted); font-size: 0.9rem; }
-.coming-soon { background: #1e2a4a; border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin: 24px 0; text-align: center; }
-.coming-soon p { margin: 0; color: var(--muted); font-size: 0.95rem; }
 .faq { margin: 32px 0; }
 .faq h3 { font-size: 1.1rem; margin: 20px 0 8px; }
 .faq p { color: var(--muted); font-size: 0.95rem; margin: 0 0 16px; line-height: 1.6; }
@@ -105,54 +71,9 @@
   </header>
 
   <section class="pricing-hero">
-    <h1>Simple credits for <span>everyone</span>.</h1>
-    <p>Free log analysis, no signup required. Credit packs for when you need premium capabilities.</p>
+    <h1>Simple pricing for <span>everyone</span>.</h1>
+    <p>Free log analysis, no signup required. When you need more, pay per report in dollars — no subscription, no credit packs.</p>
   </section>
-
-  {% if checkout_status == "success" and latest_purchase and latest_purchase.status == "completed" %}
-  <div class="checkout-banner success" role="status">Payment complete — {{ latest_purchase.credits }} credits added to your balance.</div>
-  {% elif checkout_status == "success" %}
-  <div class="checkout-banner success" role="status">Payment complete — your credits are on their way and will appear in your balance shortly.</div>
-  {% elif checkout_status == "cancelled" %}
-  <div class="checkout-banner" role="status">Payment didn't go through — no charge was made and no credits were added. You can try again below.</div>
-  {% endif %}
-
-  {# ISSUE-71: signed-in users see their ledger-derived balance here, so the
-     post-purchase balance is visible without hunting for it. On a successful
-     return from Stripe the strip self-updates when settlement lands — the
-     user never has to hit refresh. #}
-  {% if current_user and balance_summary is not none %}
-  <div class="balance-strip" role="status">
-    Your balance: <strong id="credit-balance" data-initial="{{ balance_summary.balance }}">{{ balance_summary.balance }}</strong> credits
-  </div>
-  {% endif %}
-  {% if checkout_status == "success" and current_user and balance_summary is not none and not (latest_purchase and latest_purchase.status == "completed") %}
-  <script>
-  (function () {
-    var el = document.getElementById("credit-balance");
-    if (!el) return;
-    var start = parseInt(el.getAttribute("data-initial") || "0", 10);
-    var banner = document.querySelector(".checkout-banner.success");
-    var tries = 0, max = 24;  /* ~60s at 2.5s intervals */
-    function tick() {
-      tries++;
-      fetch("/credits/balance", {credentials: "same-origin", headers: {"Accept": "application/json"}})
-        .then(function (r) { if (!r.ok) throw new Error("balance unavailable"); return r.json(); })
-        .then(function (d) {
-          if (typeof d.balance === "number" && d.balance > start) {
-            el.textContent = d.balance;
-            if (banner) banner.textContent =
-              "Payment complete — " + (d.balance - start) + " credits added to your balance.";
-            return; /* settled: stop polling */
-          }
-          if (tries < max) setTimeout(tick, 2500);
-        })
-        .catch(function () { if (tries < max) setTimeout(tick, 2500); });
-    }
-    setTimeout(tick, 2500);
-  })();
-  </script>
-  {% endif %}
 
   <section class="free-banner">
     <div class="free-main">
@@ -161,86 +82,66 @@
       <p>For quick incident triage. No account needed — just drop in a log file.</p>
     </div>
     <ul>
-      <li>10 analyses per hour</li>
+      <li>10 analyses per hour (a hard cap — the allowance resets hourly)</li>
       <li>10 MB / 50,000 line limit</li>
       <li>Single file upload</li>
       <li>HTML report in browser</li>
+      <li>Exports (PDF, CSV, JSON where supported) included free</li>
       <li>No signup required</li>
     </ul>
   </section>
 
   <div class="section-head">
-    <h2>Credit packs</h2>
-    <p>One-time purchases — no subscription, no auto-renewal. You need an account to buy; signing up gets you 10 free credits.</p>
-  {% for product in products %}
-  <div class="pack-card" data-product="{{ product.sku }}">
-    <div class="pack-name">{{ product.name }}</div>
-    {% if product.ready %}
-    <div class="pack-credits">{{ product.price_label }}</div>
-    <p>Per report, paid by card from the report page. Exports included, branding included, 90-day retention. Payment is captured at checkout; a generation failure never consumes the purchase.</p>
-    {% else %}
-    {# Issue #164 (P2-3): fail-closed display state — exactly the pack
-       pattern. No live-looking $9 buy action when the Price env is
-       unset; the checkout POST also 503s. #}
-    <span class="pack-soon">Coming soon</span>
-    <p>Per report, paid by card from the report page. Exports included, branding included, 90-day retention.</p>
-    {% endif %}
+    <h2>Pay per report</h2>
+    <p>One-time purchases — no subscription, no auto-renewal. You need an account to buy.</p>
   </div>
+
+  <div class="pack-grid" id="offers">
+  {% for product in products %}
+    <div class="pack offer-card" data-product="{{ product.sku }}">
+      <h3>{{ product.name }}</h3>
+      <div class="pack-price">{{ product.price_label }}</div>
+      {% if product.sku == "investigation_report" %}
+      <p>The full Investigation Report for one analyzed log: the investigation lead, the observed sequence, and prioritized checks, ahead of the per-issue analysis. Exports and branding included; the report is kept for 90 days.</p>
+      {% elif product.sku == "compare" %}
+      <p>Compare two logs (before / after) in one combined report. The price is the same even if the logs are identical or show no material differences.</p>
+      {% elif product.sku == "batch" %}
+      <p>Analyze 2–5 log files together as one combined batch report — one flat price for the whole batch, not per file.</p>
+      {% else %}
+      <p>Analyze one oversize log file, up to 100 MB / 500,000 lines.</p>
+      {% endif %}
+      {% if product.ready %}
+      <p class="pack-note">Paid by card from the {% if product.sku == "investigation_report" %}report page{% else %}quote step{% endif %}.</p>
+      {% else %}
+      <span class="pack-soon">Coming soon</span>
+      {% endif %}
+    </div>
   {% endfor %}
   </div>
 
-  <div class="pack-grid" id="packs">
-    {% for pack in packs %}
-    <div class="pack{% if pack.highlight %} highlight{% endif %}">
-      {% if pack.badge %}<div class="pack-badge">{{ pack.badge }}</div>{% endif %}
-      <h3>{{ pack.name }}</h3>
-      <div class="pack-price">{{ pack.price_label }}</div>
-      <div class="pack-credits">{{ pack.credits }} credits</div>
-      <div class="pack-econ">{{ pack.econ }}</div>
-      <div class="pack-value{% if not pack.highlight %} subtle{% endif %}">{{ pack.tagline }}</div>
-      <ul>
-        <li>Everything in Free</li>
-        <li>Export in every format (PDF, CSV, JSON) &mdash; 2 credits per report unlocks all formats</li>
-        <li>Results kept for 7 days</li>
-        <li>More coming soon</li>
-      </ul>
-      {% if current_user and pack.ready %}
-      <form method="post" action="/credits/checkout" data-auth-form data-checkout-form class="pack-buy-form">
-        <input type="hidden" name="pack_id" value="{{ pack.id }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="pack-buy">Buy {{ pack.price_label }}</button>
-        <p role="status" aria-live="polite" class="pack-status"></p>
-      </form>
-      {% elif current_user %}
-      <span class="pack-soon">Coming soon</span>
-      {% else %}
-      <a href="/signup" class="pack-signup">Sign up to buy</a>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
+  <p class="pack-note" id="pay-now-promise">{{ pay_now_promise }}</p>
 
   <div class="signup-cta">
     {% if current_user %}
       <a href="/settings" class="cta">Manage your account</a>
     {% else %}
-      <a href="/signup" class="cta">Sign up &mdash; get 10 free credits</a>
+      <a href="/signup" class="cta">Sign up free</a>
     {% endif %}
-    <p>Everyone who signs up gets 10 free credits once they verify their email.</p>
+    <p>Signing up is free — the free tier needs no card, and paid reports are bought one at a time.</p>
   </div>
 
   <section class="policies">
     <div class="policy">
-      <strong>Credits never expire</strong>
-      <span>Buy once — they&rsquo;re yours until you spend them.</span>
+      <strong>Exports are free</strong>
+      <span>Every report you own exports free — PDF for every report; CSV/JSON for single-file reports.</span>
     </div>
     <div class="policy">
-      <strong>Results kept 7 days</strong>
-      <span>Generated reports stay available for 7 days after creation.</span>
+      <strong>Paid reports kept 90 days</strong>
+      <span>Paid artifacts include 90-day retention. Free reports are kept for 7 days.</span>
     </div>
     <div class="policy">
-      <strong>All sales final</strong>
-      <span>Credit purchases are non-refundable.</span>
+      <strong>Failure never consumes</strong>
+      <span>If generation fails, your purchase is never consumed — the entitlement stays available and you can retry.</span>
     </div>
   </section>
 
@@ -248,30 +149,24 @@
     <h2>FAQ</h2>
     <h3>What does the Investigation Report include?</h3>
     <p>The Investigation Report adds an Investigation Brief — the investigation lead, the observed sequence, and prioritized checks — ahead of the full per-issue analysis of your log. It costs $9 per report, paid by card at checkout. Exports (PDF, CSV, JSON) are included free, branding is included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — the entitlement stays available and you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com. <a href="/sample-report">See a sample Investigation Report →</a></p>
-    <h3>How many credits does a PDF export cost?</h3>
-    <p>2 credits per report — except the Investigation Report, whose exports are included in its $9 price.</p>
-    <h3>How many credits does an oversize analysis cost?</h3>
-    <p>3 credits per run, charged only on success. Oversize covers files up to 100 MB / 500,000 lines; files within the free limits (10 MB / 50,000 lines) stay free.</p>
-    <h3>How many credits does a batch analysis cost?</h3>
-    <p><a href="/batch">Batch analysis</a> combines 2–5 files into one report. The first file follows the normal rules (free hourly allowance if available, otherwise 1 credit), plus 1 credit for each additional file — so 3 files cost 2 credits with an allowance available, or 3 without. Charged only on success. Exporting the combined report as a PDF costs 2 credits once for the whole report, not per file.</p>
-
-    <h3>Does re-downloading a PDF cost credits?</h3>
-    <p>No. The 2-credit charge applies only when a PDF is first generated for a report. Re-downloading the same export within its 7-day window is free.</p>
-
-    <h3>Do I need an account to use StackSift?</h3>
-    <p>No. The free tier works without signup &mdash; just drop in a log file and get your incident summary. Accounts are only needed for premium features.</p>
-
-    <h3>What are credits?</h3>
-    <p>Credits unlock premium capabilities like PDF export. Credits are deducted per premium operation, only after a successful operation. Credits never expire.</p>
-
+    <h3>How much does a PDF export cost?</h3>
+    <p>Nothing. Exports are free for all reports: PDF for every report, and CSV/JSON for single-file reports (batch and comparison reports export as PDF). Re-downloading an export is free too.</p>
+    <h3>How much does an oversize analysis cost?</h3>
+    <p>$5 per run (Large-File Analysis), paid at the quote step. Oversize covers files up to 100 MB / 500,000 lines; files within the free limits (10 MB / 50,000 lines) stay free.</p>
+    <h3>How much does a batch analysis cost?</h3>
+    <p>$5 flat. <a href="/batch">Batch analysis</a> combines 2–5 files into one report for a single $5 price — not per file. Exporting the combined report as a PDF is free.</p>
+    <h3>How much does a comparison cost?</h3>
+    <p>$5 flat, paid at the quote step — even if the two logs are identical or show no material differences. Exporting the comparison report as a PDF is free.</p>
+    <h3>What happened to credits?</h3>
+    <p>Credits are retired. StackSift no longer sells credit packs, new accounts no longer receive signup credits, and nothing is priced in credits any more. Paid features are bought per report in dollars, as listed above.</p>
     <h3>What happens if my analysis fails?</h3>
-    <p>You are never charged for failed analyses. Credits are only deducted after a successful operation. If something goes wrong on our end, your credit is restored automatically.</p>
-
+    <p>You are never charged for a failed generation. Payment is captured at checkout; if generation fails, your purchase is never consumed — the entitlement stays available and you can retry.</p>
     <h3>How long are my results available?</h3>
-    <p>Generated reports remain accessible for 7 days after creation. Your credits themselves never expire.</p>
-
+    <p>Free reports remain accessible for 7 days after creation. Paid reports and paid runs (Investigation Report, Compare, Batch, Large-File Analysis) are kept for 90 days. Retention extensions are no longer sold.</p>
     <h3>Can I get a refund?</h3>
-    <p>All sales are final. Credit purchases are non-refundable, subject to applicable legal obligations.</p>
+    <p>A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com. Otherwise, per-report purchases are final, subject to applicable legal obligations.</p>
+    <h3>Do I need an account to use StackSift?</h3>
+    <p>No. The free tier works without signup — just drop in a log file and get your incident summary. Accounts are only needed for paid reports and your report history.</p>
   </section>
 
 </div>
@@ -283,19 +178,17 @@
 {% include "nav_script.html" %}
 <script>
 /* Issue #156: offer_viewed beacon — fires exactly once per page view
-   when a credit-pack card has been at least 50% visible continuously
-   for at least 1 second. Individual cards are observed, NOT the
-   #packs grid (Codex P2, PR #157): at the <=800px breakpoint the grid
-   stacks vertically and is taller than the viewport, so the grid's
-   intersectionRatio could never reach 0.5 on mobile and offer_viewed
-   would never fire there. A single card (name + price + credits) at
-   >=50% for >=1s is the offer encounter. First-party only: a beacon
-   to our own /events/d2; the server reads attribution from the
-   d2_attribution cookie, so the body carries no attribution data. */
+   when a dollar offer card has been at least 50% visible continuously
+   for at least 1 second. Issue #164 Phase C (C6b): retargeted from
+   the retired credit-pack cards (#packs .pack) to the dollar offer
+   cards (#offers .offer-card), with the same one-card-visibility /
+   once-per-view semantics. First-party only: a beacon to our own
+   /events/d2; the server reads attribution from the d2_attribution
+   cookie, so the body carries no attribution data. */
 (function () {
-  var packs = document.getElementById("packs");
-  if (!packs || !("IntersectionObserver" in window)) return;
-  var cards = packs.querySelectorAll(".pack");
+  var offers = document.getElementById("offers");
+  if (!offers || !("IntersectionObserver" in window)) return;
+  var cards = offers.querySelectorAll(".offer-card");
   if (!cards.length) return;
   var fired = false;
   function fire() {
@@ -309,13 +202,6 @@
         headers: {"Content-Type": "application/json"}, body: body}).catch(function () {});
     }
   }
-  /* Per-card continuous-visibility timers (Codex P2, PR #157
-     remediation round 2): a shared timer would keep running while
-     ANY card qualifies, so scrolling from card A to card B could
-     fire the beacon although neither card was individually >=50%
-     visible for a continuous 1s. Each card carries its own timer
-     (_d2timer), started when THAT card reaches >=0.5 and cleared
-     when it drops below; the once-per-page guard is `fired`. */
   var observer = new IntersectionObserver(function (entries) {
     entries.forEach(function (entry) {
       var card = entry.target;
@@ -339,4 +225,3 @@
 </script>
 </body>
 </html>
-

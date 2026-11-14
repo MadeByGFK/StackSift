@@ -101,11 +101,18 @@ def test_nav_script_behaviors():
 
 
 def test_auth_script_places_badge_in_bar_on_mobile():
+    # PREMISE CHANGED (#164 Phase C, Decision 9 / C3): the header
+    # credit badge and its quick-buy modal are REMOVED with the
+    # retired balance API — there is no badge to place in the bar
+    # on mobile or anywhere else. The shared script's non-credit
+    # duties (wireAuthForm) are preserved.
     js = _read("auth_form_script.html")
-    assert "placeBadge" in js
-    assert "document.querySelector('.nav-toggle')" in js
-    # Desktop placement is still the original insert-before-logout-form.
-    assert "logoutForm.parentNode.insertBefore(badge, logoutForm)" in js
+    assert "placeBadge" not in js
+    assert "credit-badge" not in js
+    assert "insertBefore(badge" not in js
+    assert "/auth/balance" not in js
+    assert "showCreditModal" not in js
+    assert "wireAuthForm" in js
 
 
 def test_rendered_anonymous_pages_have_new_header(auth_env):

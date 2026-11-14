@@ -14,6 +14,25 @@ Teeth: these tests FAIL on the pre-build tree (no d2_attribution
 module, no D2VisitorLink model, no /events/d2 route, no cookies, no
 new funnel events) and PASS on the built tree. The observe-only group
 pins the pre-build money behaviour explicitly.
+
+PREMISE CHANGED (issue #164 Phase C): pack sales are RETIRED
+(POST /credits/checkout answers a uniform 410 before any Stripe
+call, purchase row, or funnel emit — so it records neither
+purchase_start nor premium_intent checkout_start); the offer_viewed
+observer is retargeted from the retired pack cards (#packs .pack)
+to the dollar offer cards (#offers .offer-card, same per-card
+>=50%/1s/once semantics, C6b); premium_intent(kind='export_unlock')
+is REMOVED from both export routes (C7 — a free export is not a paid
+upsell), and exports are FREE for all reports with no balance gate;
+the signup grant is removed (a fresh user has balance 0, seeded
+directly where a legacy balance is the subject); and a bare
+additional-analysis consent is refused 429 at the C1 hard cap (new
+paid admissions are never executed, so analysis_run kind='paid' is
+no longer emitted by that flow). The tests below are re-based to
+those premises with the same strength; the dollar checkout routes
+(/products/checkout, investigation checkout) keep their
+checkout_start premium_intent emit in code, and analysis_report
+premium_intent is unchanged.
 """
 
 import json
@@ -246,19 +265,25 @@ def test_cookie_not_set_on_non_landing_or_api_requests(route_env):
 
 
 def test_pricing_page_carries_offer_viewed_beacon(route_env):
+    # PREMISE CHANGED (#164 Phase C, C6b): the observer is retargeted
+    # from the retired credit-pack cards (#packs .pack) to the dollar
+    # offer cards (#offers .offer-card) — same per-card >=50%/1s/once
+    # semantics, same beacon endpoint and transport.
     resp = route_env.client.get("/credits")
     assert resp.status_code == 200
-    assert 'id="packs"' in resp.text
+    assert 'id="offers"' in resp.text
+    assert 'id="packs"' not in resp.text
     assert "IntersectionObserver" in resp.text
     assert "offer_viewed" in resp.text
     assert "/events/d2" in resp.text
     assert "sendBeacon" in resp.text
     # Codex P2 remediation (PR #157): the observer must watch the
-    # individual pack cards, not the #packs grid — at <=800px the grid
+    # individual offer cards, not the #offers grid — at <=800px the grid
     # stacks taller than the viewport, so its ratio can never reach
     # 0.5 and offer_viewed would never fire on mobile.
-    assert 'querySelectorAll(".pack")' in resp.text
+    assert 'querySelectorAll(".offer-card")' in resp.text
     assert "observer.observe(card)" in resp.text
+    assert "observer.observe(offers)" not in resp.text
     assert "observer.observe(packs)" not in resp.text
     # Codex P2 remediation round 2 (PR #157): the >=1s continuous
     # visibility interval is tracked PER CARD (_d2timer on the card
@@ -550,37 +575,47 @@ def _mock_stripe_ok(monkeypatch, captured=None):
             or _FakeResp()))
 
 
-def test_premium_intent_checkout_attempt(route_env, monkeypatch):
+def test_pack_checkout_retired_no_premium_intent_no_purchase(route_env, monkeypatch):
+    # Was test_premium_intent_checkout_attempt. PREMISE CHANGED
+    # (#164 Phase C, Decision 1): pack checkout is RETIRED — the
+    # route fails closed 410 before any Stripe call, purchase row,
+    # or funnel emit, so a pack attempt records NEITHER
+    # premium_intent checkout_start NOR purchase_start (the same
+    # retirement pin as test_issue62_funnel's re-based checkout
+    # test). checkout_start premium_intent itself is preserved on
+    # the dollar checkout routes in code (main.py investigation /
+    # product checkout emits), which are not this route.
     user_id, csrf = _login62(route_env)
     vid = str(uuid.uuid4())
     _set_visitor(route_env.client, vid)
-    _mock_stripe_ok(monkeypatch)
+    captured = []
+    _mock_stripe_ok(monkeypatch, captured)
     before = _counts(route_env, user_id)
     balance_before = _balance(route_env, user_id)
     resp = route_env.client.post(
         "/credits/checkout", data={"pack_id": "growth", "csrf_token": csrf})
-    assert resp.status_code == 200, resp.text
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 1
-    assert rows[0].meta["kind"] == "checkout_start"
-    assert rows[0].anon_id == vid
-    # Pre-existing behaviour unchanged: PURCHASE_START still fires and
-    # the only new money row is the checkout's own pending purchase.
-    assert len(_events_from_sessions(
-        route_env, funnel.PURCHASE_START, user_id=user_id)) == 1
-    ledger, purchases, ops = _counts(route_env, user_id)
-    assert (ledger, ops) == (before[0], before[2])
-    assert purchases == before[1] + 1
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
+    assert captured == []  # Stripe is never called
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
+    assert _events_from_sessions(
+        route_env, funnel.PURCHASE_START, user_id=user_id) == []
+    assert _counts(route_env, user_id) == before
     assert _balance(route_env, user_id) == balance_before
 
 
-def test_premium_intent_checkout_failure_observe_only(route_env, monkeypatch):
+def test_pack_checkout_retired_even_when_stripe_would_fail(route_env, monkeypatch):
+    # Was test_premium_intent_checkout_failure_observe_only.
+    # PREMISE CHANGED (#164 Phase C, Decision 1): the retired route
+    # never reaches Stripe, so a Stripe failure changes nothing —
+    # the answer is the uniform 410 (not the old 503), with no
+    # premium_intent, no pending purchase row, and no money movement.
     from app import stripe_billing
 
     user_id, csrf = _login62(route_env, "d2fail@example.com")
     balance_before = _balance(route_env, user_id)
-    ledger_before, _, _ = _counts(route_env, user_id)
+    before = _counts(route_env, user_id)
 
     def _boom(url, data=None, auth=None, headers=None, timeout=None):
         raise stripe_billing.CheckoutError("stripe down")
@@ -588,119 +623,124 @@ def test_premium_intent_checkout_failure_observe_only(route_env, monkeypatch):
     monkeypatch.setattr(stripe_billing.httpx, "post", _boom)
     resp = route_env.client.post(
         "/credits/checkout", data={"pack_id": "growth", "csrf_token": csrf})
-    # Pre-build behaviour for a Stripe failure is a 503 — unchanged.
-    assert resp.status_code == 503, resp.text
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 1 and rows[0].meta["kind"] == "checkout_start"
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
     assert _balance(route_env, user_id) == balance_before
-    ledger_after, purchases_after, _ = _counts(route_env, user_id)
-    assert ledger_after == ledger_before
-    # The pending purchase row is the checkout's own pre-build record.
-    assert purchases_after == 1
+    assert _counts(route_env, user_id) == before
     with route_env.sessions() as session:
-        purchase = session.query(models.CreditPurchase).filter(
-            models.CreditPurchase.user_id == user_id).one()
-        assert purchase.status == "pending"
+        assert session.query(models.CreditPurchase).filter(
+            models.CreditPurchase.user_id == user_id).count() == 0
 
 
-def test_premium_intent_export_and_observe_only(route_env):
+def test_export_no_premium_intent_free_and_observe_only(route_env):
+    # Was test_premium_intent_export_and_observe_only. PREMISE
+    # CHANGED (#164 Phase C, Decision 4 + C7): exports are FREE and
+    # the export_unlock premium_intent emit is REMOVED from both
+    # export routes — a free export is not a paid upsell. The
+    # observe-only subject is preserved at the same strength: the
+    # export changes NO money state at all (no charge, no operation,
+    # no ledger) on the first or the second export, and records no
+    # premium_intent either time.
     from test_structured_export_e2e import _setup
 
     _, user_id, rid, csrf = _setup(route_env)
     before_balance = _balance(route_env, user_id)
+    before = _counts(route_env, user_id)
     resp = route_env.client.post(
         f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert resp.status_code == 200, resp.text[:300]
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 1 and rows[0].meta["kind"] == "export_unlock"
-    # Observe-only: the export's own ruled charge is the ONLY change.
-    assert _balance(route_env, user_id) == before_balance - 2
-    ledger1, purchases1, ops1 = _counts(route_env, user_id)
-    assert purchases1 == 0
-    # Second export of the unlocked report: free re-download, no new
-    # operation or ledger rows — but premium_intent still records.
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
+    assert _balance(route_env, user_id) == before_balance
+    assert _counts(route_env, user_id) == before
+    assert _counts(route_env, user_id)[1] == 0  # no purchases
     resp2 = route_env.client.post(
         f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert resp2.status_code == 200
-    assert _balance(route_env, user_id) == before_balance - 2
-    assert _counts(route_env, user_id) == (ledger1, purchases1, ops1)
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 2
+    assert _balance(route_env, user_id) == before_balance
+    assert _counts(route_env, user_id) == before
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
 
 
-def test_premium_intent_export_insufficient_balance_402(route_env):
-    from test_structured_export_e2e import _drain_signup, _setup
+def test_export_zero_balance_free_no_premium_intent(route_env):
+    # Was test_premium_intent_export_insufficient_balance_402.
+    # PREMISE CHANGED (#164 Phase C, Decision 3 + Decision 4): the
+    # signup grant is removed, so a _setup(extra_credits=0) user has
+    # a genuinely zero balance — and exports no longer consult the
+    # balance at all: the old 402 case is now a free 200 success
+    # with no premium_intent and nothing charged or reserved.
+    from test_structured_export_e2e import _setup
 
     _, user_id, rid, csrf = _setup(route_env, extra_credits=0)
-    _drain_signup(route_env, user_id, 10)
     assert _balance(route_env, user_id) == 0
     before = _counts(route_env, user_id)
     resp = route_env.client.post(
         f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert resp.status_code == 402, resp.text[:300]
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 1 and rows[0].meta["kind"] == "export_unlock"
-    # Observe-only on the blocked attempt: nothing charged or reserved.
+    assert resp.status_code == 200, resp.text[:300]
+    assert resp.content[:4] == b"%PDF"
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
     assert _balance(route_env, user_id) == 0
     assert _counts(route_env, user_id) == before
 
 
-def test_premium_intent_structured_export_and_observe_only(route_env):
-    # Codex P2 (PR #157 round 2): CSV/JSON first exports perform the
-    # same paid per-report unlock as PDF, so they must record the
-    # same premium_intent — otherwise the funnel depends on format.
+def test_structured_export_no_premium_intent_free_and_observe_only(route_env):
+    # Was test_premium_intent_structured_export_and_observe_only.
+    # Codex P2 (PR #157 round 2) premise was: CSV/JSON first exports
+    # perform the same paid per-report unlock as PDF, so they must
+    # record the same premium_intent. PREMISE CHANGED (#164 Phase C,
+    # C7): the export_unlock emit is removed from BOTH routes and
+    # both formats are free — the format-independence subject is
+    # preserved inverted: neither format records premium_intent and
+    # neither charges anything.
     from test_structured_export_e2e import _setup
 
     _, user_id, rid, csrf = _setup(route_env)
     before_balance = _balance(route_env, user_id)
+    before = _counts(route_env, user_id)
     resp = route_env.client.post(
         f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert resp.status_code == 200, resp.text[:300]
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 1 and rows[0].meta["kind"] == "export_unlock"
-    # Observe-only: the export's own ruled charge is the ONLY change.
-    assert _balance(route_env, user_id) == before_balance - 2
-    ledger1, purchases1, ops1 = _counts(route_env, user_id)
-    assert purchases1 == 0
-    # Second format of the unlocked report: free, no new money rows —
-    # but premium_intent still records.
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
+    assert _balance(route_env, user_id) == before_balance
+    assert _counts(route_env, user_id) == before
+    assert _counts(route_env, user_id)[1] == 0  # no purchases
     resp2 = route_env.client.post(
         f"/reports/{rid}/exports/json", data={"csrf_token": csrf})
     assert resp2.status_code == 200, resp2.text[:300]
-    assert _balance(route_env, user_id) == before_balance - 2
-    assert _counts(route_env, user_id) == (ledger1, purchases1, ops1)
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 2
+    assert _balance(route_env, user_id) == before_balance
+    assert _counts(route_env, user_id) == before
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
 
 
-def test_premium_intent_structured_export_insufficient_balance_402(route_env):
-    from test_structured_export_e2e import _drain_signup, _setup
+def test_structured_export_zero_balance_free_no_premium_intent(route_env):
+    # Was test_premium_intent_structured_export_insufficient_balance_402.
+    # PREMISE CHANGED (#164 Phase C, Decision 3 + Decision 4): as in
+    # the PDF case above, a zero-balance user (no signup grant) now
+    # exports free with a 200 — no 402, no premium_intent, nothing
+    # charged or reserved.
+    from test_structured_export_e2e import _setup
 
     _, user_id, rid, csrf = _setup(route_env, extra_credits=0)
-    _drain_signup(route_env, user_id, 10)
     assert _balance(route_env, user_id) == 0
     before = _counts(route_env, user_id)
     resp = route_env.client.post(
         f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    assert resp.status_code == 402, resp.text[:300]
-    rows = _events_from_sessions(
-        route_env, funnel.PREMIUM_INTENT, user_id=user_id)
-    assert len(rows) == 1 and rows[0].meta["kind"] == "export_unlock"
-    # Observe-only on the blocked attempt: nothing charged or reserved.
+    assert resp.status_code == 200, resp.text[:300]
+    assert _events_from_sessions(
+        route_env, funnel.PREMIUM_INTENT, user_id=user_id) == []
     assert _balance(route_env, user_id) == 0
     assert _counts(route_env, user_id) == before
 
 
 def test_premium_intent_analysis_report_success_and_402(route_env):
     from test_deep_dive_paid import _custom_result, _eligible_payload
-    from test_structured_export_e2e import (
-        _drain_signup, _session_csrf, _setup)
+    from test_structured_export_e2e import _session_csrf, _setup
 
     # PREMISE CHANGED (#164 Phase A, A10: dollar-product): the
     # success path redeems a $9 entitlement — premium_intent still
@@ -721,10 +761,11 @@ def test_premium_intent_analysis_report_success_and_402(route_env):
     assert len(rows) == 1 and rows[0].meta["kind"] == "analysis_report"
 
     # Blocked (402) path on a second eligible report: no entitlement
-    # held (the drained 0 balance is incidental — credits no longer
-    # gate this route at any balance).
+    # held. PREMISE CHANGED (#164 Phase C, Decision 3): there is no
+    # signup grant to drain — a _setup(extra_credits=0) user already
+    # has balance 0, and credits do not gate this route at any
+    # balance (the 402 is the no-entitlement answer).
     _, user2, rid2, csrf2 = _setup(route_env, extra_credits=0)
-    _drain_signup(route_env, user2, 10)
     assert _balance(route_env, user2) == 0
     rid3 = _custom_result(route_env, user2, _eligible_payload())
     csrf3 = _session_csrf(route_env)
@@ -782,24 +823,52 @@ def test_analysis_run_free_success_and_analysis_first_unchanged(env):
     assert len(_analysis_rows(env, funnel.ANALYSIS_FIRST, env.uid)) == 1
 
 
-def test_analysis_run_paid_success(env):
+def test_analysis_run_none_on_hard_cap_paid_refusal(env):
+    # Was test_analysis_run_paid_success. PREMISE CHANGED (#164
+    # Phase C, C1 / CALL-1 hard cap): a bare unconsumed
+    # additional-analysis consent presented after cutover is refused
+    # 429 — it is never admitted, never executed, and never debits,
+    # so the fresh paid completion that used to emit analysis_run
+    # kind='paid' no longer exists in this flow (already-admitted
+    # operations still replay via the lookup above the refusal, and
+    # replays never emitted analysis_run). The pin is inverted at
+    # the same strength: 429, the analyzer never runs, no
+    # analysis_run / analysis_first rows, no operation, balance
+    # untouched (the env fixture grants 20).
+    from test_phase2a_regressions import balance
+
     quota(env)
     form = quote(env)
     resp = env.client.post("/analyze/paid", data=form)
-    assert resp.status_code == 200, resp.text[:300]
-    rows = _analysis_rows(env, funnel.ANALYSIS_RUN, env.uid)
-    assert len(rows) == 1
-    assert rows[0].meta["kind"] == "paid"
+    assert resp.status_code == 429, resp.text[:300]
+    assert env.calls == []
+    assert _analysis_rows(env, funnel.ANALYSIS_RUN, env.uid) == []
+    assert _analysis_rows(env, funnel.ANALYSIS_FIRST, env.uid) == []
+    assert balance(env) == 20
+    with env.sessions() as session:
+        assert session.query(models.Operation).filter(
+            models.Operation.user_id == env.uid).count() == 0
 
 
-def test_analysis_run_none_on_failed_analysis(env, monkeypatch):
+def test_analysis_run_none_on_hard_cap_refusal_never_executes(env, monkeypatch):
+    # Was test_analysis_run_none_on_failed_analysis. PREMISE
+    # CHANGED (#164 Phase C, C1): the request is refused 429 at the
+    # hard cap BEFORE execution, so the failing analyzer is never
+    # even called (the old 400 came from executing it) — and, as
+    # before, a non-completion emits no analysis_run and no
+    # analysis_first.
+    calls = []
+
+    def _failing(*a, **k):
+        calls.append(a)
+        return {"error": True, "message": "bad log"}
+
     quota(env)
     form = quote(env)
-    monkeypatch.setattr(
-        main, "analyze_upload",
-        lambda *a: {"error": True, "message": "bad log"})
+    monkeypatch.setattr(main, "analyze_upload", _failing)
     resp = env.client.post("/analyze/paid", data=form)
-    assert resp.status_code == 400, resp.text[:300]
+    assert resp.status_code == 429, resp.text[:300]
+    assert calls == []
     assert _analysis_rows(env, funnel.ANALYSIS_RUN, env.uid) == []
     assert _analysis_rows(env, funnel.ANALYSIS_FIRST, env.uid) == []
 
@@ -930,7 +999,13 @@ def test_d2_summary_window_excludes_old_events(db, user):
 
 # --- group 9: failure isolation ------------------------------------------------------
 
-def test_failure_isolation_credits_checkout_and_endpoint(route_env, monkeypatch):
+def test_failure_isolation_credits_page_endpoint_and_retired_checkout(route_env, monkeypatch):
+    # Was test_failure_isolation_credits_checkout_and_endpoint.
+    # PREMISE CHANGED (#164 Phase C, Decision 1): the pack checkout
+    # no longer "succeeds end to end" — it is retired, and its
+    # uniform 410 is emitted before any funnel/Stripe/purchase work,
+    # so it is trivially funnel-failure-isolated. The page and
+    # beacon pins are premise-preserved.
     def _boom(*args, **kwargs):
         raise RuntimeError("funnel store down")
 
@@ -943,12 +1018,13 @@ def test_failure_isolation_credits_checkout_and_endpoint(route_env, monkeypatch)
     _set_visitor(route_env.client, vid)
     assert _post_event(route_env.client,
                        {"event": "offer_viewed"}).status_code == 204
-    # Checkout still succeeds end to end.
+    # The retired checkout still answers its uniform 410.
     user_id, csrf = _login62(route_env, "d2iso@example.com")
     _mock_stripe_ok(monkeypatch)
     resp = route_env.client.post(
         "/credits/checkout", data={"pack_id": "growth", "csrf_token": csrf})
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
 
 
 def test_failure_isolation_analysis(env, monkeypatch):

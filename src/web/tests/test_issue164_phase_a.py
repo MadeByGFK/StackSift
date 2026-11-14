@@ -693,10 +693,15 @@ def test_source_exports_still_legacy_unlock(p164_env):
     _, user_id, csrf = _make_user(p164_env)
     rid = _source(p164_env, user_id)
     _redeem(p164_env, user_id, rid, csrf)
-    # The SOURCE report was never export-unlocked and the user holds no
-    # credits in this fixture: its PDF export still 402s (legacy terms).
+    # PREMISE CHANGED (issue #164 Phase C, Decision 4): exports are
+    # free for ALL reports — the source report's PDF export no longer
+    # 402s under the legacy unlock; it serves free and moves no
+    # credit state (the user holds no credits in this fixture).
+    before = _counts(p164_env, user_id)
     r = p164_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert r.status_code == 402
+    assert r.status_code == 200, r.text[:300]
+    assert r.content[:4] == b"%PDF"
+    assert _counts(p164_env, user_id) == before
 
 
 def test_branding_on_dollar_paid_report(p164_env):
@@ -1155,7 +1160,16 @@ def test_pricing_and_report_coming_soon_when_price_unset_p2_3(p164_env, monkeypa
     seg = pricing.text[pricing.text.index('data-product="investigation_report"'):]
     seg = seg[:800]
     assert "Coming soon" in seg
-    assert "$9" not in seg
+    # PREMISE CHANGED (issue #164 Phase C, Decision 8): the dollar
+    # Pricing page is a display page — it renders the ruled $9 price
+    # label on the offer card even when the SKU is not ready, and
+    # offers NO buy action there at all (purchase happens on the
+    # report page, which keeps the Coming-soon gate below). The
+    # fail-closed strength is preserved as: Coming soon present and
+    # no checkout/purchase action anywhere on the page.
+    assert "/credits/checkout" not in pricing.text
+    assert "investigation-checkout" not in seg
+    assert "<form" not in seg
     page = p164_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
     assert "Coming soon" in page.text

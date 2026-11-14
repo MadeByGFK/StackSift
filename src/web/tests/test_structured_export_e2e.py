@@ -3,6 +3,12 @@
 Mirrors test_phase2b_reports_pdf.py patterns (auth_env, _get_csrf_from_page,
 real balance deltas). Price is the founder-ruled uniform export price:
 COST_STRUCTURED_EXPORT == 2 (2026-11-01 batched ruling, same as PDF).
+
+PREMISE CHANGED (issue #164 Phase C): exports are FREE — generated
+on the fly with no operation, no artifact, no download URL and no
+balance consult. Charging assertions below are re-based to zero
+with the same strength; stored-artifact subjects (download route,
+replay, provenance) are seeded directly in fixtures.
 """
 
 import hashlib
@@ -89,6 +95,56 @@ def _artifacts(auth_env, user_id):
         db.close()
 
 
+def _seed_completed_structured_artifact(auth_env, user_id, rid, fmt="csv"):
+    """Seed a legacy completed structured-export operation + its
+    stored artifact directly (issue #164 Phase C re-base: a free
+    export creates neither, so stored-artifact subjects — replay,
+    the /exports/<id> download route, provenance — are seeded in
+    fixtures, in the production shape: a reserved operation settled
+    through store_structured_export_result + completion). Returns
+    (operation_id, artifact_id, export_bytes)."""
+    from app import models
+    from app import structured_export as se
+
+    db = auth_env.sessions()
+    try:
+        source = db.get(models.Result, rid)
+        payload = C.result_payload(
+            source, user_id=user_id, operation_id=source.operation_id,
+            free_request_id=source.free_request_id)
+        export_bytes = se.generate_export(payload, fmt)
+        # The download route binds the artifact to its operation via
+        # the canonical request hash (the POST route's construction).
+        request_hash = C.hash_input(json.dumps(
+            {
+                "source_result_id": str(rid),
+                "source_integrity_digest": source.integrity_digest,
+                "format": fmt,
+                "schema_version": se.SCHEMA_VERSION,
+            },
+            sort_keys=True, separators=(",", ":"),
+        ).encode())
+        op = models.Operation(
+            user_id=user_id, type="structured_export", status="reserved",
+            idempotency_key=f"structured-{rid}-{fmt}-v1",
+            request_hash=request_hash, cost=2, worker_id="seed-worker",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        db.add(op)
+        db.flush()
+        artifact = C.store_structured_export_result(
+            db, user_id, op.id, export_bytes, export_format=fmt,
+            filename=se.safe_download_name(payload.get("filename"), rid, fmt),
+            media_type=se.MEDIA_TYPES[fmt], source_result_id=rid,
+            source_integrity_digest=source.integrity_digest)
+        op.status = "completed"
+        op.result_id = artifact.id
+        db.commit()
+        return op.id, artifact.id, export_bytes
+    finally:
+        db.close()
+
+
 def _session_csrf(auth_env):
     """CSRF from the auth endpoint (custom payloads may not render the
     full report template, so don't scrape the report page for these)."""
@@ -162,6 +218,9 @@ def _sample_payload(**overrides):
 # --- happy path / charging -------------------------------------------------
 
 def test_csv_export_success_and_exact_charge(auth_env):
+    # PREMISE CHANGED (issue #164 Phase C): the exact charge is ZERO —
+    # a free export is generated and served on the fly, storing no
+    # artifact, creating no operation, and minting no download URL.
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     resp = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
@@ -169,16 +228,12 @@ def test_csv_export_success_and_exact_charge(auth_env):
     assert resp.headers["content-type"].startswith("text/csv")
     assert "attachment" in resp.headers["content-disposition"]
     assert ".csv" in resp.headers["content-disposition"]
-    assert resp.headers.get("x-export-download-url", "").startswith("/exports/")
+    assert resp.headers.get("x-export-download-url") is None
     lines = resp.content.decode("utf-8").split("\r\n")
     assert lines[0] == "template,level,count,services,first_seen,last_seen"
-    assert _balance(auth_env, user_id) == before - C.COST_STRUCTURED_EXPORT == before - 2
-    arts = _artifacts(auth_env, user_id)
-    assert len(arts) == 1
-    manifest = json.loads(arts[0].storage_manifest)
-    assert manifest["artifact_kind"] == "structured_export"
-    assert manifest["format"] == "csv"
-    assert manifest["source_result_id"] == str(rid)
+    assert _balance(auth_env, user_id) == before
+    assert _artifacts(auth_env, user_id) == []
+    assert _ops(auth_env, user_id) == []
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
         assert C.verify_capacity_invariants(db) == []
@@ -213,29 +268,35 @@ def test_csv_and_json_share_one_unlock_per_report(auth_env):
     r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     r2 = auth_env.client.post(f"/reports/{rid}/exports/json", data={"csrf_token": csrf})
     assert r1.status_code == r2.status_code == 200
-    assert _balance(auth_env, user_id) == before - 2
-    # Only the charged first generation stores an artifact; the free
-    # JSON generation is served on the fly.
-    assert len(_artifacts(auth_env, user_id)) == 1
-    # Another report is a separate unlock.
+    # Phase C: BOTH formats are free and served on the fly — no
+    # charge, no stored artifact, no operation for either.
+    assert _balance(auth_env, user_id) == before
+    assert _artifacts(auth_env, user_id) == []
+    assert _ops(auth_env, user_id) == []
+    # Another report is free too (no separate unlock charge).
     rid2 = _create_result(auth_env, user_id, "second.log")
     r3 = auth_env.client.post(f"/reports/{rid2}/exports/csv", data={"csrf_token": csrf})
     assert r3.status_code == 200
-    assert _balance(auth_env, user_id) == before - 4
+    assert _balance(auth_env, user_id) == before
+    assert _ops(auth_env, user_id) == []
 
 
 def test_repeated_post_and_get_download_free_identical(auth_env):
+    # PREMISE CHANGED (issue #164 Phase C): a free export mints no
+    # download URL and stores no artifact, so the "replay" is a
+    # repeated POST — byte-identical, free, and operation-free.
     _, user_id, rid, csrf = _setup(auth_env)
     r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r1.status_code == 200
-    url = r1.headers["x-export-download-url"]
+    assert r1.headers.get("x-export-download-url") is None
     mid = _balance(auth_env, user_id)
     r2 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r2.status_code == 200 and r2.content == r1.content
-    dl = auth_env.client.get(url)
-    assert dl.status_code == 200 and dl.content == r1.content
+    r3 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
+    assert r3.status_code == 200 and r3.content == r1.content
     assert _balance(auth_env, user_id) == mid
-    assert len(_ops(auth_env, user_id)) == 1
+    assert _ops(auth_env, user_id) == []
+    assert _artifacts(auth_env, user_id) == []
 
 
 def test_report_page_shows_priced_forms_and_download_link(auth_env):
@@ -262,8 +323,11 @@ def test_report_page_shows_priced_forms_and_download_link(auth_env):
     assert "First generation is charged; re-download is free while retained." not in page.text
     r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r1.status_code == 200
-    dl = auth_env.client.get(r1.headers["x-export-download-url"])
-    assert dl.status_code == 200 and dl.content == r1.content
+    # Phase C: no download URL is minted for a free export; a
+    # repeated POST serves the identical bytes free.
+    assert r1.headers.get("x-export-download-url") is None
+    r2 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
+    assert r2.status_code == 200 and r2.content == r1.content
 
 
 # --- validation before reservation ------------------------------------------
@@ -378,23 +442,24 @@ def test_report_kind_discriminators_422_before_charge(auth_env, kind):
 # --- money paths ---------------------------------------------------------------
 
 def test_insufficient_eligible_402_dynamic_price(auth_env):
-    email, user_id = _signup_and_verify(auth_env)  # 10 signup credits, no grant
-    # Re-base the signup balance to 3 (issue #151) so the spend below
-    # leaves a genuinely insufficient 1 credit.
-    _drain_signup(auth_env, user_id, 7)
+    # PREMISE CHANGED (issue #164 Phase C): there is no price and no
+    # eligibility consult — a zero-balance user exports free, and a
+    # spend-restricted user with a balance exports free too (the
+    # old 402/dynamic-price case is now a free success both ways).
+    email, user_id = _signup_and_verify(auth_env)  # Phase C: no signup grant
+    assert _balance(auth_env, user_id) == 0
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
     csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
-    # Spend 2 on PDF -> 1 left (eligible), total also 1.
     pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200
     rid2 = _create_result(auth_env, user_id, "second.log")
     r = auth_env.client.post(f"/reports/{rid2}/exports/csv", data={"csrf_token": csrf})
-    assert r.status_code == 402
-    assert r.json()["purchase_url"] == "/credits"
-    assert f"costs {C.COST_STRUCTURED_EXPORT} credits" in r.json()["error"]
+    assert r.status_code == 200, r.text[:300]
+    assert _balance(auth_env, user_id) == 0
     assert _ops(auth_env, user_id) == [] and _artifacts(auth_env, user_id) == []
-    # Eligible vs total: spend-restricted user with a balance still gets 402.
+    # Eligible vs total: spend-restricted user with a balance still
+    # exports free — eligibility is never consulted.
     from app import models
     _grant(auth_env, user_id, 10)
     db = auth_env.sessions()
@@ -406,7 +471,7 @@ def test_insufficient_eligible_402_dynamic_price(auth_env):
         db.close()
     assert _balance(auth_env, user_id) > 2
     r = auth_env.client.post(f"/reports/{rid2}/exports/json", data={"csrf_token": csrf})
-    assert r.status_code == 402
+    assert r.status_code == 200, r.text[:300]
     assert _ops(auth_env, user_id) == []
 
 
@@ -428,39 +493,41 @@ def test_generation_failure_releases_then_retry_succeeds_once(auth_env, monkeypa
     monkeypatch.setattr(se, "payload_to_csv", flaky)
     r = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r.status_code == 500, r.text[:300]
-    assert _balance(auth_env, user_id) == before  # full release
+    assert _balance(auth_env, user_id) == before  # nothing charged
     assert _artifacts(auth_env, user_id) == []
-    ops = _ops(auth_env, user_id)
-    assert len(ops) == 1 and ops[0].status == "failed"
+    # Phase C: a failed free generation leaves NO operation at all
+    # (no failed/reserved row to release).
+    assert _ops(auth_env, user_id) == []
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
         assert C.verify_capacity_invariants(db) == []
-    # Retry succeeds once with a fresh (retry-suffixed) identity...
+    # Retry succeeds, free, still with no operation identity at all...
     monkeypatch.setattr(se, "payload_to_csv", real)
     r2 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r2.status_code == 200, r2.text[:300]
-    assert _balance(auth_env, user_id) == before - 2
-    ops = _ops(auth_env, user_id)
-    assert len(ops) == 2
-    completed = [o for o in ops if o.status == "completed"]
-    assert len(completed) == 1 and "-retry-" in completed[0].idempotency_key
-    # ...and later retries FIND that completed retry and stay free (this is
-    # the PDF retry-discovery gap, designed out).
+    assert _balance(auth_env, user_id) == before
+    assert _ops(auth_env, user_id) == []
+    # ...and later retries serve identical bytes, free.
     r3 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r3.status_code == 200 and r3.content == r2.content
-    assert _balance(auth_env, user_id) == before - 2
-    assert len(_ops(auth_env, user_id)) == 2
+    assert _balance(auth_env, user_id) == before
+    assert _ops(auth_env, user_id) == []
 
 
 def test_storage_failure_releases(auth_env, monkeypatch):
+    # PREMISE CHANGED (issue #164 Phase C): a free export never calls
+    # the store at all, so a broken store cannot fail it or charge
+    # anything — the export succeeds, with no artifact and no op.
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     monkeypatch.setattr(C, "store_structured_export_result",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("store boom")))
     r = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    assert r.status_code == 500
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers["content-type"].startswith("text/csv")
     assert _balance(auth_env, user_id) == before
     assert _artifacts(auth_env, user_id) == []
+    assert _ops(auth_env, user_id) == []
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
 
@@ -492,11 +559,15 @@ def test_rate_limit_mapping_is_pdf_like():
 # --- download route -------------------------------------------------------------
 
 def test_download_after_source_expiry_but_post_still_410(auth_env):
+    # PREMISE PRESERVED, setup re-based (Phase C): the stored
+    # artifact (seeded completed op + artifact) keeps its own
+    # lifetime — the download route still serves it after the SOURCE
+    # expires, while a fresh POST on the expired source still 410s.
     from app import models
     _, user_id, rid, csrf = _setup(auth_env)
-    r1 = auth_env.client.post(f"/reports/{rid}/exports/json", data={"csrf_token": csrf})
-    assert r1.status_code == 200
-    url = r1.headers["x-export-download-url"]
+    _op_id, artifact_id, seeded_bytes = _seed_completed_structured_artifact(
+        auth_env, user_id, rid, fmt="json")
+    url = f"/exports/{artifact_id}"
     # Expire the SOURCE only; the artifact keeps its own 7 days.
     db = auth_env.sessions()
     try:
@@ -506,17 +577,21 @@ def test_download_after_source_expiry_but_post_still_410(auth_env):
     finally:
         db.close()
     dl = auth_env.client.get(url)
-    assert dl.status_code == 200 and dl.content == r1.content
+    assert dl.status_code == 200 and dl.content == seeded_bytes
     r2 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r2.status_code == 410
 
 
 def test_download_foreign_expired_and_tampered(auth_env):
+    # PREMISE PRESERVED, setup re-based (Phase C): the download
+    # route's foreign/tampered/expired rules are unchanged; the
+    # stored artifact is seeded directly (free exports store none).
     from app import models
     _, user_id, rid, csrf = _setup(auth_env)
-    r1 = auth_env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
-    url = r1.headers["x-export-download-url"]
-    export_id = url.rsplit("/", 1)[-1]
+    _op_id, artifact_id, _seeded = _seed_completed_structured_artifact(
+        auth_env, user_id, rid, fmt="csv")
+    url = f"/exports/{artifact_id}"
+    export_id = str(artifact_id)
     # Foreign user -> 404
     email2, uid2 = _signup_and_verify(auth_env)
     _login(auth_env, email2)
@@ -569,25 +644,48 @@ def _signup_email(auth_env, user_id):
 
 
 def test_paid_origin_source_also_exports(paid_env):
-    """Spec §9.7: a paid-origin owned analysis is a valid export source."""
-    from test_phase2b_paid_e2e import (
-        _consent_page, _csrf_from, _exhaust_quota, _http_balance,
-        _report_id_from, _signup_verify_login,
-    )
+    """Spec §9.7: a paid-origin owned analysis is a valid export source.
+
+    PREMISE CHANGED (issue #164 Phase C): the live /analyze/paid
+    credit flow is retired (hard cap), so the paid-origin source is
+    seeded directly as a legacy completed additional-analysis
+    operation + its Result (origin = operation). Its export is a
+    free success: no charge, no new export operation."""
+    from app import models
+    from test_phase2b_paid_e2e import _signup_verify_login
+
     env = paid_env
-    _, uid, _ = _signup_verify_login(env)
+    email, uid, _csrf_login = _signup_verify_login(env)
     _grant_paid(env, uid, 10)
-    _exhaust_quota(env, uid)
-    form = _consent_page(env)
-    paid = env.client.post("/analyze/paid", data=form)
-    assert paid.status_code == 200, paid.text[:300]
-    rid = _report_id_from(paid.text)
-    view = env.client.get(f"/reports/{rid}")
-    csrf = _csrf_from(view.text)
-    before = _http_balance(env)
+    payload = _sample_payload()
+    manifest = json.dumps(payload, default=str)
+    now = datetime.now(timezone.utc)
+    with env.sessions() as db:
+        op = models.Operation(
+            user_id=uid, type="additional_analysis", status="completed",
+            idempotency_key=f"additional-{uuid.uuid4().hex}",
+            request_hash="seed", cost=1, worker_id="seed-worker",
+            lease_expires_at=now + timedelta(minutes=5), completed_at=now)
+        db.add(op)
+        db.flush()
+        result = models.Result(
+            user_id=uid, operation_id=op.id, type="analysis",
+            storage_manifest=manifest,
+            integrity_digest=hashlib.sha256(manifest.encode()).hexdigest(),
+            byte_count=len(manifest.encode()),
+            ready_at=now, expires_at=now + timedelta(days=7))
+        db.add(result)
+        db.commit()
+        rid = result.id
+    csrf = _session_csrf(env)
+    with env.sessions() as db:
+        before = C.get_balance_summary(db, uid)["balance"]
+    assert before == 10
     r = env.client.post(f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == before - 2
+    with env.sessions() as db:
+        assert C.get_balance_summary(db, uid)["balance"] == before
+    assert _ops(env, uid) == []
 
 
 def _grant_paid(env, user_id, qty):

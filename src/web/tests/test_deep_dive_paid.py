@@ -181,6 +181,10 @@ def test_analysis_insufficient_credits_402_no_operation(auth_env):
     # checkout — even with a positive credit balance — and creates no
     # credit Operation and no redemption.
     _, user_id, rid, csrf = _setup(auth_env, extra_credits=0)
+    # PREMISE CHANGED (#164 Phase C): the signup grant is removed,
+    # so the "credits exist but do not apply" balance is seeded
+    # directly in the fixture (never via the signup grant).
+    _grant(auth_env, user_id, 5)
     assert _generate(auth_env, rid, csrf).status_code == 200
     payload = _eligible_payload()
     rid2 = _custom_result(auth_env, user_id, payload)
@@ -441,11 +445,14 @@ def test_reports_list_row_has_analysis_action(auth_env):
     assert "analysis-open" in page.text
 
 
-def test_reports_list_deep_dive_row_has_no_extend_but_normal_row_does(auth_env):
-    # The retention route only admits analysis/comparison sources, so
-    # an Extend action on an Analysis Report (deep_dive) row is a dead
-    # button (its POST 404s). It must not be rendered for that row,
-    # while a normal report row keeps Extend unchanged.
+def test_reports_list_rows_have_no_extend_after_phase_c_removal(auth_env):
+    # Was test_reports_list_deep_dive_row_has_no_extend_but_normal_row_does.
+    # PREMISE CHANGED (#164 Phase C, Decision 5): the My Reports
+    # Extend control is REMOVED for every row — retention extensions
+    # are no longer sold. The #106 Stage 2 suppression for Analysis
+    # Report (deep_dive) rows is therefore subsumed: neither the
+    # deep_dive row nor a normal report row renders an Extend
+    # control or a retention form action.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200, gen.text[:300]
@@ -465,11 +472,14 @@ def test_reports_list_deep_dive_row_has_no_extend_but_normal_row_does(auth_env):
         assert len(matches) == 1, report_id
         return matches[0]
 
+    # The Extend control is a submit button inside a form posting
+    # to the row's retention URL; assert on those exact markers
+    # (the trailing page script mentions retention in comments).
     normal_card = _card_for(str(rid))
-    assert "Extend" in normal_card
-    assert f"/reports/{rid}/retention" in normal_card
+    assert ">Extend</button>" not in normal_card
+    assert f"/reports/{rid}/retention" not in normal_card
     deep_dive_card = _card_for(analysis_id)
-    assert "Extend" not in deep_dive_card
+    assert ">Extend</button>" not in deep_dive_card
     assert f"/reports/{analysis_id}/retention" not in deep_dive_card
 
 
@@ -481,19 +491,26 @@ def test_export_times_analysis_charges_are_independent(auth_env):
     # charge and does not pay for the Analysis Report; the Analysis
     # Report is bought with the $9 entitlement (no credits), and ITS
     # exports are included free (they never hit the credit unlock).
+    # PREMISE CHANGED AGAIN (#164 Phase C): exports are FREE for ALL
+    # reports — the source PDF no longer charges the 2-credit unlock
+    # either, so independence is now shown by a balance that never
+    # moves on any leg while each leg still succeeds on its own
+    # terms (free export; $9 entitlement generation; free artifact
+    # export), with no credit Operation created by any of them.
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200
-    assert _balance(auth_env, user_id) == before - 2
+    assert _balance(auth_env, user_id) == before  # export is free
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200
-    assert _balance(auth_env, user_id) == before - 2  # dollar, not credits
+    assert _balance(auth_env, user_id) == before  # dollar, not credits
     analysis_id = gen.json()["analysis_result_id"]
     apdf = auth_env.client.post(
         f"/reports/{analysis_id}/pdf", data={"csrf_token": csrf})
     assert apdf.status_code == 200 and apdf.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 2  # exports included
+    assert _balance(auth_env, user_id) == before  # exports included
+    assert _analysis_ops(auth_env, user_id) == []  # no credit Operation
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
 
@@ -522,6 +539,12 @@ def test_share_times_analysis_share_stays_free_and_separate(auth_env):
 
 
 def test_retention_times_analysis_source_extension_leaves_artifact(auth_env):
+    # PREMISE CHANGED (#164 Phase C, Decision 5): a source extension
+    # can no longer be bought — the attempt refuses 410 with the
+    # retirement message, no charge, and NO date change anywhere:
+    # the source keeps its recorded expiry and the Analysis
+    # artifact's own retention is equally untouched (independent
+    # life — 90 days under the #164 dollar terms).
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200
@@ -537,14 +560,14 @@ def test_retention_times_analysis_source_extension_leaves_artifact(auth_env):
     ext = auth_env.client.post(
         f"/reports/{rid}/retention",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
-    assert ext.status_code == 200, ext.text[:300]
-    assert _balance(auth_env, user_id) == before - 1  # retention's own price
+    assert ext.status_code == 410, ext.text[:300]
+    assert ext.json()["error"] == (
+        "Retention extensions are no longer sold; paid reports "
+        "include 90 days of retention.")
+    assert _balance(auth_env, user_id) == before  # no charge
     db = auth_env.sessions()
     try:
-        # Source extended +90 days; the Analysis artifact's own
-        # retention is untouched (independent life — 90 days under
-        # the #164 dollar terms, formerly 7 on the credit path).
-        assert db.get(models.Result, rid).expires_at > source_expiry
+        assert db.get(models.Result, rid).expires_at == source_expiry
         assert db.get(models.Result, analysis_id).expires_at == artifact_expiry
     finally:
         db.close()

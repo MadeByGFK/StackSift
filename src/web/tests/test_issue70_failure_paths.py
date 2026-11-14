@@ -467,10 +467,17 @@ def test_webhook_crash_then_retry_settles_exactly_once(failure_env):
 # --- user-facing failure state ---------------------------------------------
 
 def test_cancelled_banner_names_failure_and_retry_path(failure_env):
+    # Phase C premise (C6c): the pricing page renders NO return banner
+    # from a query string at all — a cancelled pack return shows the
+    # plain dollar pricing page, with no failure banner, no "no charge
+    # was made" copy, and no pack retry path (packs are retired;
+    # product purchases keep their own purchase-bound return routes).
     _login(failure_env)
     resp = failure_env.client.get("/credits?checkout=cancelled")
     assert resp.status_code == 200
     body = resp.text
-    assert "Payment didn&#x27;t go through" in body or "Payment didn't go through" in body
-    assert "no charge was made" in body
-    assert "try again below" in body
+    assert "checkout-banner" not in body
+    assert "Payment didn't go through" not in body
+    assert "no charge was made" not in body
+    assert "try again below" not in body
+    assert 'id="offers"' in body and "Investigation Report" in body

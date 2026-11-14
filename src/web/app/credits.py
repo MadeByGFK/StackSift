@@ -306,7 +306,17 @@ def grant_credits(
 
 
 def grant_signup_reward(db: Session, user_id: uuid.UUID, email: str) -> models.CreditGrant | None:
-    """Grant the ruled 10-credit signup reward. Idempotent per email."""
+    """Issue #164 Phase C (C4): the signup reward is RETIRED.
+
+    Deliberate disabled early return BEFORE any eligibility, account,
+    grant, or ledger write — never a zero-quantity grant (grant_credits
+    keeps its quantity > 0 invariant; routing 0 through it would send
+    every signup down the AssertionError/log path). Existing accounts
+    are neither clawed back nor topped up; historical grant rows stay
+    untouched (Decision 7). The helper below the return is preserved
+    verbatim for historical/helper tests.
+    """
+    return None
     normalized = email.strip().lower()
     elig = db.get(models.SignupEligibility, normalized)
     if elig is None:
@@ -842,12 +852,19 @@ def export_unlock_state(db: Session, user_id, source_result_id):
     rather than race a second charge.
     """
     ops = export_operations(db, user_id, source_result_id)
-    unlocked = any(op.status == "completed" for op in ops)
+    # Issue #164 Phase C (Decision 4 / C7a): exports are FREE for all
+    # reports — the unlock is an access fact (owner/share authority),
+    # not a purchase, so `unlocked` is unconditionally True. The
+    # in-progress fence is unchanged: a reserved export generation in
+    # any format still serializes concurrent generation (409).
+    unlocked = True
     in_progress = any(op.status == "reserved" for op in ops)
     return unlocked, in_progress
 
 
 def is_export_unlocked(db: Session, user_id, source_result_id) -> bool:
+    # Issue #164 Phase C: every report is export-unlocked (exports are
+    # free); kept as a function so historical callers keep their shape.
     unlocked, _ = export_unlock_state(db, user_id, source_result_id)
     return unlocked
 

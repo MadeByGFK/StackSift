@@ -10,6 +10,8 @@ removed functionally):
                       Active sessions, regrouped (remake S01)
   02 Credits       <- live Credits section (copy and /credits/balance
                       behaviour untouched) + Purchase history
+                      [Phase C: replaced by 02 Purchases — see the
+                      PREMISE CHANGED notes in the tests below]
   03 Report Access <- live Report Access (remake S03)
 The remake's S02 branding-profile form is EXCLUDED (Decision 10):
 per-report branding is #163, a saved profile is M3. Its "PNG or SVG"
@@ -88,7 +90,9 @@ def test_s4_numbered_groups_in_order_with_live_mapping():
     html = _render()
     nums = [html.index(f'data-s4-num="{n}"') for n in ("01", "02", "03")]
     assert nums == sorted(nums), nums
-    for num, label in (("01", "Account"), ("02", "Credits"),
+    # PREMISE CHANGED (#164 Phase C, Decision 9): §02 Credits is
+    # §02 Purchases — completed product purchases, no balance.
+    for num, label in (("01", "Account"), ("02", "Purchases"),
                        ("03", "Report Access")):
         assert f'<span class="s4-section-num" aria-hidden="true">' \
                f'{num}</span>' in html
@@ -104,24 +108,28 @@ def test_s4_numbered_groups_in_order_with_live_mapping():
     assert 'action="/auth/link/github"' in account
     assert "revokeSession('sess-2')" in account
     assert "Log out all other devices" in account
-    credits = _group_segment(html, "credits")
-    assert "Your current balance:" in credits
+    credits = _group_segment(html, "purchases")
+    assert "Your current balance:" not in credits
+    assert "Buy credits" not in credits
     assert 'id="purchase-history"' in credits
     assert "Purchase history" in credits
+    assert "Per-report purchases on this account." in credits
     access = _group_segment(html, "report-access")
     assert 'id="report-access"' in access
     assert "Report Access" in access
     assert 'data-share-id="share-1"' in access
 
 
-def test_s4_regroup_moves_sessions_and_connected_before_credits():
+def test_s4_regroup_moves_sessions_and_connected_before_purchases():
     """Regrouping teeth: on the base tree Credits precedes Connected
-    accounts / Active sessions; the port places them under 01."""
+    accounts / Active sessions; the port places them under 01.
+    PREMISE CHANGED (#164 Phase C): the following group is the
+    Purchases group (formerly Credits)."""
     html = _render()
     assert html.index("Connected accounts") < html.index(
-        'data-s4-group="credits"')
+        'data-s4-group="purchases"')
     assert html.index("Active sessions") < html.index(
-        'data-s4-group="credits"')
+        'data-s4-group="purchases"')
     assert html.index('id="purchase-history"') < html.index(
         'data-s4-group="report-access"')
 
@@ -168,17 +176,26 @@ def test_s4_parity_all_base_forms_endpoints_and_hooks():
     assert "nav-toggle" in html
 
 
-def test_s4_credits_copy_and_balance_verbatim():
-    """Decision 10/12 gate: Credits copy and balance rendering are
-    untouched; the /credits link is the base 'Buy credits' action."""
-    html = _render()
-    assert "Your current balance:" in html
-    assert ">7 credits</strong>" in html
-    assert '<a href="/credits" class="btn-small"' in html
-    assert "Buy credits" in html
-    assert "One-time credit pack purchases on this account." in html
-    assert "Starter pack — 10 credits" in html
-    assert "No credit purchases yet." in _render(purchases=[])
+def test_s4_purchases_copy_verbatim_no_balance():
+    """PREMISE CHANGED (#164 Phase C, Decision 9): the §02 Credits
+    group is replaced with Purchases — completed product purchases
+    (name / $ amount / date), the Pricing link, and NO balance,
+    Buy-credits action, or pack copy anywhere in the group."""
+    purchase = SimpleNamespace(
+        name="Investigation Report", amount_cents=900,
+        completed_at=datetime(2026, 1, 3, 4, 5, tzinfo=timezone.utc))
+    html = _render(product_purchases=[purchase])
+    assert "Purchase history" in html
+    assert "Per-report purchases on this account." in html
+    assert "Investigation Report — $9.00" in html
+    assert "2026-01-03 04:05 UTC" in html
+    assert '<a href="/credits">Pricing</a>' in html
+    assert "Your current balance:" not in html
+    assert ">7 credits</strong>" not in html
+    assert "Buy credits" not in html
+    assert "One-time credit pack purchases on this account." not in html
+    assert "Starter pack — 10 credits" not in html
+    assert "No purchases yet." in _render(product_purchases=[])
 
 
 def test_s4_report_access_and_empty_states_verbatim():
@@ -237,9 +254,12 @@ def test_s4_live_settings_page_groups_and_no_charging_rows(auth_env):
     page = auth_env.client.get("/settings")
     assert page.status_code == 200
     # Teeth on the live route: the numbered groups render.
-    for marker in ('data-s4-group="account"', 'data-s4-group="credits"',
+    # PREMISE CHANGED (#164 Phase C): §02 is "purchases", not "credits".
+    for marker in ('data-s4-group="account"', 'data-s4-group="purchases"',
                    'data-s4-group="report-access"'):
         assert marker in page.text, marker
+    assert 'data-s4-group="credits"' not in page.text
+    assert "Your current balance" not in page.text
     # Gate: rendering Settings creates no charging rows (Decision 12).
     auth_env.client.get("/settings")
     assert _row_counts(auth_env) == before

@@ -223,8 +223,10 @@ def test_s2_live_copy_verbatim_and_rejected_framings_absent():
     for copy in (
         "Drag &amp; drop your log file here",
         "or click to browse — .log or .txt, up to 10 MB",
+        # PREMISE CHANGED (#164 Phase C, Decision 10 copy sweep):
+        # the Large-File line is dollar copy now, not 3 credits.
         "Signed in? Larger files (up to 100 MB / 500,000 lines) "
-        "run with 3 credits.",
+        "run as Large-File Analysis — $5 per run.",
         "Analyze my logs", "Download .txt report",
         "No log handy?", "Try with sample logs →",
         "See a sample Investigation Report →",
@@ -242,13 +244,14 @@ def test_s2_live_copy_verbatim_and_rejected_framings_absent():
     ):
         assert copy in html, copy
     for bad in ("50 MB", "50MB", "Large-file analysis —",
-                ".json up to", "Analyze free"):
+                ".json up to", "Analyze free", "3 credits"):
         assert bad not in html, bad
-    # Dollar amounts: checked on index.html's own markup — the shared
-    # auth_form_script include legitimately carries the interim
-    # MODAL_PACKS $5/$10/$25 catalog (live purchase copy, Decision
-    # 11's inventory excludes it from the dollar-gated elements).
-    for bad in ("$5", "$9", "$"):
+    # Dollar amounts: checked on index.html's own markup. PREMISE
+    # CHANGED (#164 Phase C): the interim MODAL_PACKS catalog is
+    # gone from the shared script, and the one dollar amount the
+    # index itself carries is the ruled Large-File price, $5.
+    assert "$5 per run" in INDEX
+    for bad in ("$9", "$10", "$25"):
         assert bad not in INDEX, bad
 
 

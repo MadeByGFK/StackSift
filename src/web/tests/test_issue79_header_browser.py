@@ -3,9 +3,14 @@
 Serves the real app over local HTTPS (the pattern from
 test_account_browser.py) and drives Chromium at a phone viewport and a
 desktop viewport: the wordmark must compute to 20px/700 everywhere, the
-nav must collapse behind the hamburger only at <=768px, the credits badge
-must stay in the header bar on mobile, and Log out must work from inside
-the mobile menu. Email delivery is captured by the auth_env fixture.
+nav must collapse behind the hamburger only at <=768px, and Log out must
+work from inside the mobile menu. Email delivery is captured by the
+auth_env fixture.
+
+PREMISE CHANGED (issue #164 Phase C): the header credit badge and the
+packs modal are RETIRED with the credit UX — this file now pins their
+ABSENCE on mobile, desktop, and the My Reports header, alongside the
+unchanged nav behaviour.
 """
 import os
 import socket
@@ -132,7 +137,7 @@ def test_header_nav_anonymous_mobile_and_desktop(auth_env, tmp_path, monkeypatch
             browser.close()
 
 
-def test_header_nav_logged_in_badge_menu_and_logout(auth_env, tmp_path, monkeypatch):
+def test_header_nav_logged_in_menu_and_logout(auth_env, tmp_path, monkeypatch):
     from playwright.sync_api import sync_playwright, expect
 
     from app import auth
@@ -162,17 +167,9 @@ def test_header_nav_logged_in_badge_menu_and_logout(auth_env, tmp_path, monkeypa
             page.get_by_role("button", name="Log in", exact=True).click()
             page.wait_for_url(base + "/")
 
-            # Mobile: the credits badge is in the header bar, NOT inside the
-            # collapsed nav, and still opens the packs modal.
-            badge = page.locator("#credit-badge")
-            expect(badge).to_be_visible()
-            expect(badge).to_contain_text("credits")
-            assert page.evaluate(
-                "document.getElementById('credit-badge').closest('nav') === null"
-            ), "badge must live outside the collapsed nav on mobile"
-            badge.click()
-            expect(page.locator("#credit-modal")).to_be_visible()
-            page.locator("#credit-modal-close").click()
+            # Mobile (Phase C premise): NO credit badge anywhere in the
+            # header, and no packs modal exists to open.
+            expect(page.locator("#credit-badge")).to_have_count(0)
             expect(page.locator("#credit-modal")).to_have_count(0)
 
             # Menu holds the logged-in links; the session is real.
@@ -184,22 +181,16 @@ def test_header_nav_logged_in_badge_menu_and_logout(auth_env, tmp_path, monkeypa
             expect(nav.locator('form[action="/auth/logout"] button[type="submit"]')).to_be_visible()
             page.keyboard.press("Escape")
 
-            # Desktop width: toggle gone, badge back inside the nav row.
-            # (wait_for_function: the matchMedia change handler that moves
-            # the badge fires asynchronously after a viewport resize.)
+            # Desktop width: toggle gone, inline nav, still no badge.
             page.set_viewport_size(DESKTOP)
             expect(page.locator(".nav-toggle")).to_be_hidden()
-            page.wait_for_function(
-                "document.getElementById('credit-badge').closest('nav') !== null"
-            )
+            expect(page.locator("#credit-badge")).to_have_count(0)
             page.set_viewport_size(MOBILE)
 
             # My Reports keeps its active-page marker inside the mobile menu.
             page.goto(base + "/reports")
             expect(page.locator("#site-nav a.active")).to_have_text("My Reports")
-            assert page.evaluate(
-                "document.getElementById('credit-badge').closest('nav') === null"
-            ), "badge must stay in the bar on the reports header too"
+            expect(page.locator("#credit-badge")).to_have_count(0)
 
             # Log out from inside the mobile menu completes to /.
             page.locator(".nav-toggle").click()

@@ -54,7 +54,7 @@
     <div class="s4-page-head" data-s4-page-head>
       <p class="s4-eyebrow">Settings</p>
       <h1>Settings</h1>
-      <p class="s4-page-sub">Your account, credits, and report access.</p>
+      <p class="s4-page-sub">Your account, purchases, and report access.</p>
     </div>
     <section class="s4-group" data-s4-group="account" data-s4-num="01">
       <div class="s4-section-head">
@@ -69,7 +69,7 @@
          Phase C). Connected accounts + Active sessions below stay
          (ruled content) — composition only. #}
       <div class="s4-field-row"><span class="s4-field-label">Email</span><span class="s4-field-value"><strong style="color:#fff">{{ user.email }}</strong>{% if user.display_name %} · {{ user.display_name }}{% endif %} · {% if user.email_verified %}✓ verified{% else %}not verified{% endif %}</span></div>
-      <div class="s4-field-row"><span class="s4-field-label">Plan</span><span class="s4-field-value">Credit packs — {{ balance_summary.eligible }} credits available</span></div>
+      <div class="s4-field-row"><span class="s4-field-label">Plan</span><span class="s4-field-value">Pay per report — no subscription. Paid reports include 90-day retention and free exports.</span></div>
       <div class="s4-field-row"><span class="s4-field-label">Log out</span><span class="s4-field-value"><form method="post" action="/auth/logout" style="display:inline;margin:0"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="btn-small">Log out</button></form></span></div>
     </div>
     <div class="settings-card">
@@ -117,30 +117,25 @@
       </div>
     </div>
     </section>
-    <section class="s4-group" data-s4-group="credits" data-s4-num="02">
+    <section class="s4-group" data-s4-group="purchases" data-s4-num="02">
       <div class="s4-section-head">
         <span class="s4-section-num" aria-hidden="true">02</span>
-        <span class="s4-section-label">Credits</span>
+        <span class="s4-section-label">Purchases</span>
       </div>
-    <div class="settings-card">
-      <h2>Credits</h2>
-      <p>Your current balance: <strong style="color:#fff">{{ balance_summary.balance }} credits</strong></p>
-      <p><a href="/credits" class="btn-small" style="text-decoration:none;display:inline-block">Buy credits</a></p>
-    </div>
     <div class="settings-card" id="purchase-history">
       <h2>Purchase history</h2>
-      <p>One-time credit pack purchases on this account.</p>
-      {% if purchases %}
-      {% for p in purchases %}
+      <p>Per-report purchases on this account. See <a href="/credits">Pricing</a> for current prices.</p>
+      {% if product_purchases %}
+      {% for p in product_purchases %}
       <div class="session-row">
         <div>
-          <div class="session-info">{{ pack_names.get(p.pack_id, p.pack_id) }} — {{ p.credits }} credits</div>
+          <div class="session-info">{{ p.name }} — ${{ "%.2f"|format(p.amount_cents / 100) if p.amount_cents is not none else "" }}</div>
           <div class="session-meta">{{ p.completed_at.strftime('%Y-%m-%d %H:%M UTC') if p.completed_at else '' }}</div>
         </div>
       </div>
       {% endfor %}
       {% else %}
-      <p>No credit purchases yet.</p>
+      <p>No purchases yet.</p>
       {% endif %}
     </div>
     </section>

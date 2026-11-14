@@ -8,10 +8,22 @@
   balance (no display-only numbers) and the success return self-updates
   the balance via polling instead of asking the user to hit refresh.
 - The account view shows purchase history: pack, date, credits granted.
+  (Both bullets state the ORIGINAL #71 premise; the Phase C re-base
+  note below records how each is re-based.)
 
 Stripe's HTTP API and webhook deliveries are faked at the httpx/HMAC
 boundary — no network, no keys. Sandbox evidence of an actual receipt
 email is deferred to the founder's Stripe sandbox setup (issue #69).
+
+Issue #164 Phase C re-base: pack checkout is retired (410, zero Stripe
+calls — so no receipt_email can ever be sent), there is no displayed
+balance anywhere (/credits/balance is 410; the pricing page has no
+balance strip and no polling), and Settings purchase history shows
+completed PRODUCT purchases (name, $ amount, date) — credit-era pack
+purchases are preserved in the database but are no longer a
+user-facing account surface (Decision 9). Legacy pack settlement via
+the signed webhook is preserved and still used below to prove the
+ledger survives intact while its display is gone.
 """
 import hashlib
 import hmac
@@ -188,7 +200,12 @@ def _settle_purchase(receipts_env, user_id, pack_id="starter"):
 # --- receipt email -----------------------------------------------------------
 
 def test_receipt_email_not_sent_with_checkout(receipts_env, monkeypatch):
-    from app import stripe_billing
+    # Phase C premise: the pack checkout route is retired, so the
+    # receipt_email guarantee is now absolute — no Stripe call is made
+    # at all (the old test asserted the parameter was absent from the
+    # one call the route made). The direct session-helper pin below
+    # (test_receipt_email_omitted_when_not_provided) is unchanged.
+    from app import models, stripe_billing
 
     email = "buyer71@example.com"
     _, csrf = _login(receipts_env, email=email)
@@ -196,12 +213,11 @@ def test_receipt_email_not_sent_with_checkout(receipts_env, monkeypatch):
     monkeypatch.setattr(stripe_billing.httpx, "post", _fake_post(captured))
     resp = receipts_env.client.post(
         "/credits/checkout", data={"pack_id": "starter", "csrf_token": csrf})
-    assert resp.status_code == 200, resp.text
-    data = captured[-1]["data"]
-    # Issue #71 fix: receipt_email must never be sent — Managed Payments
-    # rejects payment_intent_data[receipt_email] (HTTP 400) and Stripe
-    # emails the receipt itself per the account's receipt settings.
-    assert "payment_intent_data[receipt_email]" not in data
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
+    assert captured == []
+    with receipts_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def test_receipt_email_omitted_when_not_provided(receipts_env, monkeypatch):
@@ -216,17 +232,21 @@ def test_receipt_email_omitted_when_not_provided(receipts_env, monkeypatch):
     assert "payment_intent_data[receipt_email]" not in captured[-1]["data"]
 
 
-# --- balance rendering: ledger-derived everywhere ------------------------------
+# --- balance rendering: no balance displayed anywhere (Phase C) --------------
 
-def test_credits_page_shows_ledger_balance(receipts_env):
+def test_credits_page_shows_no_balance_and_balance_endpoint_retired(receipts_env):
+    # Phase C premise (was: the page renders the ledger balance in its
+    # strip and the JSON endpoint serves it): balances stop being
+    # DISPLAYED at cutover — the pricing page has no balance strip and
+    # /credits/balance answers the honest 410 with no balance field.
     _login(receipts_env)
     page = receipts_env.client.get("/credits")
     assert page.status_code == 200
+    assert "credit-balance" not in page.text
+    assert "/credits/balance" not in page.text
     api = receipts_env.client.get("/credits/balance")
-    assert api.status_code == 200
-    balance = api.json()["balance"]
-    # The page renders the exact JSON balance inside the balance strip.
-    assert f'id="credit-balance" data-initial="{balance}">{balance}' in page.text
+    assert api.status_code == 410
+    assert api.json().get("balance") is None
 
 
 def test_credits_page_hides_balance_when_anonymous(receipts_env):
@@ -235,22 +255,30 @@ def test_credits_page_hides_balance_when_anonymous(receipts_env):
     assert "credit-balance" not in page.text
 
 
-def test_success_return_self_updates_balance(receipts_env):
-    """The success page polls /credits/balance so settlement shows without
-    the user hitting refresh (issue #71 acceptance: no manual refresh)."""
+def test_success_return_never_polls_or_shows_balance(receipts_env):
+    """Phase C premise (was issue #71: the success page polls
+    /credits/balance so settlement shows without a refresh): there is
+    no polling and no balance to update — the success return is the
+    plain dollar pricing page, for signed-in and anonymous visitors."""
     _login(receipts_env)
     page = receipts_env.client.get("/credits?checkout=success")
     assert page.status_code == 200
-    assert 'id="credit-balance"' in page.text
-    assert 'fetch("/credits/balance"' in page.text
-    # Anonymous visitors never get the polling script.
+    assert 'id="credit-balance"' not in page.text
+    assert 'fetch("/credits/balance"' not in page.text
+    assert "checkout-banner" not in page.text
+    assert 'id="offers"' in page.text
     anon = TestClient(receipts_env.app, base_url="https://testserver")
     anon_page = anon.get("/credits?checkout=success")
     assert 'fetch("/credits/balance"' not in anon_page.text
+    assert "credit-balance" not in anon_page.text
 
 
 def test_balance_matches_ledger_after_settlement(receipts_env):
-    """Every displayed balance equals the ledger — no display-only numbers."""
+    """Phase C premise: legacy settlement still writes the ledger
+    exactly as before (the DATA is preserved, Decision 7) — and no
+    surface displays it: the balance endpoint is 410, the pricing page
+    and Settings carry no balance figure (the old test asserted every
+    displayed balance equalled the ledger; now there are none)."""
     from app import models
 
     user_id, _ = _login(receipts_env)
@@ -261,64 +289,103 @@ def test_balance_matches_ledger_after_settlement(receipts_env):
             select(func.coalesce(func.sum(models.CreditLedger.delta), 0))
             .where(models.CreditLedger.user_id == user_id)
         ).scalar()
+    assert ledger_total == 10  # settlement preserved, to the credit
 
     api = receipts_env.client.get("/credits/balance")
-    assert api.status_code == 200
-    assert api.json()["balance"] == ledger_total
+    assert api.status_code == 410
+    assert api.json().get("balance") is None
 
     page = receipts_env.client.get("/credits")
-    assert f'id="credit-balance" data-initial="{ledger_total}">{ledger_total}' in page.text
+    assert "credit-balance" not in page.text
+    assert f"{ledger_total} credits" not in page.text
 
     settings = receipts_env.client.get("/settings")
     assert settings.status_code == 200
-    assert f"{ledger_total} credits" in settings.text
+    assert f"{ledger_total} credits" not in settings.text
+    assert "Your current balance" not in settings.text
 
 
 # --- purchase history ----------------------------------------------------------
 
-def test_purchase_history_on_account(receipts_env):
-    from app import credits as credits_helpers
+def _seed_product_purchase(receipts_env, user_id, sku, amount_cents,
+                           *, status="completed", completed_at=None):
+    """Seed a ProductPurchase directly (Phase C Decision 9 history).
+
+    Upload-first binding: a content digest, so no source Result is
+    needed. Completed rows carry their completion time, as settlement
+    would have written.
+    """
     import uuid
+    from datetime import datetime, timezone
+    from app.models import ProductPurchase
 
-    user_id, _ = _login(receipts_env)
-    _settle_purchase(receipts_env, user_id, "starter")
-    _settle_purchase(receipts_env, user_id, "growth")
-
-    # A pending purchase is reconciliation internals, not history.
     with receipts_env.sessions() as db:
-        pending = credits_helpers.create_pending_purchase(
-            db, uuid.UUID(user_id), "power")
+        row = ProductPurchase(
+            id=uuid.uuid4(), user_id=uuid.UUID(user_id), sku=sku,
+            content_digest=uuid.uuid4().hex + uuid.uuid4().hex,
+            amount_cents=amount_cents, currency="usd", pricing_version=1,
+            status=status,
+            completed_at=(completed_at or datetime.now(timezone.utc))
+            if status == "completed" else None,
+        )
+        db.add(row)
         db.commit()
+        return str(row.id)
+
+
+def test_purchase_history_on_account(receipts_env):
+    # Phase C premise (Decision 9): Settings history lists completed
+    # PRODUCT purchases — name, $ amount, date. A settled legacy PACK
+    # purchase (seeded through the preserved webhook settlement) is
+    # preserved data but NOT history any more, and a pending product
+    # purchase is reconciliation internals, not history.
+    user_id, _ = _login(receipts_env)
+    _seed_product_purchase(receipts_env, user_id, "investigation_report", 900)
+    _seed_product_purchase(receipts_env, user_id, "compare", 500)
+    _seed_product_purchase(receipts_env, user_id, "batch", 500,
+                           status="pending")
+    _settle_purchase(receipts_env, user_id, "starter")
 
     page = receipts_env.client.get("/settings")
     assert page.status_code == 200
     history = _history_section(page.text)
     assert "Purchase history" in history
-    assert "Starter" in history and "10 credits" in history
-    assert "Growth" in history and "25 credits" in history
-    # The pending Power purchase is reconciliation internals, not history.
-    assert "Power" not in history
+    assert "Investigation Report" in history and "$9.00" in history
+    assert "Compare" in history and "$5.00" in history
+    # The pending Batch purchase is reconciliation internals, not history.
+    assert "Batch Analysis" not in history
+    # The completed pack purchase is no longer a user-facing surface.
+    assert "Starter" not in history
+    assert "10 credits" not in history
     # A date is shown for each completed purchase.
     assert history.count("session-meta") >= 2
 
 
 def test_purchase_history_newest_first(receipts_env):
+    # Phase C premise: product purchases order newest-first by
+    # completion time, exactly as the pack history did.
+    from datetime import datetime, timedelta, timezone
+
     user_id, _ = _login(receipts_env)
-    _settle_purchase(receipts_env, user_id, "starter")
-    _settle_purchase(receipts_env, user_id, "growth")
+    now = datetime.now(timezone.utc)
+    _seed_product_purchase(receipts_env, user_id, "investigation_report", 900,
+                           completed_at=now - timedelta(days=2))
+    _seed_product_purchase(receipts_env, user_id, "compare", 500,
+                           completed_at=now)
     page = receipts_env.client.get("/settings")
     history = _history_section(page.text)
-    assert history.index("Growth") < history.index("Starter")
+    assert history.index("Compare") < history.index("Investigation Report")
 
 
 def test_purchase_history_is_private(receipts_env):
+    # Phase C premise: a second user with no product purchases sees the
+    # dollar-era empty state and none of the first user's purchases.
     user_id, _ = _login(receipts_env, email="buyer71@example.com")
-    _settle_purchase(receipts_env, user_id, "power")
-    # A second user (fresh browser) with no purchases sees an empty history.
+    _seed_product_purchase(receipts_env, user_id, "investigation_report", 900)
     other = _fresh_client(receipts_env)
     _login(receipts_env, email="other71@example.com", client=other)
     page = other.get("/settings")
     assert page.status_code == 200
     history = _history_section(page.text)
-    assert "No credit purchases yet." in history
-    assert "Power" not in history
+    assert "No purchases yet." in history
+    assert "Investigation Report" not in history
