@@ -1716,7 +1716,7 @@ async def analyze(
                              "with Large-File Analysis ($5), or upload a smaller file.")
             return error("That file has more than 50,000 lines. "
                          "Sign in to analyze files up to 100 MB / 500,000 lines "
-                         "with credits, or upload a smaller file.")
+                         "with Large-File Analysis ($5), or upload a smaller file.")
         from app import credits as _credits_helpers
         try:
             return _paid_consent_page(request, file.filename, content, _user, _csrf, ip,
