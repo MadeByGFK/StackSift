@@ -603,46 +603,99 @@ async def investigation_checkout(
     origin = str(request.base_url).rstrip("/")
     success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/reports/{rid}?checkout=success"
     cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/reports/{rid}?checkout=cancelled"
+
+    def _purchase_bound_landing(purchase_id):
+        # Remediation R2 (J2): the already_complete landing — the
+        # route's settlement-aware success/return URL, bound to THIS
+        # purchase (any stale purchase parameter is replaced, not
+        # duplicated), mirroring the digest route's binding.
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        parts = urlsplit(success_url)
+        query = [(k, v) for k, v in
+                 parse_qsl(parts.query, keep_blank_values=True)
+                 if k != "purchase"]
+        query.append(("purchase", str(purchase_id)))
+        return urlunsplit(parts._replace(query=urlencode(query)))
     try:
         stripe_billing._secret_key()
         if stripe_billing.product_price_id(sku) is None:
             raise stripe_billing.CheckoutNotConfigured(f"price not configured for product {sku}")
         purchase, reused = pb.create_pending_product_purchase(db, _user.id, sku, rid)
         db.commit()
-        if reused:
-            # Session-retrieval retry (A7/P2-1): reuse the pending row
-            # and re-create/retrieve the session under THIS row's
-            # idempotency key — Stripe returns the original session
-            # for the same key+params, including the timeout case
-            # where the local row never recorded a session id. Backfill
-            # the session id (and price snapshot) before returning.
-            try:
-                checkout_url, session_id = stripe_billing.create_product_checkout_session(
-                    user_id=_user.id, sku=sku, purchase_id=purchase.id,
-                    success_url=success_url, cancel_url=cancel_url)
-            except Exception:
+        # Issue #164 idempotency-supersede fix: session creation goes
+        # through pb.attempt_product_checkout_session — on a Stripe
+        # idempotency_error for this row's key it applies the §2
+        # safety gates (return the row's own open session; create
+        # nothing when it already completed; supersede ONCE only for
+        # a session-less row or a conclusively-expired session) and
+        # retries ONCE under the replacement row. Every other failure
+        # keeps the exact behaviour below (generic CheckoutError ->
+        # the existing 503, row stays pending).
+        try:
+            attempt = pb.attempt_product_checkout_session(
+                db, purchase.id,
+                create_session=lambda pur: stripe_billing.create_product_checkout_session(
+                    user_id=_user.id, sku=sku, purchase_id=pur.id,
+                    success_url=success_url, cancel_url=cancel_url))
+        except Exception:
+            db.rollback()
+            raise
+        purchase = attempt.purchase
+        checkout_url, session_id = attempt.checkout_url, attempt.session_id
+        if attempt.state == "already_complete":
+            # The original session already paid; settlement is
+            # webhook-only and the status surface already reflects
+            # it. Create nothing, backfill nothing.
+            # Remediation R2 (J2): a complete Stripe session's url
+            # is null, so returning it strands the buyer on a
+            # "checkout unavailable" message. Return the navigable,
+            # purchase-bound settlement-aware landing instead (as
+            # checkout_url, so every existing client navigates, and
+            # as return_url for the explicit complete handling).
+            landing_url = _purchase_bound_landing(purchase.id)
+            return JSONResponse({
+                "checkout_url": landing_url, "return_url": landing_url,
+                "purchase_id": str(purchase.id),
+                "session_status": "complete",
+                "redemption_deadline": (credits_helpers._as_aware(source.expires_at) + timedelta(days=30)).isoformat(),
+                "promise": stripe_billing.PAY_NOW_PROMISE,
+            })
+        # Remediation R1 (I2): coordinated backfill — the admission
+        # lock + FOR-UPDATE pending re-check live in
+        # pb.backfill_product_purchase_session (the attempt already
+        # applied it; this re-application is idempotent and supplies
+        # the price snapshot). No unlocked write of the session id
+        # remains on this route.
+        # Remediation R2 (J1): the re-application result is CHECKED —
+        # a False because the row is no longer pending means a
+        # concurrent supersede won after the attempt returned, so
+        # returning this URL would expose a dead session's URL.
+        # Re-read the row and, only when it is no longer pending,
+        # fail closed with the generic CheckoutError (-> 503)
+        # instead of returning a stale URL. A False on a
+        # still-pending row (it already carries a session id — the
+        # P2-1 reuse premise, where backfill returns True when that
+        # id is THIS session's) keeps the existing return behaviour.
+        if not pb.backfill_product_purchase_session(
+                db, purchase.id, session_id=session_id,
+                price_id=stripe_billing.product_price_id(sku)):
+            current = db.get(models.ProductPurchase, purchase.id)
+            if current is None or current.status != "pending":
                 db.rollback()
-                raise
-            if not purchase.stripe_session_id:
-                purchase.stripe_session_id = session_id
-            if not purchase.stripe_price_id:
-                purchase.stripe_price_id = stripe_billing.product_price_id(sku)
-            db.commit()
+                raise stripe_billing.CheckoutError(
+                    "Stripe request failed")
+        db.commit()
+        if reused and not attempt.superseded:
+            # Session-retrieval retry (A7/P2-1): the pending row was
+            # reused and the session re-created/retrieved under THIS
+            # row's idempotency key — Stripe returns the original
+            # session for the same key+params, including the timeout
+            # case where the local row never recorded a session id.
             return JSONResponse({
                 "checkout_url": checkout_url, "purchase_id": str(purchase.id),
                 "redemption_deadline": (credits_helpers._as_aware(source.expires_at) + timedelta(days=30)).isoformat(),
                 "promise": stripe_billing.PAY_NOW_PROMISE,
             })
-        try:
-            checkout_url, session_id = stripe_billing.create_product_checkout_session(
-                user_id=_user.id, sku=sku, purchase_id=purchase.id,
-                success_url=success_url, cancel_url=cancel_url)
-        except Exception:
-            db.rollback()
-            raise
-        purchase.stripe_session_id = session_id
-        purchase.stripe_price_id = stripe_billing.product_price_id(sku)
-        db.commit()
     except pb.DuplicateEntitlement as dup:
         db.rollback()
         return JSONResponse({
@@ -793,36 +846,83 @@ async def product_checkout(
         # on the override is replaced, not duplicated).
         from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-        def _purchase_bound_url(override, default_query):
+        def _purchase_bound_url(override, default_query, purchase_id):
             base = override or f"{origin}/products/return?{default_query}"
             parts = urlsplit(base)
             query = [(k, v) for k, v in
                      parse_qsl(parts.query, keep_blank_values=True)
                      if k != "purchase"]
-            query.append(("purchase", str(purchase.id)))
+            query.append(("purchase", str(purchase_id)))
             return urlunsplit(parts._replace(query=urlencode(query)))
 
-        # PR #182 finding 2: the return landing is the settlement-aware
-        # /products/return surface, NOT the plain home page (which
-        # ignored the parameter and dead-ended a buyer who had paid).
-        success_url = _purchase_bound_url(
-            _os.environ.get("STRIPE_SUCCESS_URL"),
-            f"product_checkout=success&sku={sku}")
-        cancel_url = _purchase_bound_url(
-            _os.environ.get("STRIPE_CANCEL_URL"),
-            f"product_checkout=cancelled&sku={sku}")
-        try:
-            checkout_url, session_id = stripe_billing.create_product_checkout_session(
-                user_id=_user.id, sku=sku, purchase_id=purchase.id,
+        def _create_session_for(pur):
+            # PR #182 finding 2: the return landing is the
+            # settlement-aware /products/return surface, NOT the
+            # plain home page (which ignored the parameter and
+            # dead-ended a buyer who had paid). The URLs are built
+            # per purchase row, so a superseded replacement row's
+            # session binds its return landing to the NEW purchase
+            # (§5), never to the poisoned row.
+            success_url = _purchase_bound_url(
+                _os.environ.get("STRIPE_SUCCESS_URL"),
+                f"product_checkout=success&sku={sku}", pur.id)
+            cancel_url = _purchase_bound_url(
+                _os.environ.get("STRIPE_CANCEL_URL"),
+                f"product_checkout=cancelled&sku={sku}", pur.id)
+            return stripe_billing.create_product_checkout_session(
+                user_id=_user.id, sku=sku, purchase_id=pur.id,
                 success_url=success_url, cancel_url=cancel_url,
                 content_digest=content_digest)
+
+        # Issue #164 idempotency-supersede fix: same §2 gated
+        # supersede-once path as the Investigation Report checkout
+        # (see pb.attempt_product_checkout_session); every other
+        # failure keeps the existing generic 503 / pending-row
+        # behaviour.
+        try:
+            attempt = pb.attempt_product_checkout_session(
+                db, purchase.id, create_session=_create_session_for)
         except Exception:
             db.rollback()
             raise
-        if not purchase.stripe_session_id:
-            purchase.stripe_session_id = session_id
-        if not purchase.stripe_price_id:
-            purchase.stripe_price_id = stripe_billing.product_price_id(sku)
+        purchase = attempt.purchase
+        checkout_url, session_id = attempt.checkout_url, attempt.session_id
+        if attempt.state == "already_complete":
+            # Remediation R2 (J2): a complete Stripe session's url
+            # is null — returning it strands a paid buyer on a
+            # "checkout unavailable" message. Return the navigable,
+            # purchase-bound settlement-aware return landing instead
+            # (as checkout_url, so every existing client navigates,
+            # and as return_url for the explicit complete handling
+            # in paid_consent.html). Identical to the IR route.
+            landing_url = _purchase_bound_url(
+                _os.environ.get("STRIPE_SUCCESS_URL"),
+                f"product_checkout=success&sku={sku}", purchase.id)
+            return JSONResponse({
+                "checkout_url": landing_url, "return_url": landing_url,
+                "purchase_id": str(purchase.id),
+                "session_status": "complete",
+                "promise": stripe_billing.PAY_NOW_PROMISE,
+            })
+        # Remediation R1 (I2): coordinated backfill, as on the
+        # Investigation Report route — see
+        # pb.backfill_product_purchase_session. No unlocked write of
+        # the session id remains on this route.
+        # Remediation R2 (J1): the re-application result is CHECKED,
+        # as on the IR route — a False because the row is no longer
+        # pending (a concurrent supersede won) fails closed with
+        # the generic CheckoutError (-> 503) rather than returning
+        # a stale URL; a False on a still-pending row is the P2-1
+        # reuse case and keeps the existing return behaviour.
+        if not pb.backfill_product_purchase_session(
+                db, purchase.id, session_id=session_id,
+                price_id=stripe_billing.product_price_id(sku)):
+            from app import models as _models
+            current = db.get(_models.ProductPurchase, purchase.id)
+            if current is None or current.status != "pending":
+                db.rollback()
+                raise stripe_billing.CheckoutError(
+                    "Stripe request failed")
         db.commit()
     except pb.DuplicateEntitlement as dup:
         db.rollback()
