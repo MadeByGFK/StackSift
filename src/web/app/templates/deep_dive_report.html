@@ -69,52 +69,23 @@
        direct export controls — gold PDF + CSV/JSON chips, tags
        following the unlock state; same forms/endpoints/confirms. #}
     <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
-          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="Exports are free for this report." style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/pdf" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">Free</span></button>
           </form>
-          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="Exports are free for this report." style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/csv" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">Free</span></button>
           </form>
-          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="Exports are free for this report." style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/json" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">Free</span></button>
           </form>
 
-      <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
-        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:340px">
-          <p id="ss-confirm-text" style="margin:0 0 14px"></p>
-          <button type="button" class="btn-small" id="ss-confirm-yes">Continue</button>
-          <button type="button" class="btn-small" id="ss-confirm-no">Cancel</button>
-        </div>
-      </div>
-
-      <script>
-      (function () {
-        var modal = document.getElementById('ss-confirm');
-        var text = document.getElementById('ss-confirm-text');
-        var pending = null;
-        document.querySelectorAll('form[data-confirm]').forEach(function (f) {
-          f.addEventListener('submit', function (e) {
-            if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            pending = f;
-            text.textContent = f.getAttribute('data-confirm');
-            modal.style.display = 'flex';
-          });
-        });
-        document.getElementById('ss-confirm-yes').addEventListener('click', function () {
-          modal.style.display = 'none';
-          if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
-        });
-        document.getElementById('ss-confirm-no').addEventListener('click', function () {
-          modal.style.display = 'none';
-          pending = null;
-        });
-      })();
-      </script>
+      {# Release #7 F1: the export confirmation popup and its wiring
+         are removed — exports are free and fire directly on click.
+         The PDF form's submit is intercepted exactly once by the
+         fetch listener in auth_form_script.html. #}
     </div>
 
     {# Issue #163: per-report branding (Report surface — deliverable

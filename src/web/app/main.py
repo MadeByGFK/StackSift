@@ -4483,13 +4483,24 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
                         headers={"Content-Disposition": f'attachment; filename="stacksift-report-{_safe_download_filename(filename)}.pdf"'},
                     )
                 except (credits_helpers.AdmissionError, KeyError, ValueError):
-                    # Stored PDF is invalid or expired; don't attempt to reuse the
-                    # completed operation's idempotency key. Return a controlled error.
-                    db.rollback()
-                    return JSONResponse(
-                        {"error": "Previously generated PDF is no longer available. Please generate a new export."},
-                        status_code=410,
-                    )
+                    # Release #7 F2 (founder hand-check 2026-11-14,
+                    # reproduced on staging): the stored PDF is missing,
+                    # invalid or expired, but the SOURCE report above is
+                    # still valid and unexpired — the old 410 here was a
+                    # dead end ("Please generate a new export" with no
+                    # regeneration action offered). Do NOT return it:
+                    # fall through to the unlocked fresh-generation path
+                    # below, which regenerates the PDF from the source
+                    # result (exports are free in Phase C, so no charge
+                    # and no new operation; the completed operation's
+                    # idempotency key is not reused). This mirrors the
+                    # branding fall-through above, which likewise defeats
+                    # replay and regenerates. If the source itself cannot
+                    # be validated or generated, that path returns its
+                    # own error. No db.rollback() here: the unlocked
+                    # branch performs it before generating, exactly as
+                    # on the branding fall-through.
+                    pass
         elif existing_op.status == "reserved":
             # Another request is already generating this PDF; don't hijack its operation
             db.rollback()

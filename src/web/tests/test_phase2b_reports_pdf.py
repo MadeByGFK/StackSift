@@ -425,7 +425,14 @@ def test_pdf_export_concurrent_returns_409(auth_env):
 
 
 def test_pdf_replay_validates_integrity(auth_env):
-    """Replaying a completed export validates the stored PDF result."""
+    """Replaying a completed export validates the stored PDF result.
+
+    Premise changed by Release #7 F2 (founder hand-check 2026-11-14,
+    reproduced on staging): a stored PDF that fails validation no
+    longer dead-ends with the 410 "no longer available" error — the
+    export regenerates from the still-valid source report. Validation
+    still happens (the corrupt stored bytes are never served); it is
+    the OUTCOME that changed from error to regeneration."""
     from app import models, credits as credits_helpers
     from datetime import datetime, timezone
     import base64 as b64
@@ -464,13 +471,18 @@ def test_pdf_replay_validates_integrity(auth_env):
         db.commit()
     finally:
         db.close()
-    # The replay should fail validation and return 410 (not return corrupt data,
-    # not attempt to reuse the completed operation's idempotency key)
+    # Release #7 F2: the replay fails validation, so the route falls
+    # through and REGENERATES from the source report — 200 with a
+    # freshly generated PDF, never the corrupt stored bytes, and no
+    # reuse of the completed operation's idempotency key for a charge
+    # (exports are free; regeneration creates no new operation).
     csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
     auth_env.client.headers["X-CSRF-Token"] = csrf
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert resp.status_code == 410
-    assert "no longer available" in resp.json()["error"].lower()
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/pdf")
+    assert resp.content[:4] == b"%PDF"
+    assert b"fake-pdf" not in resp.content
 
 
 def test_pdf_export_retry_after_failure(auth_env):

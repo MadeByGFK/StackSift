@@ -150,7 +150,13 @@ def test_s5a_commerce_regions_now_dollar_offers_in_pricing_source():
         # Dollar offer cards (the four ruled SKUs render here).
         'id="offers"',
         "offer-card",
-        "Payment is captured at checkout",
+        # PREMISE CHANGED (Release #7 F4 residue, Remediation 1
+        # Part B): the pricing promise blocks carry the approved
+        # PAY_NOW_PROMISE text verbatim, not the old wording.
+        ("You pay by card at checkout. If we can't generate your "
+         "report, your purchase isn't used up \u2014 you can try "
+         "again. If a purchase can never be used, we'll refund "
+         "it \u2014 email disputes@goodfolkdigital.com."),
         # #156 offer-visibility beacon script, retargeted (C6b).
         "offer_viewed",
         'querySelectorAll(".offer-card")',

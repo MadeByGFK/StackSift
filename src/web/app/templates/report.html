@@ -112,16 +112,16 @@
        "Get the Investigation Report" CTA is the purchase entry and
        opens #analysis-modal directly. #}
     <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
-          <form method="post" action="/reports/{{ report_id }}/pdf" data-confirm="Exports are free for this report." style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/pdf" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">Free</span></button>
           </form>
           {% if not report_kind %}
-          <form method="post" action="/reports/{{ report_id }}/exports/csv" data-confirm="Exports are free for this report." style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/csv" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">Free</span></button>
           </form>
-          <form method="post" action="/reports/{{ report_id }}/exports/json" data-confirm="Exports are free for this report." style="margin:0">
+          <form method="post" action="/reports/{{ report_id }}/exports/json" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">Free</span></button>
           </form>
@@ -154,7 +154,7 @@
           {% if entitlement_available is defined and entitlement_available %}
           <p id="analysis-msg" style="margin:0 0 12px">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
           {% else %}
-          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Investigation Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
+          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. You pay by card at checkout. If we can't generate your report, your purchase isn't used up — you can try again. If a purchase can never be used, we'll refund it — email disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Investigation Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
           {% endif %}
           <div id="analysis-link-row" style="display:none;margin-bottom:12px">
             <a class="btn-small" id="analysis-view" href="#">View Investigation Report</a>
@@ -165,14 +165,6 @@
           <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
           {% endif %}
           <button type="button" class="btn-small" id="analysis-close">Cancel</button>
-        </div>
-      </div>
-
-      <div id="ss-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
-        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:340px">
-          <p id="ss-confirm-text" style="margin:0 0 14px"></p>
-          <button type="button" class="btn-small" id="ss-confirm-yes">Continue</button>
-          <button type="button" class="btn-small" id="ss-confirm-no">Cancel</button>
         </div>
       </div>
 
@@ -209,34 +201,10 @@
 
       <script>
       (function () {
-        var modal = document.getElementById('ss-confirm');
-        var text = document.getElementById('ss-confirm-text');
-        var pending = null;
-        document.querySelectorAll('form[data-confirm]').forEach(function (f) {
-          f.addEventListener('submit', function (e) {
-            if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
-            e.preventDefault();
-            // PR #132 follow-up (P1): this listener is registered
-            // BEFORE auth_form_script.html's PDF fetch listener
-            // (this inline script precedes that include), so
-            // stopImmediatePropagation keeps the PDF fetch — and
-            // its 2-credit charge — from firing while the
-            // confirmation popup is open. Cancel therefore sends
-            // nothing at all.
-            e.stopImmediatePropagation();
-            pending = f;
-            text.textContent = f.getAttribute('data-confirm');
-            modal.style.display = 'flex';
-          });
-        });
-        document.getElementById('ss-confirm-yes').addEventListener('click', function () {
-          modal.style.display = 'none';
-          if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
-        });
-        document.getElementById('ss-confirm-no').addEventListener('click', function () {
-          modal.style.display = 'none';
-          pending = null;
-        });
+        // Release #7 F1: the export confirmation popup is removed —
+        // exports are free and fire directly on click. The PDF form's
+        // submit is intercepted exactly once by the fetch listener in
+        // auth_form_script.html; CSV/JSON forms submit natively.
         var shareModal = document.getElementById('share-modal');
         var shareMsg = document.getElementById('share-msg');
         var linkRow = document.getElementById('share-link-row');
@@ -541,7 +509,7 @@
     {% if entitlement_available is defined and entitlement_available %}
     <p>You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
     {% else %}
-    <p>Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+    <p>Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. You pay by card at checkout. If we can't generate your report, your purchase isn't used up — you can try again. If a purchase can never be used, we'll refund it — email disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
     {% endif %}
     <button type="button" class="s1-btn-gold" id="premium-upsell-btn">Get the Investigation Report — $9</button>
     {% endif %}

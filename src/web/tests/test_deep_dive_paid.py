@@ -432,8 +432,13 @@ def test_report_page_analysis_action_after_export(auth_env, monkeypatch):
     # the legacy "charged only if generation succeeds" phrase must
     # NOT appear on the dollar path (A6(3) — payment is captured at
     # checkout; a failure simply never consumes the purchase).
+    # PREMISE CHANGED (Release #7 F4 residue, Remediation 1 Part B):
+    # the report page's purchase paragraphs now carry the approved
+    # PAY_NOW_PROMISE wording instead of the old captured/never-
+    # consumed segment.
     assert "Investigation Report costs $9" in page.text
-    assert "Payment is captured at checkout" in page.text
+    assert "You pay by card at checkout" in page.text
+    assert "Payment is captured at checkout" not in page.text
     assert "Analysis Report costs 3 credits" not in page.text
     assert "charged only if generation succeeds" not in page.text
 

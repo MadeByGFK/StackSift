@@ -412,10 +412,9 @@ DIGEST_SKUS = frozenset({"compare", "batch", "large_file_analysis"})
 
 # Pay-now promise (F2), pinned verbatim for every dollar-path surface.
 PAY_NOW_PROMISE = (
-    "Payment is captured at checkout. If generation fails, your purchase "
-    "is never consumed — the entitlement stays available and you can "
-    "retry. A purchase that can never be redeemed is refundable on "
-    "request via disputes@goodfolkdigital.com."
+    "You pay by card at checkout. If we can't generate your report, your "
+    "purchase isn't used up — you can try again. If a purchase can never "
+    "be used, we'll refund it — email disputes@goodfolkdigital.com."
 )
 
 

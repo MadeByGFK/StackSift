@@ -39,6 +39,13 @@ contract: old menu selectors gone, the SAME export forms/endpoints/
 data-confirm gating invoked directly. The PDF re-enable fix and the
 batch/compare + My Reports + Settings guards are unchanged.
 
+PREMISE CHANGED (Release #7 F1, 2026-11-14): the export
+confirmation popup (data-confirm / ss-confirm) is REMOVED from
+every export form — exports fire directly on click. The tests
+below pin the absence of the confirm gating at the same strength
+as they previously pinned its presence; endpoints, order, labels
+and the neighbouring modals are unchanged.
+
 Consistency fix (the #129 closure quirk): the PDF fetch handler in
 ``auth_form_script.html`` disabled the submit button and re-enabled
 it ONLY on a network exception, so after a completed PDF download
@@ -109,16 +116,17 @@ def test_report_page_single_actions_menu_holds_all_actions(auth_env):
     assert 'class="s1-btn-gold" data-export="pdf"' in cluster
     assert ">Free</span>" in cluster
     assert "2 credits" not in cluster
-    # The #129 confirmation behaviour is intact on every export form,
-    # with the Phase C free confirm copy.
-    assert cluster.count("data-confirm") == 3
-    assert cluster.count('data-confirm="Exports are free for this '
-                         'report."') == 3
+    # PREMISE CHANGED (Release #7 F1, 2026-11-14): the #129 export
+    # confirmation popup is REMOVED — exports are free and fire
+    # directly. No export form carries data-confirm and no
+    # ss-confirm modal exists on the page.
+    assert cluster.count("data-confirm") == 0
+    assert 'data-confirm="Exports are free for this report."' not in cluster
     assert "Export costs 2 credits and unlocks PDF, CSV and JSON" not in cluster
     # The modals the controls open are still on the page, unchanged.
     assert 'id="analysis-modal"' in text
     assert 'id="share-modal"' in text
-    assert 'id="ss-confirm"' in text
+    assert 'id="ss-confirm"' not in text
     assert f'action="/reports/{rid}/retention"' not in text
     assert f'action="/reports/{rid}/share"' not in text
 
@@ -154,11 +162,15 @@ def test_analysis_report_page_single_actions_menu(auth_env):
     assert 'id="actions-btn"' not in text
     assert 'id="actions-menu"' not in text
     assert 'data-s1-actions' in text
-    cluster = text[text.index('data-s1-actions'):text.index('id="ss-confirm"')]
+    # PREMISE CHANGED (Release #7 F1): the ss-confirm modal that
+    # used to bound this slice is removed; the branding panel is
+    # the next surface after the actions cluster on this page.
+    cluster = text[text.index('data-s1-actions'):text.index('class="branding-panel"')]
     assert f'action="/reports/{analysis_id}/pdf"' in cluster
     assert f'action="/reports/{analysis_id}/exports/csv"' in cluster
     assert f'action="/reports/{analysis_id}/exports/json"' in cluster
-    assert cluster.count("data-confirm") == 3
+    assert cluster.count("data-confirm") == 0
+    assert 'id="ss-confirm"' not in text
     assert 'id="analysis-btn"' not in text
     assert 'id="share-btn"' not in text
 
@@ -238,8 +250,12 @@ def test_my_reports_row_keeps_full_actions_and_deep_dive_suppression(auth_env):
     assert ">Export PDF</button>" in normal
     assert ">Export CSV</button>" in normal
     assert ">Export JSON</button>" in normal
+    # PREMISE CHANGED (Release #7 F1): no data-confirm on any
+    # export form — the confirmation popup is removed and the
+    # dropdown exports fire directly.
+    assert normal.count("data-confirm") == 0
     assert normal.count('data-confirm="Exports are free for this '
-                        'report."') == 3
+                        'report."') == 0
     assert "share-open" in normal and ">Share</button>" in normal
     assert f"/reports/{rid}/retention" not in normal
     assert ">Extend</button>" not in normal
@@ -345,7 +361,11 @@ def _inline_script(template_name, marker):
 
 
 def _menu_script(template_name):
-    script = _inline_script(template_name, "ss-confirm")
+    # PREMISE CHANGED (Release #7 F1): no script in report.html
+    # mentions ss-confirm anymore (the modal and its wiring are
+    # removed); the main actions script is found by its share-modal
+    # wiring, which is preserved verbatim.
+    script = _inline_script(template_name, "share-modal")
     script = script.replace("{{ share_create_key }}", "create-key")
     script = script.replace("{{ share_rotate_key }}", "rotate-key")
     script = script.replace("{{ share_revoke_key }}", "revoke-key")
