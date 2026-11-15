@@ -296,16 +296,16 @@
         <div class="s3-export">
           <button type="button" class="btn btn-ghost s3-export-btn" aria-haspopup="true" aria-expanded="false" data-s3-export-btn>Export <span class="s3-caret" aria-hidden="true">▾</span></button>
           <div class="s3-export-menu" data-s3-export-menu hidden>
-            <form method="post" action="/reports/{{ report.id }}/pdf" class="s3-export-form" data-confirm="Exports are free for this report." style="margin:0">
+            <form method="post" action="/reports/{{ report.id }}/pdf" class="s3-export-form" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="btn btn-ghost s3-export-item">Export PDF</button>
             </form>
             {% if report.type != 'comparison' and report.report_kind != 'batch' %}
-            <form method="post" action="/reports/{{ report.id }}/exports/csv" class="s3-export-form" data-confirm="Exports are free for this report." style="margin:0">
+            <form method="post" action="/reports/{{ report.id }}/exports/csv" class="s3-export-form" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="btn btn-ghost s3-export-item">Export CSV</button>
             </form>
-            <form method="post" action="/reports/{{ report.id }}/exports/json" class="s3-export-form" data-confirm="Exports are free for this report." style="margin:0">
+            <form method="post" action="/reports/{{ report.id }}/exports/json" class="s3-export-form" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="btn btn-ghost s3-export-item">Export JSON</button>
             </form>
@@ -358,6 +358,12 @@
     <span class="s3-entry-link">Start a batch →</span>
   </a>
 
+  <a class="s3-entry-card" href="/compare" data-s3-entry="compare">
+    <span class="s3-entry-title">Compare two logs</span>
+    <span class="s3-entry-sub">Upload two log files and see what changed between them.</span>
+    <span class="s3-entry-link">Start a compare →</span>
+  </a>
+
   {% if total_pages > 1 %}
   <nav class="pager" aria-label="Pagination">
     <span class="label">Page {{ page }} of {{ total_pages }}</span>
@@ -385,14 +391,6 @@
   {% endif %}
 
 </main>
-
-<div id="ss-confirm" class="modal" style="display:none">
-  <div class="modal-card">
-    <p id="ss-confirm-text"></p>
-    <button type="button" class="btn btn-primary" id="ss-confirm-yes">Continue</button>
-    <button type="button" class="btn btn-ghost" id="ss-confirm-no">Cancel</button>
-  </div>
-</div>
 
 <div id="extend-modal" class="modal" style="display:none">
   <div class="modal-card">
@@ -484,45 +482,24 @@
 
 <script>
 (function () {
-  var modal = document.getElementById('ss-confirm');
-  var text = document.getElementById('ss-confirm-text');
-  var pending = null;
-  document.querySelectorAll('form[data-confirm]').forEach(function (f) {
-    f.addEventListener('submit', function (e) {
-      if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
-      e.preventDefault();
-      // PR #132 follow-up (P1): this listener is registered BEFORE
-      // auth_form_script.html's PDF fetch listener (this inline
-      // script precedes that include), so stopImmediatePropagation
-      // keeps the PDF fetch — and its 2-credit charge — from
-      // firing while the confirmation popup is open. Cancel
-      // therefore sends nothing at all.
-      e.stopImmediatePropagation();
-      pending = f;
-      text.textContent = f.getAttribute('data-confirm');
-      modal.style.display = 'flex';
-    });
-  });
-  document.getElementById('ss-confirm-yes').addEventListener('click', function () {
-    modal.style.display = 'none';
-    if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
-  });
-  document.getElementById('ss-confirm-no').addEventListener('click', function () {
-    modal.style.display = 'none';
-    pending = null;
-  });
+  // Release #7 F1: the export confirmation popup and its
+  // confirm wiring are removed — exports are free and fire
+  // directly on click. The PDF form's submit is intercepted exactly
+  // once by the fetch listener in auth_form_script.html; CSV/JSON
+  // forms submit natively.
   // Issue #141: Extend (retention) is an IN-PAGE action. Its endpoint
-  // returns a JSON document, so the confirmed form must NOT be
-  // submitted natively — the browser navigated to the raw JSON page
-  // and stranded the user there. This listener mirrors the PDF fetch
-  // pattern in auth_form_script.html: it is registered AFTER the
-  // data-confirm handler above, which stopImmediatePropagation()s
-  // the first (unconfirmed) submit, so this listener only ever runs
-  // on the confirmed resubmit; it preventDefault()s that resubmit
+  // returns a JSON document, so its form must NOT be submitted
+  // natively — the browser navigated to the raw JSON page and
+  // stranded the user there. This listener mirrors the PDF fetch
+  // pattern in auth_form_script.html: it preventDefault()s the submit
   // and posts the SAME form fields (CSRF token + the form's hidden
   // idempotency_key, unchanged) via fetch. A retry therefore replays
   // the same key server-side and cannot double-charge, and the key
-  // is deliberately NOT rotated after success.
+  // is deliberately NOT rotated after success. (Release #7 F1: the
+  // confirmation handler this listener was originally sequenced
+  // after is removed; no retention form renders since #164 Phase C,
+  // so this wiring currently matches no form and is retained only
+  // alongside the #extend-modal markup.)
   var extendModal = document.getElementById('extend-modal');
   var extendMsg = document.getElementById('extend-msg');
   document.getElementById('extend-close').addEventListener('click', function () {
@@ -939,7 +916,7 @@
           analysisConfirm.style.display = '';
           analysisConfirm.disabled = false;
         } else {
-          analysisMsg.textContent = 'Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. Payment is captured at checkout; if generation fails, your purchase is never consumed — you can retry. A purchase that can never be redeemed is refundable on request via disputes@goodfolkdigital.com.' + (btn.getAttribute('data-deadline') ? ' Redeem by ' + btn.getAttribute('data-deadline') + ' (the source report\u2019s expiry plus 30 days).' : '');
+          analysisMsg.textContent = 'Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. You pay by card at checkout. If we can\'t generate your report, your purchase isn\'t used up — you can try again. If a purchase can never be used, we\'ll refund it — email disputes@goodfolkdigital.com.' + (btn.getAttribute('data-deadline') ? ' Redeem by ' + btn.getAttribute('data-deadline') + ' (the source report\u2019s expiry plus 30 days).' : '');
           analysisConfirm.style.display = '';
           analysisConfirm.disabled = false;
         }

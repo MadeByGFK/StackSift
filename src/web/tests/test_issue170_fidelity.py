@@ -8,6 +8,10 @@ FAILS on the pre-build tree (94c271dd) — verified by running this
 file against that tree. The G1 control-structure tests are the
 anchor: old Actions-menu selectors gone, direct controls carrying
 the same form actions / endpoints / data-confirm gating.
+
+PREMISE CHANGED (Release #7 F1, 2026-11-14): the data-confirm
+gating itself is now REMOVED — the G1 test pins its absence
+(no data-confirm, no ss-confirm) at the same strength.
 """
 
 import re
@@ -200,11 +204,15 @@ def test_g1_direct_controls_replace_actions_menu():
     assert 'data-s1-actions' in html
     cluster = html[html.index('data-s1-actions'):
                    html.index('id="analysis-modal"')]
-    # Same endpoints + gating as the retired menu.
+    # Same endpoints as the retired menu. PREMISE CHANGED
+    # (Release #7 F1, 2026-11-14): the data-confirm gating is
+    # REMOVED — no export form carries data-confirm and no
+    # ss-confirm modal exists; exports fire directly.
     assert 'action="/reports/r1/pdf"' in cluster
     assert 'action="/reports/r1/exports/csv"' in cluster
     assert 'action="/reports/r1/exports/json"' in cluster
-    assert cluster.count("data-confirm") == 3
+    assert cluster.count("data-confirm") == 0
+    assert 'id="ss-confirm"' not in html
     assert 'class="s1-btn-gold" data-export="pdf"' in cluster
     # PREMISE CHANGED (report follow-up, founder ruling 2026-11-10):
     # the bare "Analysis" cluster button is removed — the premium
@@ -213,20 +221,22 @@ def test_g1_direct_controls_replace_actions_menu():
     assert ">Analysis</button>" not in cluster
     assert 'id="share-btn"' in cluster
     # PREMISE CHANGED (#164 Phase C, Decision 4 / C2): exports are
-    # free for ALL reports — the Free tags and the free confirm copy
-    # render in BOTH states; there is no locked state and no
-    # "export-unlocked" marker anymore.
+    # free for ALL reports — the Free tags render in BOTH states;
+    # there is no locked state and no "export-unlocked" marker
+    # anymore. PREMISE CHANGED (Release #7 F1): the free confirm
+    # copy is retired with the popup — no data-confirm at all.
     assert ">Free</span>" in cluster
     assert cluster.count('data-confirm="Exports are free for this '
-                         'report."') == 3
+                         'report."') == 0
     assert "export-unlocked" not in cluster
     assert "2 credits" not in cluster
     unlocked = _owned(export_unlocked=True)
     ucluster = unlocked[unlocked.index('data-s1-actions'):
                         unlocked.index('id="analysis-modal"')]
     assert ">Free</span>" in ucluster
+    assert ucluster.count("data-confirm") == 0
     assert ucluster.count('data-confirm="Exports are free for this '
-                          'report."') == 3
+                          'report."') == 0
     assert "export-unlocked" not in ucluster
 
 

@@ -234,6 +234,10 @@ def test_reports_page_share_script_contracts(auth_env):
 # via requestSubmit(), and the confirmed flag is cleared on the
 # confirmed pass so a later export asks again. No JS runtime harness
 # exists in this repo, so these are rendered-page contract tests.
+# PREMISE CHANGED (Release #7 F1, 2026-11-14): the confirmation
+# popup is removed entirely — Finding 1's gating contract is
+# superseded by the direct-fire contract pinned at the bottom of
+# this file (renamed tests).
 # Finding 2 (P2, JS contract): share controls reflect create/revoke
 # success immediately, without a reload.
 # Finding 3 (P2, behavioral): has_pdf_export_operation /
@@ -388,36 +392,50 @@ def test_shared_pdf_expired_legacy_uppercase_key_returns_identical_404(auth_env)
     assert got.content == baseline.content
 
 
-# --- Follow-up F1: PDF confirmation gates the fetch (contract) ---------------
+# --- Follow-up F1: PDF fetch fires directly, no confirmation gate ------------
+# RENAMED + PREMISE CHANGED (Release #7 F1, 2026-11-14): these were
+# test_pdf_confirmation_gates_fetch_on_report_page /
+# test_pdf_confirmation_gates_fetch_on_reports_page. The confirmation
+# popup that gated the PDF fetch is REMOVED — the contract is now
+# the inverse at the same strength: no confirm listener, no
+# confirmed-flag machinery, no ss-confirm modal anywhere in the
+# rendered page, and the PDF fetch listener in
+# auth_form_script.html is the single submit listener on PDF forms,
+# so an export click fires the fetch directly.
 
-def test_pdf_confirmation_gates_fetch_on_report_page(auth_env):
+def test_pdf_fires_directly_no_confirmation_gate_on_report_page(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
     text = page.text
-    # Unconfirmed submit stops the later-registered PDF fetch listener.
-    assert "e.stopImmediatePropagation();" in text
-    # Continue re-dispatches through the submit event (so the PDF
-    # fetch handler performs the download), exactly once.
-    assert "confirmedForm.requestSubmit();" in text
+    # No confirmation gate remains: no confirm listener, no
+    # confirmed re-dispatch, no one-shot confirmed flag.
+    assert "form[data-confirm]" not in text
+    assert "data-confirm" not in text
+    assert "ss-confirm" not in text
+    assert "confirmedForm.requestSubmit();" not in text
     assert "pending.submit()" not in text
-    # The confirmed flag is cleared on the confirmed pass, so a
-    # later export asks again.
-    assert "delete f.dataset.confirmed;" in text
-    # The confirm listener is registered before the PDF fetch listener.
-    assert text.index("form[data-confirm]") < text.index('form[action$="/pdf"]')
+    assert "delete f.dataset.confirmed;" not in text
+    # The PDF fetch listener is present (it performs the download
+    # directly on submit).
+    assert 'form[action$="/pdf"]' in text
+    # The export form itself is present and carries no gate.
+    assert f'action="/reports/{rid}/pdf"' in text
 
 
-def test_pdf_confirmation_gates_fetch_on_reports_page(auth_env):
+def test_pdf_fires_directly_no_confirmation_gate_on_reports_page(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
     text = page.text
-    assert "e.stopImmediatePropagation();" in text
-    assert "confirmedForm.requestSubmit();" in text
+    assert "form[data-confirm]" not in text
+    assert "data-confirm" not in text
+    assert "ss-confirm" not in text
+    assert "confirmedForm.requestSubmit();" not in text
     assert "pending.submit()" not in text
-    assert "delete f.dataset.confirmed;" in text
-    assert text.index("form[data-confirm]") < text.index('form[action$="/pdf"]')
+    assert "delete f.dataset.confirmed;" not in text
+    assert 'form[action$="/pdf"]' in text
+    assert f'action="/reports/{rid}/pdf"' in text
 
 
 # --- Follow-up F2: share controls update in place (contract) -----------------

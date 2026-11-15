@@ -21,6 +21,7 @@ the built tree.
 """
 import copy
 import hashlib
+import html
 import hmac
 import json
 import os
@@ -461,7 +462,12 @@ def test_quote_step_shows_checkout_then_run_after_settlement(p164b_env):
     assert "product-checkout-form" in r.text
     assert "Pay $5" in r.text
     from app import stripe_billing as sb
-    assert sb.PAY_NOW_PROMISE in r.text
+    # PREMISE CHANGED (Release #7 F4, 2026-11-14): the approved
+    # promise contains apostrophes, which Jinja HTML-escapes
+    # (&#39;) in the rendered consent page, so the raw constant
+    # no longer appears verbatim in r.text — compare after
+    # unescaping (the browser renders the approved text verbatim).
+    assert sb.PAY_NOW_PROMISE in html.unescape(r.text)
     _buy_and_settle(env, csrf, "compare", _compare_digest())
     r = _post_compare(env)
     assert r.status_code == 402, r.text[:300]

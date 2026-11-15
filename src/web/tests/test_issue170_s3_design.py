@@ -155,6 +155,14 @@ Founder desktop addendum (2026-11-10 21:57 ET, PR #179 fold-in):
       sibling) so the existing extend test has teeth for it.
 """
 
+# Release #7 F1 premise change (2026-11-14, appended): the export
+# confirmation popup (data-confirm / ss-confirm) is REMOVED from
+# reports.html — export forms fire directly, and the retention
+# submit listener fires directly on submit. The inventory, panel,
+# unlocked-row, hooks and browser-extend tests below are re-pinned
+# to that premise (two renamed); share/analysis behaviour and the
+# split-row retention update contract are unchanged.
+
 import json
 import re
 import shutil
@@ -354,9 +362,12 @@ def test_s3_normal_row_full_action_inventory():
     assert ">Export CSV</button>" in row
     assert ">Export JSON</button>" in row
     # Phase C: 3 export confirms, all the free text; no Extend
-    # confirm (the control is removed).
-    assert row.count("data-confirm") == 3
-    assert row.count(f'data-confirm="{_FREE_TEXT}"') == 3
+    # confirm (the control is removed). PREMISE CHANGED
+    # (Release #7 F1): the export confirms are REMOVED with the
+    # popup — no export form carries data-confirm; exports fire
+    # directly from the dropdown panel.
+    assert row.count("data-confirm") == 0
+    assert row.count(f'data-confirm="{_FREE_TEXT}"') == 0
     assert _LOCKED not in row
     # Rename (2026-11-09 naming ruling): the row action is the
     # deliverable's name; the bare "Analysis" label is gone, the
@@ -383,8 +394,9 @@ def test_s3_mobilefix_single_export_button_and_menu():
     aria-haspopup/aria-expanded) and exactly ONE dropdown panel,
     initially hidden and styled in the house system. The three
     export forms live INSIDE the panel, in PDF/CSV/JSON order,
-    each with its action URL, CSRF input and locked data-confirm
-    byte-identical to the direct-control era; NO per-format export
+    each with its action URL and CSRF input byte-identical to the
+    direct-control era (Release #7 F1: the data-confirm attribute
+    those forms carried is removed); NO per-format export
     form or submit appears in the actions row outside the panel.
     No "Free" tag is rendered (S3-R2). Fails on the base tree,
     where exports are three direct row forms and no toggle/panel
@@ -411,7 +423,9 @@ def test_s3_mobilefix_single_export_button_and_menu():
              panel.index(f'action="/reports/{rid}/exports/json"')]
     assert order == sorted(order), order
     assert panel.count('name="csrf_token"') == 3
-    assert panel.count(f'data-confirm="{_FREE_TEXT}"') == 3
+    # PREMISE CHANGED (Release #7 F1): no data-confirm in the panel.
+    assert panel.count("data-confirm") == 0
+    assert panel.count(f'data-confirm="{_FREE_TEXT}"') == 0
     assert _LOCKED not in panel
     for label in ("Export PDF", "Export CSV", "Export JSON"):
         assert (f'class="btn btn-ghost s3-export-item">{label}</button>'
@@ -657,19 +671,22 @@ def test_s3_g4_date_cell_two_lines():
         ".s3-date-sub{")[1].split("}")[0]
 
 
-def test_s3_unlocked_row_export_confirms_are_free_text():
-    # PREMISE CHANGED (#164 Phase C): the free confirm is the single
-    # unified text in BOTH states — a locked row (export_unlocked
-    # False) carries it too, and the per-format export-unlocked
-    # texts are retired.
+def test_s3_unlocked_row_exports_carry_no_confirm():
+    # RENAMED + PREMISE CHANGED (Release #7 F1): was
+    # test_s3_unlocked_row_export_confirms_are_free_text. The free
+    # confirm text itself is now retired with the popup — in BOTH
+    # states (unlocked and locked) no export form carries
+    # data-confirm or any confirm text; exports fire directly.
     rid = "row-unlocked"
     row = _row_for(_render([_report(id=rid, export_unlocked=True)]), rid)
-    assert row.count(f'data-confirm="{_FREE_TEXT}"') == 3
+    assert row.count("data-confirm") == 0
+    assert row.count(f'data-confirm="{_FREE_TEXT}"') == 0
     for fmt in ("pdf", "csv", "json"):
         assert _FREE[fmt] not in row, fmt
     assert _LOCKED not in row
     locked = _row_for(_render([_report(id="row-locked")]), "row-locked")
-    assert locked.count(f'data-confirm="{_FREE_TEXT}"') == 3
+    assert locked.count("data-confirm") == 0
+    assert locked.count(f'data-confirm="{_FREE_TEXT}"') == 0
     assert _LOCKED not in locked
 
 
@@ -802,9 +819,12 @@ def test_s3_retired_product_names_absent():
     assert ">Investigation Report</a>" in REPORTS
 
 
-def test_s3_hooks_and_confirm_texts_verbatim():
+def test_s3_hooks_verbatim_and_no_confirm_texts():
     """Gate: every JS hook / data attribute carried over by name,
-    with byte-identical confirm texts and per-row keys."""
+    with per-row keys verbatim. RENAMED + PREMISE CHANGED
+    (Release #7 F1): was test_s3_hooks_and_confirm_texts_verbatim —
+    the byte-identical confirm texts are REMOVED with the popup;
+    the gate now pins their absence at the same strength."""
     rid = "row-hooks"
     html = _render([_report(id=rid)])
     row = _row_for(html, rid)
@@ -818,13 +838,16 @@ def test_s3_hooks_and_confirm_texts_verbatim():
     assert f'data-confirm="{_EXTEND_CONFIRM}"' not in row
     assert "data-retention-form" not in row
     assert 'name="idempotency_key" value="retention-key"' not in row
+    assert row.count("data-confirm") == 0
     assert 'data-create-key="create-key"' in row
     assert 'data-rotate-key="rotate-key"' in row
     assert 'data-revoke-key="revoke-key"' in row
     assert 'data-formats=""' in row and 'data-unlocked=""' in row
     assert row.count('name="csrf_token"') == 3  # 3 exports only
-    # Shared modals and their hooks survive verbatim.
-    for marker in ('id="ss-confirm"', 'id="extend-modal"',
+    # Shared modals and their hooks survive verbatim — except
+    # ss-confirm, which Release #7 F1 removes from the page.
+    assert 'id="ss-confirm"' not in html
+    for marker in ('id="extend-modal"',
                    'id="analysis-modal"', 'id="share-modal"',
                    'id="share-format-choice"', 'name="share-format"',
                    "window.__productReady"):
@@ -1289,7 +1312,7 @@ async function click(el) {
 def _run_js(scenario):
     script = None
     for candidate in re.findall(r"<script>(.*?)</script>", REPORTS, re.S):
-        if "ss-confirm" in candidate and "data-retention-form" in candidate:
+        if "data-retention-form" in candidate:
             script = candidate
             break
     assert script is not None, "reports.html inline script not found"
@@ -1346,8 +1369,11 @@ def test_s3_browser_extend_updates_only_that_row():
             cost: 1, replayed: false }); } });
       };
       dispatchSubmit(rowA.form);
-      out.modalShown = byId('ss-confirm').style.display;
-      await click(byId('ss-confirm-yes'));
+      // Release #7 F1 removed the ss-confirm modal from the page:
+      // tolerate its absence (null in a real DOM; display never set
+      // in this harness) instead of dereferencing it.
+      out.modalShown = byId('ss-confirm')
+        ? (byId('ss-confirm').style.display || '') : 'absent';
       await flush();
       out.aDate = rowA.dateEl.textContent;
       out.aPill = rowA.pillEl.textContent;
@@ -1359,7 +1385,9 @@ def test_s3_browser_extend_updates_only_that_row():
       out.bStatusDisplay = rowB.statusEl.style.display;
       out.badge = byId('credit-badge').textContent;
     """)
-    assert out["modalShown"] == "flex"
+    # PREMISE CHANGED (Release #7 F1): no confirm modal gates the
+    # submit — the fetch fires directly on dispatch.
+    assert out["modalShown"] != "flex"
     assert out["aDate"] == "Expires 2027-02-09"
     assert out["aPill"] == "Expires in 97 days"
     assert out["aStatus"] == "Retention extended."

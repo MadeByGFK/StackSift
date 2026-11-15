@@ -16,6 +16,7 @@ PRESERVED controls (A2/A7): they pass on both trees by design and are
 labelled as such per test.
 """
 import copy
+import html
 import re
 import uuid
 
@@ -255,9 +256,14 @@ def _rt1_flow(env, flow):
     assert "Buy — $5" not in r.text
     assert lead_in in r.text
     assert footnote in r.text
-    assert sb.PAY_NOW_PROMISE in r.text
+    # PREMISE CHANGED (Release #7 F4, 2026-11-14): the approved
+    # promise contains apostrophes, HTML-escaped (&#39;) in the
+    # render — compare/order on the unescaped text (browsers
+    # render the approved text verbatim).
+    unescaped = html.unescape(r.text)
+    assert sb.PAY_NOW_PROMISE in unescaped
     # Promise sits ABOVE the actions (K7).
-    assert r.text.index(sb.PAY_NOW_PROMISE) < r.text.index(
+    assert unescaped.index(sb.PAY_NOW_PROMISE) < unescaped.index(
         'id="product-checkout-form"')
     # No balance line, no credit-era copy on the dollar consent.
     assert "Your balance" not in r.text

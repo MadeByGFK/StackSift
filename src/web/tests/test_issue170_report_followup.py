@@ -24,6 +24,12 @@ script) in the #136/#177 harness style; the harness El.click() is
 a no-op stub, so the base tree's card->#analysis-btn forwarding
 cannot open the modal there, while the built tree's direct wiring
 can.
+
+PREMISE CHANGED (Release #7 F1, 2026-11-14): the export
+confirmation popup (ss-confirm) is removed from report.html.
+Runtime test 5's export half is re-aimed from the confirm-gated
+flow to direct fire (each submit passes through exactly once, no
+modal, no confirmed flag); the modal/share halves are unchanged.
 """
 
 import json
@@ -356,7 +362,10 @@ def _script_with(marker):
 
 
 def _followup_scripts():
-    main_script = _script_with("ss-confirm")
+    # PREMISE CHANGED (Release #7 F1): no script in report.html
+    # mentions ss-confirm anymore (modal + wiring removed); the
+    # main actions script is found by its share-modal wiring.
+    main_script = _script_with("share-modal")
     main_script = main_script.replace("{{ share_create_key }}", "create-key")
     main_script = main_script.replace("{{ share_rotate_key }}", "rotate-key")
     main_script = main_script.replace("{{ share_revoke_key }}", "revoke-key")
@@ -477,28 +486,19 @@ def test_runtime_5_export_share_unaffected_after_modal_open_close():
       out.reopened = byId('analysis-modal').style.display || '';
       out.confirmModalBeforeExport = byId('ss-confirm').style.display || '';
       out.fetchCount = fetchCalls.length;
-      // Export confirm flow, driven through the REAL ss-confirm
-      // handlers registered on the fake form[data-confirm] form:
-      // (a) a direct submit is intercepted — modal opens with the
-      // form's data-confirm text and nothing is submitted.
+      // Export flow — PREMISE CHANGED (Release #7 F1): the
+      // ss-confirm gate is REMOVED, so a submit fires DIRECTLY:
+      // (a) the first submit passes straight through (exactly one
+      // submission) and no modal ever opens;
       fireSubmit(exportForm);
       out.exportModalAfterSubmit = byId('ss-confirm').style.display || '';
-      out.exportConfirmText = byId('ss-confirm-text').textContent || '';
       out.exportSubmittedAfterSubmit = exportForm.submittedCount;
-      // (b) Cancel closes the modal and still submits nothing.
-      await click(byId('ss-confirm-no'));
-      out.exportModalAfterNo = byId('ss-confirm').style.display || '';
-      out.exportSubmittedAfterNo = exportForm.submittedCount;
-      // (c) Submit again, then Yes: the confirmed re-submit passes
-      // through the handler exactly once, the modal does not
-      // re-open, and dataset.confirmed is consumed/cleared.
+      // (b) a second submit also fires directly — one more
+      // submission, still no modal, no confirmed flag involved.
       fireSubmit(exportForm);
       out.exportModalAfterResubmit = byId('ss-confirm').style.display || '';
-      out.exportSubmittedBeforeYes = exportForm.submittedCount;
-      await click(byId('ss-confirm-yes'));
-      out.exportSubmittedAfterYes = exportForm.submittedCount;
-      out.exportModalAfterYes = byId('ss-confirm').style.display || '';
-      out.exportConfirmedCleared = !('confirmed' in exportForm.dataset);
+      out.exportSubmittedAfterResubmit = exportForm.submittedCount;
+      out.exportConfirmedSet = ('confirmed' in exportForm.dataset);
     """)
     assert out["opened"] == "flex", out
     assert out["closed"] == "none", out
@@ -506,25 +506,17 @@ def test_runtime_5_export_share_unaffected_after_modal_open_close():
     assert out["shareOpened"] == "flex", out
     assert out["shareMsg"] == "", out
     assert out["shareClosed"] == "none", out
-    # Card CTA still works after the share cycle; the export
-    # data-confirm modal was not triggered by that cycle alone;
-    # nothing was fetched.
+    # Card CTA still works after the share cycle; no export
+    # modal was triggered by that cycle alone; nothing was fetched.
     assert out["reopened"] == "flex", out
     assert out["confirmModalBeforeExport"] != "flex", out
     assert out["fetchCount"] == 0, out
-    # (a) Export submit is gated by the real confirm handler.
-    assert out["exportModalAfterSubmit"] == "flex", out
-    assert out["exportConfirmText"] == (
-        "Export costs 2 credits and unlocks PDF, CSV and JSON "
-        "for this report."), out
-    assert out["exportSubmittedAfterSubmit"] == 0, out
-    # (b) Cancel: modal closes, no submission.
-    assert out["exportModalAfterNo"] == "none", out
-    assert out["exportSubmittedAfterNo"] == 0, out
-    # (c) Yes: exactly one real submission, modal stays closed,
-    # and the one-shot confirmed flag is cleared by the handler.
-    assert out["exportModalAfterResubmit"] == "flex", out
-    assert out["exportSubmittedBeforeYes"] == 0, out
-    assert out["exportSubmittedAfterYes"] == 1, out
-    assert out["exportModalAfterYes"] == "none", out
-    assert out["exportConfirmedCleared"] is True, out
+    # (a) Direct fire: the first export submit passes straight
+    # through — exactly one submission, no modal.
+    assert out["exportModalAfterSubmit"] != "flex", out
+    assert out["exportSubmittedAfterSubmit"] == 1, out
+    # (b) The second submit also fires directly — one more
+    # submission, still no modal, and no confirmed flag is set.
+    assert out["exportModalAfterResubmit"] != "flex", out
+    assert out["exportSubmittedAfterResubmit"] == 2, out
+    assert out["exportConfirmedSet"] is False, out

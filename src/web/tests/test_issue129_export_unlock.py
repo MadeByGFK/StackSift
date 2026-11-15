@@ -230,7 +230,10 @@ def test_my_reports_row_actions_follow_unlock(auth_env):
     assert ">Share</button>" in page.text
     assert ">Extend</button>" not in page.text
     assert "(2 credits)" not in page.text
-    assert "data-confirm" in page.text  # popup before any charge
+    # PREMISE CHANGED (Release #7 F1, 2026-11-14): the confirmation
+    # popup before any charge is REMOVED — exports fire directly.
+    assert "data-confirm" not in page.text
+    assert "ss-confirm" not in page.text
     # Phase C: the row's CSV export is free (no unlock charge), and
     # the row's PDF action is a direct free download as well.
     before = _balance(auth_env, user_id)
@@ -240,11 +243,13 @@ def test_my_reports_row_actions_follow_unlock(auth_env):
     assert _all_export_ops(auth_env, user_id) == []
     page2 = auth_env.client.get("/reports")
     # Phase C (Decision 4 / C2): the per-format "export-unlocked"
-    # confirm wording is RETIRED — every export form on the row
-    # carries the single free confirm in both states, before and
-    # after any export (the row never had a locked state to leave).
+    # confirm wording is RETIRED. PREMISE CHANGED (Release #7 F1):
+    # the single free confirm is retired with it — NO export form
+    # on the row carries data-confirm in either state, before or
+    # after any export; exports fire directly.
     assert page2.text.count(
-        'data-confirm="Exports are free for this report."') >= 3
+        'data-confirm="Exports are free for this report."') == 0
+    assert "data-confirm" not in page2.text
     assert "export-unlocked" not in page2.text
     pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
@@ -288,10 +293,13 @@ def test_report_page_two_buttons_no_microcopy_popups(auth_env):
     # Extend and share FORMS moved off the report page.
     assert f'action="/reports/{rid}/retention"' not in page.text
     assert f'action="/reports/{rid}/share"' not in page.text
-    # Confirmation popup before any charge + in-page share popup with
-    # a copyable link and an "Open in email" (mailto) action.
-    assert "data-confirm" in page.text
-    assert 'id="ss-confirm"' in page.text
+    # PREMISE CHANGED (Release #7 F1): the confirmation popup
+    # before any charge is REMOVED — no data-confirm, no
+    # ss-confirm modal; exports fire directly. The in-page share
+    # popup with a copyable link and an "Open in email" (mailto)
+    # action is unchanged.
+    assert "data-confirm" not in page.text
+    assert 'id="ss-confirm"' not in page.text
     assert 'id="share-modal"' in page.text
     assert 'id="share-link"' in page.text
     assert 'id="share-mailto"' in page.text

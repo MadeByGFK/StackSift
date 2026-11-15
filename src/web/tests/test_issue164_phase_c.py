@@ -555,7 +555,10 @@ def test_pricing_page_dollar_terms(p164c_env):
                    "Batch Analysis", "Large-File Analysis",
                    "Exports are free", "90 days",
                    "disputes@goodfolkdigital.com",
-                   "Payment is captured at checkout"):
+                   # PREMISE CHANGED (Release #7 F4 residue,
+                   # Remediation 1 Part B): the pricing blocks now
+                   # carry the approved PAY_NOW_PROMISE wording.
+                   "You pay by card at checkout"):
         assert needle in text, needle
     for banned in ("Simple credits", "Credit packs", "credits added to your balance",
                    "Credits never expire", "How many credits does",
@@ -844,7 +847,21 @@ def test_c71_failed_expired_ops_do_not_block_shared_generation(p164c_env):
     assert resp.headers["content-type"].startswith("application/pdf")
 
 
-def test_c71_completed_op_expired_artifact_no_regeneration(p164c_env):
+def test_c71_completed_op_expired_artifact_regenerates_for_owner(p164c_env):
+    """Premise changed by Release #7 F2 (founder hand-check
+    2026-11-14, SS-20261104-4651: source alive, stored PDF
+    gone/expired, dead-end 410). F2 is the later, founder-direct
+    ruling — "regenerate on missing cached PDF; the dead-end error
+    must not fire for a normal report" — and supersedes this test's
+    Phase C owner-path premise (410, no regeneration), exactly like
+    test_phase2b_reports_pdf::test_pdf_replay_validates_integrity.
+    The seeded state is identical: completed PDF operation, artifact
+    Result expired, source report still valid. Replay validation
+    still happens (the stale artifact bytes are never served); the
+    owner-path OUTCOME changed from 410 to a regenerated PDF. The
+    share path is unchanged: F2's fall-through lives in the owner
+    route only, so the share assertions below keep their original
+    premise."""
     env = p164c_env
     _, uid, csrf = _make_user(env)
     rid = _make_report(env, uid)
@@ -853,9 +870,12 @@ def test_c71_completed_op_expired_artifact_no_regeneration(p164c_env):
     with env.sessions() as db:
         source = db.get(M.Result, rid)
         assert ra.has_pdf_export_operation(db, source) is True
-    # Owner path: controlled 410, no regeneration.
+    # Owner path (F2): 200 with a regenerated PDF — never the seeded
+    # stale artifact's bytes ("AAAA" is not a PDF).
     r = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert r.status_code == 410, r.text[:300]
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers["content-type"].startswith("application/pdf")
+    assert r.content[:4] == b"%PDF"
     # Share path: identical indistinguishable 404.
     r = env.client.post(f"/reports/{rid}/share",
                         data={"csrf_token": csrf, "idempotency_key": "s-pdf2",

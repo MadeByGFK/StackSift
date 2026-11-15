@@ -63,6 +63,17 @@ success still updates the row in place, and it must NOT fetch a
 balance or touch a badge — there is none. The harness's
 /auth/balance stub remains precisely so balanceCount can prove
 the script never calls it.
+
+PREMISE CHANGED (Release #7 F1, 2026-11-14): the shared
+data-confirm handler that gated EVERY form submit (including the
+retention form's) is REMOVED along with the ss-confirm modal.
+The retention submit listener now fires DIRECTLY on submit.
+The a-e harness tests below are re-aimed at that direct-fire
+behaviour: the same end-state assertions (fetch fired once, no
+navigation, same idempotency key on retry, row updates in place,
+no balance fetch) minus the confirm step — a submit fetches
+immediately and the confirm modal never appears. Test (a) is
+renamed accordingly (its name asserted the confirmed premise).
 """
 
 import json
@@ -325,9 +336,11 @@ async function click(el) {
   });
   await flush();
 }
-async function submitAndConfirm() {
+async function submitExtend() {
+  // Release #7 F1: no confirm gate — the submit itself fires the
+  // retention fetch listener directly; flush settles the promise.
   dispatchSubmit(retForm);
-  await click(byId('ss-confirm-yes'));
+  await flush();
 }
 function snap() {
   return {
@@ -357,7 +370,7 @@ def _run_js(scenario):
     html = (_TEMPLATES / "reports.html").read_text()
     script = None
     for candidate in re.findall(r"<script>(.*?)</script>", html, re.S):
-        if "data-confirm" in candidate:
+        if "data-retention-form" in candidate:
             script = candidate
             break
     assert script is not None, "reports.html inline script not found"
@@ -373,29 +386,22 @@ def _run_js(scenario):
 
 
 @pytestmark_js
-def test_a_confirmed_extend_fetches_without_navigation_and_cancel_is_noop():
+def test_a_extend_fetches_directly_without_navigation_or_confirm_gate():
+    # RENAMED (Release #7 F1): was
+    # test_a_confirmed_extend_fetches_without_navigation_and_
+    # cancel_is_noop. The confirm gate (popup, exact wording,
+    # Cancel-is-noop step) is REMOVED — the submit fires the
+    # retention fetch directly, at the same strength: exactly one
+    # fetch carrying the form's own CSRF token + idempotency key,
+    # no native submit (no navigation to the raw JSON response),
+    # and the confirm modal never appears.
     out = _run_js("""
-      dispatchSubmit(retForm);
-      out.afterFirst = snap();
-      await click(byId('ss-confirm-no'));
-      out.afterCancel = snap();
-      await submitAndConfirm();
-      out.afterYes = snap();
+      await submitExtend();
+      out.afterSubmit = snap();
     """)
-    # Initial click: popup only, exact wording, nothing sent.
-    assert out["afterFirst"]["confirmDisplay"] == "flex", out
-    assert out["afterFirst"]["confirmText"] == (
-        "Extend this report's retention by 90 days for 1 credit?")
-    assert out["afterFirst"]["fetchCount"] == 0
-    assert out["afterFirst"]["nativeSubmits"] == 0
-    # Cancel: no fetch, no native submit, popup closed.
-    assert out["afterCancel"]["fetchCount"] == 0, out
-    assert out["afterCancel"]["nativeSubmits"] == 0, out
-    assert out["afterCancel"]["confirmDisplay"] == "none", out
-    # Yes: exactly one fetch to the retention endpoint carrying the
-    # form's own CSRF token + idempotency key, and NO native submit
-    # (no navigation to the raw JSON response).
-    after = out["afterYes"]
+    after = out["afterSubmit"]
+    assert after["confirmDisplay"] != "flex", after
+    assert after["confirmText"] == "", after
     assert after["fetchCount"] == 1, after
     assert after["nativeSubmits"] == 0, after
     call = after["calls"][0]
@@ -414,7 +420,7 @@ def test_b_success_updates_row_expiry_in_place_without_balance_fetch():
     # The harness badge element is a canary: it starts at 3 credits
     # and must remain exactly that, untouched.
     out = _run_js("""
-      await submitAndConfirm();
+      await submitExtend();
       out.after = snap();
     """)
     after = out["after"]
@@ -436,10 +442,10 @@ def test_b_success_updates_row_expiry_in_place_without_balance_fetch():
 def test_c_failure_shows_in_page_error_with_no_navigation_or_change():
     out = _run_js("""
       fetchMode = 'error';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterError = snap();
       fetchMode = 'network';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterNetwork = snap();
     """)
     for snap_out in (out["afterError"], out["afterNetwork"]):
@@ -465,9 +471,9 @@ def test_d_retry_sends_same_idempotency_key_and_replays_without_recharge():
     # the recorded expiry.
     out = _run_js("""
       fetchMode = 'ok-replay-second';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterFirst = snap();
-      await submitAndConfirm();
+      await submitExtend();
       out.afterRetry = snap();
     """)
     retry = out["afterRetry"]
@@ -496,10 +502,10 @@ def test_e_lost_response_retry_replayed_updates_row_without_balance_refresh():
     # canary untouched; the row update is the whole contract.
     out = _run_js("""
       fetchMode = 'network';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterNetwork = snap();
       fetchMode = 'replayed';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterRetry = snap();
     """)
     lost = out["afterNetwork"]

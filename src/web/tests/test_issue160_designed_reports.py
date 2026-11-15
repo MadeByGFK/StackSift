@@ -558,7 +558,9 @@ def test_8_actions_menu_preserved_verbatim(auth_env):
     assert 'id="actions-btn"' not in html
     assert 'id="actions-menu"' not in html
     assert 'data-s1-actions' in html
-    assert 'id="ss-confirm"' in html
+    # PREMISE CHANGED (Release #7 F1, 2026-11-14): the ss-confirm
+    # modal is REMOVED from the page.
+    assert 'id="ss-confirm"' not in html
     for action in (f"/reports/{analysis_id}/pdf",
                    f"/reports/{analysis_id}/exports/csv",
                    f"/reports/{analysis_id}/exports/json"):
@@ -567,8 +569,12 @@ def test_8_actions_menu_preserved_verbatim(auth_env):
     # free for ALL reports, so every export form carries the single
     # free confirm copy — the export-unlocked wording (which implied
     # a paid unlock state) and the 2-credit wording are both gone.
+    # PREMISE CHANGED (Release #7 F1): the free confirm copy is
+    # retired with the popup — NO export form carries data-confirm;
+    # exports fire directly.
+    assert html.count("data-confirm") == 0
     assert html.count('data-confirm="Exports are free for this '
-                      'report."') == 3
+                      'report."') == 0
     assert ('data-confirm="This report is export-unlocked — the PDF '
             'download is free."') not in html
     assert ('data-confirm="Export costs 2 credits and unlocks PDF, CSV '
