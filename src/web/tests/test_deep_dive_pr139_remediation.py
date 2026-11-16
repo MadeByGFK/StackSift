@@ -134,13 +134,19 @@ def test_f1_control_pool_exhausted_no_connections_keeps_pool_explanation():
 # --- F2 + F4: My Reports rows / derived-result availability ------------------
 
 def _generate(auth_env, rid, csrf):
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): generation
+    # redeems a seeded $9 entitlement (no credit charge).
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     return auth_env.client.post(
         f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
 
 
 def _card_for(page_text, report_id):
-    cards = page_text.split('<li class="card">')
-    view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+    cards = page_text.split('<tr class="card s3-row">')
+    # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1): the
+    # row's own link is labelled "Open", not "View".
+    view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
     matches = [c for c in cards if view_link in c]
     assert len(matches) == 1, report_id
     return matches[0]
@@ -205,7 +211,9 @@ def test_f4_expired_derived_report_is_not_returned(auth_env):
     assert page.status_code == 200
     source_card = _card_for(page.text, str(rid))
     assert "analysis-open" in source_card
-    assert f'href="/reports/{derived_id}" class="btn btn-ghost">Analysis' \
+    # PREMISE CHANGED (2026-11-10 naming ruling): the link label
+    # is "Investigation Report", not the bare "Analysis".
+    assert f'href="/reports/{derived_id}" class="btn btn-ghost">Investigation Report' \
         not in source_card
 
 
@@ -377,7 +385,9 @@ _SETUP_JS = (
     "analysisBtns.push(btnB);\n"
 )
 
-_COST_MSG = "Analysis Report costs 3 credits"
+# PREMISE CHANGED (#164): the My Reports Analysis modal copy is the
+# dollar copy now (the JS sets it when a row's popup opens).
+_COST_MSG = "Investigation Report costs $9"
 
 
 def _run_analysis_scenario(scenario):
@@ -461,7 +471,7 @@ def test_f3_control_response_without_switch_displays_normally():
       out.afterResolve = snapA();
     """)
     after = out["afterResolve"]
-    assert after["msg"] == "Analysis Report ready.", after
+    assert after["msg"] == "Investigation Report ready.", after
     assert after["linkRow"] == "block", after
     assert "ANALYSIS-A" in after["viewHref"], after
     assert after["confirmDisplay"] == "none", after

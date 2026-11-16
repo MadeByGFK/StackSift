@@ -94,6 +94,21 @@ class CheckoutError(Exception):
     """Checkout cannot proceed (misconfiguration or Stripe failure)."""
 
 
+class CheckoutIdempotencyError(CheckoutError):
+    """Stripe rejected the request with ``error.type ==
+    "idempotency_error"`` (issue #164 idempotency-supersede fix).
+
+    The idempotency key bound to a purchase row was first used with a
+    different parameter set, so EVERY retry under that key fails the
+    same way until the key expires (~24h). This is the ONE checkout
+    failure that is safe to recover from by superseding the local
+    purchase row (a new row mints a new key); all other failures keep
+    the generic CheckoutError behaviour. The user-facing wording on
+    final failure stays the generic 503 — this subclass is an
+    internal signal only, and it never carries the raw Stripe body.
+    """
+
+
 class CheckoutNotConfigured(CheckoutError):
     """Stripe is not configured yet — fail closed, no partial checkout."""
 
@@ -136,8 +151,17 @@ def packs_for_display() -> list[dict]:
 
 
 def checkout_configured() -> bool:
-    """True when at least one pack has a price ID configured."""
-    return any(p["ready"] for p in packs_for_display())
+    """True when at least one pack OR product has a price ID configured.
+
+    Remediation4: reconciliation's readiness gate uses this — a
+    product-only deployment (pack prices unset, the Investigation
+    Report price set) must be reconciled, not skipped, or product
+    money would never be checked. ``product_price_id`` is defined
+    below in this module; resolution happens at call time.
+    """
+    if any(p["ready"] for p in packs_for_display()):
+        return True
+    return any(product_price_id(sku) is not None for sku in PRODUCT_SKUS)
 
 
 def _secret_key() -> str:
@@ -200,6 +224,24 @@ def _stripe_error_detail(resp) -> str:
         message = _EMAIL_RE.sub("[redacted-email]", str(message))
         parts.append(f"message={message}")
     return " ".join(parts) or "empty-error"
+
+
+def _stripe_error_type(resp) -> str | None:
+    """The structured ``error.type`` of a Stripe error body, or None.
+
+    Parses via the same structured-error shape as
+    ``_stripe_error_detail``; the raw body is never returned or
+    logged through this helper either.
+    """
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    err = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(err, dict):
+        return None
+    value = err.get("type")
+    return value if isinstance(value, str) else None
 
 
 def verify_stripe_signature(
@@ -281,6 +323,7 @@ def create_checkout_session(
         "success_url": success_url,
         "cancel_url": cancel_url,
         "client_reference_id": str(user_id),
+        "metadata[kind]": "pack",
         "metadata[purchase_id]": str(purchase_id),
         "metadata[user_id]": str(user_id),
         "metadata[pack_id]": pack_id,
@@ -289,6 +332,7 @@ def create_checkout_session(
     }
     # Issue #72: join keys on the payment intent so refund/dispute charges
     # (which carry PI metadata, not session metadata) attribute to a pack.
+    data["payment_intent_data[metadata][kind]"] = "pack"
     data["payment_intent_data[metadata][purchase_id]"] = str(purchase_id)
     data["payment_intent_data[metadata][pack_id]"] = pack_id
     data["payment_intent_data[metadata][pricing_version]"] = str(
@@ -311,6 +355,347 @@ def create_checkout_session(
         # stays generic; the detail is for the server logs only.
         detail = _stripe_error_detail(resp)
         logger.error("Stripe checkout returned HTTP %s (%s)", resp.status_code, detail)
+        raise CheckoutError("Stripe request failed")
+    body = resp.json()
+    url = body.get("url")
+    session_id = body.get("id")
+    if not url or not session_id:
+        raise CheckoutError("Stripe returned an incomplete checkout session")
+    return url, session_id
+
+
+# ---------------------------------------------------------------------------
+# Issue #164 Phase A: per-product dollar catalog (parallel to PACKS).
+# Amount informational; the Stripe Price is authoritative and settlement
+# asserts the completed amount equals the checkout-time snapshot (A4).
+# Currency is pinned to USD for Phase A products.
+# ---------------------------------------------------------------------------
+
+PRODUCT_SKUS: dict[str, dict] = {
+    "investigation_report": {
+        "name": "Investigation Report",
+        "amount_cents": 900,
+        "currency": "usd",
+        "price_label": "$9",
+        "price_env": "STRIPE_PRICE_INVESTIGATION_REPORT",
+    },
+    # Issue #164 Phase B: upload-first SKUs, flat $5 per run, bound to
+    # a content digest (no retained source Result). An unset price env
+    # fails closed — the feature is unavailable, never re-priced in
+    # credits (Phase B Decision 4).
+    "compare": {
+        "name": "Compare",
+        "amount_cents": 500,
+        "currency": "usd",
+        "price_label": "$5",
+        "price_env": "STRIPE_PRICE_COMPARE",
+    },
+    "batch": {
+        "name": "Batch Analysis",
+        "amount_cents": 500,
+        "currency": "usd",
+        "price_label": "$5",
+        "price_env": "STRIPE_PRICE_BATCH",
+    },
+    "large_file_analysis": {
+        "name": "Large-File Analysis",
+        "amount_cents": 500,
+        "currency": "usd",
+        "price_label": "$5",
+        "price_env": "STRIPE_PRICE_LARGE_FILE",
+    },
+}
+
+# Phase B digest-bound SKUs (binding is a content digest, not a
+# source Result).
+DIGEST_SKUS = frozenset({"compare", "batch", "large_file_analysis"})
+
+# Pay-now promise (F2), pinned verbatim for every dollar-path surface.
+PAY_NOW_PROMISE = (
+    "You pay by card at checkout. If we can't generate your report, your "
+    "purchase isn't used up — you can try again. If a purchase can never "
+    "be used, we'll refund it — email disputes@goodfolkdigital.com."
+)
+
+
+def get_product_sku(sku: str) -> dict | None:
+    return PRODUCT_SKUS.get(sku)
+
+
+def product_price_id(sku: str) -> str | None:
+    entry = PRODUCT_SKUS.get(sku)
+    if entry is None:
+        return None
+    return os.environ.get(entry["price_env"]) or None
+
+
+def products_for_display() -> list[dict]:
+    out = []
+    for sku, entry in PRODUCT_SKUS.items():
+        out.append({
+            "sku": sku, "name": entry["name"],
+            "price_label": entry["price_label"],
+            "amount_cents": entry["amount_cents"],
+            "currency": entry["currency"],
+            "ready": product_price_id(sku) is not None,
+        })
+    return out
+
+
+def fetch_session_line_item_price_id(session_id: str) -> str | None:
+    """Retrieve a Checkout Session's first line-item Price ID from the
+    Stripe API (P1-1 remediation).
+
+    A real ``checkout.session.completed`` webhook event carries NEITHER
+    ``line_items`` nor a price id on the session object — Stripe's own
+    fulfilment guidance is to retrieve them from the API. Settlement
+    therefore calls this (GET /checkout/sessions/{id}/line_items)
+    instead of reading the event payload. Returns None when the session
+    has no line items; raises CheckoutError on transport/API failure
+    so the webhook can answer non-2xx and let Stripe redeliver.
+    """
+    if not session_id:
+        raise CheckoutError("missing session id for line-item retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/checkout/sessions/{session_id}/line_items",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe line-items request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe line-items request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe line-items returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe line-items request failed")
+    body = resp.json()
+    data = body.get("data") or []
+    if not data or not isinstance(data[0], dict):
+        return None
+    price = data[0].get("price")
+    if isinstance(price, dict):
+        return price.get("id")
+    if isinstance(price, str):
+        return price
+    return None
+
+
+def fetch_payment_intent_metadata(payment_intent_id: str) -> dict:
+    """Retrieve a PaymentIntent's metadata from the Stripe API.
+
+    Remediation2 P1-A: a ``charge.refunded`` / dispute webhook that
+    arrives BEFORE ``checkout.session.completed`` settlement cannot
+    join locally — real Charge objects carry no purchase metadata and
+    the purchase row's snapshotted PI id is only written at
+    settlement. The PaymentIntent DOES carry the purchase metadata
+    (set at session creation via ``payment_intent_data[metadata]``),
+    so the webhook resolves the pending purchase through this
+    retrieval. Raises CheckoutError on transport/API failure so the
+    caller can answer non-2xx and let Stripe redeliver.
+    """
+    if not payment_intent_id:
+        raise CheckoutError("missing payment intent id for retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/payment_intents/{payment_intent_id}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe payment-intent request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe payment-intent request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe payment-intent returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe payment-intent request failed")
+    body = resp.json()
+    meta = body.get("metadata") if isinstance(body, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def fetch_charge_created_at(payment_intent_id: str):
+    """Retrieve the ``created`` timestamp of a PaymentIntent's charge.
+
+    Release #7 P2-1: reconciliation keys Stripe charges by the
+    CHARGE's own ``created`` (``fetch_day_charges``), so settlement
+    must anchor a purchase to the charge — not to the Checkout
+    Session, whose ``created`` can fall on the previous UTC day
+    (sessions remain payable for up to 24h). Resolves the charge
+    through the PaymentIntent's ``latest_charge``. Returns the
+    charge's ``created`` (epoch seconds, int), or None when the
+    PaymentIntent carries no charge to resolve. Raises CheckoutError
+    on transport/API failure; the caller decides what an unavailable
+    charge means (the settlement webhook falls back — see main.py).
+    """
+    if not payment_intent_id:
+        raise CheckoutError("missing payment intent id for charge retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/payment_intents/{payment_intent_id}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe payment-intent request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe payment-intent request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe payment-intent returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe payment-intent request failed")
+    body = resp.json()
+    if not isinstance(body, dict):
+        return None
+    charge = body.get("latest_charge")
+    if isinstance(charge, dict):
+        created = charge.get("created")
+        return created if isinstance(created, int) else None
+    if not isinstance(charge, str) or not charge:
+        return None
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/charges/{charge}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe charge request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe charge request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe charge returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe charge request failed")
+    body = resp.json()
+    if not isinstance(body, dict):
+        return None
+    created = body.get("created")
+    return created if isinstance(created, int) else None
+
+
+def fetch_checkout_session(session_id: str) -> dict:
+    """Retrieve a Checkout Session object from the Stripe API.
+
+    Remediation2 P1-B: local row age is NOT proof a session is dead
+    (sessions live 24h from SESSION creation, which can postdate the
+    purchase row). Callers confirm ``status`` (open|complete|expired)
+    here before retiring a pending purchase. Raises CheckoutError on
+    transport/API failure — an unconfirmed session must be treated
+    as still live, never retired on a guess.
+    """
+    if not session_id:
+        raise CheckoutError("missing session id for retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/checkout/sessions/{session_id}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe session request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe session request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe session returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe session request failed")
+    body = resp.json()
+    return body if isinstance(body, dict) else {}
+
+
+def retrieve_checkout_session(session_id: str) -> dict:
+    """Retrieve a Checkout Session (issue #164 supersede fix, §2a).
+
+    The name the supersede spec uses for the existing retrieval —
+    a thin alias of ``fetch_checkout_session`` so both checkout
+    routes and the billing primitives share ONE implementation
+    (same fail-closed CheckoutError on transport/API failure: an
+    unconfirmed session is never evidence for superseding).
+    """
+    return fetch_checkout_session(session_id)
+
+
+def create_product_checkout_session(
+    *,
+    user_id,
+    sku: str,
+    purchase_id,
+    success_url: str,
+    cancel_url: str,
+    content_digest: str | None = None,
+) -> tuple[str, str]:
+    """Create a Stripe Checkout Session for a product purchase (A7).
+
+    Idempotency key is bound to the ONE local purchase row
+    (``checkout:product:{purchase_id}``), never to a minute, so a retry
+    can never bind to a different purchase/source. Metadata carries
+    ``kind=product`` (A3) on both the session and the PaymentIntent.
+    F4: no ``payment_method_types`` param is sent — Stripe rejects it
+    on session creation; payment methods are governed by the Stripe
+    account's payment-method settings (Dashboard).
+    """
+    entry = PRODUCT_SKUS.get(sku)
+    if entry is None:
+        raise CheckoutError(f"unknown product sku: {sku}")
+    price_id = product_price_id(sku)
+    if not price_id:
+        raise CheckoutNotConfigured(f"price not configured for product {sku}")
+    key = _secret_key()
+    idempotency_key = f"checkout:product:{purchase_id}"
+    data = {
+        "mode": "payment",
+        "line_items[0][price]": price_id,
+        "line_items[0][quantity]": "1",
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "client_reference_id": str(user_id),
+        "metadata[kind]": "product",
+        "metadata[purchase_id]": str(purchase_id),
+        "metadata[user_id]": str(user_id),
+        "metadata[sku]": sku,
+        "metadata[pricing_version]": str(credits_helpers.PRICING_VERSION),
+        "payment_intent_data[metadata][kind]": "product",
+        "payment_intent_data[metadata][purchase_id]": str(purchase_id),
+        "payment_intent_data[metadata][user_id]": str(user_id),
+        "payment_intent_data[metadata][sku]": sku,
+        "payment_intent_data[metadata][pricing_version]": str(
+            credits_helpers.PRICING_VERSION),
+    }
+    if content_digest is not None:
+        # Phase B: the digest binding travels in BOTH metadata sets so
+        # settlement can assert the session was created for exactly
+        # the content the buyer paid to run (B-10 binding agreement).
+        data["metadata[content_digest]"] = content_digest
+        data["payment_intent_data[metadata][content_digest]"] = content_digest
+    try:
+        resp = httpx.post(
+            f"{STRIPE_API_BASE}/checkout/sessions",
+            data=data,
+            auth=(key, ""),
+            headers={"Idempotency-Key": idempotency_key},
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe product checkout request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe product checkout returned HTTP %s (%s)", resp.status_code, detail)
+        if _stripe_error_type(resp) == "idempotency_error":
+            # Issue #164 supersede fix (§1): this key can NEVER
+            # succeed with the current parameter set — surface it as
+            # the distinct subclass so the checkout routes can run
+            # the (single, safety-gated) supersede path. The detail
+            # logged above is the structured summary only; the raw
+            # body is never logged or returned.
+            raise CheckoutIdempotencyError("Stripe request failed")
         raise CheckoutError("Stripe request failed")
     body = resp.json()
     url = body.get("url")

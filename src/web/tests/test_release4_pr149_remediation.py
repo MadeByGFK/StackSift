@@ -112,7 +112,15 @@ def test_f2_control_timeout_exceeded_keeps_timeout_explanation():
 
 # --- F1: fresh-response Analysis action state --------------------------------
 
-_COST_MSG = "Analysis Report costs 3 credits"
+# PREMISE CHANGED (#164 Phase A): the fresh-response modal carries
+# the ruled dollar copy, and it renders on the price-configured
+# surface (the fail-closed "Coming soon" state otherwise) — so this
+# module pins the product Price env for its rendering tests.
+import os as _os
+_os.environ.setdefault("STRIPE_PRICE_INVESTIGATION_REPORT",
+                       "price_test_investigation")
+
+_COST_MSG = "Investigation Report costs $9"
 
 
 def _fresh_upload(env, content, filename="test.log"):
@@ -157,4 +165,8 @@ def test_f1_fresh_response_shows_reason_for_ineligible_report(
     resp = _fresh_upload(env, SAMPLE_LOG.encode())
     assert resp.status_code == 200, resp.text[:300]
     assert "SENTINEL-INELIGIBLE-REASON" in resp.text
-    assert _COST_MSG not in resp.text
+    # #164: the negative assertion targets the rendered modal copy
+    # (the full dollar terms sentence) — a short JS error-fallback
+    # literal elsewhere in the page is not the modal copy.
+    assert "Investigation Report costs $9, paid by card at checkout" \
+        not in resp.text

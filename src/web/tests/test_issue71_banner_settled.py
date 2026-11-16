@@ -6,6 +6,15 @@ script. When it is still 'pending' the "on their way" banner and the
 polling script are both present. Cancelled returns are unchanged.
 
 Real route (GET /credits), real TestClient, real seeded SQLite DB.
+
+Issue #164 Phase C re-base (C6c): the dollar pricing page renders NO
+return banner from a query string or a latest-purchase lookup, in any
+settlement state — and there is no balance strip and no
+/credits/balance polling script on the page at all. The seeded
+CreditPurchase fixtures below are unchanged (credit-era rows are
+preserved data, Decision 7); each test keeps its subject (completed
+vs pending vs cancelled) and asserts the retirement: no banner, no
+polling, no balance strip, and the seeded row itself untouched.
 """
 import uuid
 from types import SimpleNamespace
@@ -114,65 +123,86 @@ def _seed_purchase(banner_env, user_id, status, pack_id="growth"):
     with banner_env.sessions() as db:
         db.add(CreditPurchase(**fields))
         db.commit()
+    return str(fields["id"])
 
 
-def _banner(html):
-    """Only the first checkout banner element.
+def _assert_seed_untouched(banner_env, purchase_id, status):
+    """Decision 7: rendering the pricing page never rewrites history."""
+    from app.models import CreditPurchase
 
-    The polling script also contains the text 'credits added to your
-    balance', so page-wide text assertions on it would be wrong.
-    """
-    start = html.index('class="checkout-banner')
-    end = html.index("</div>", start)
-    return html[start:end]
+    with banner_env.sessions() as db:
+        row = db.get(CreditPurchase, uuid.UUID(purchase_id))
+        assert row is not None and row.status == status
 
 
 def test_completed_purchase_renders_credits_added_banner(banner_env):
+    # Phase C premise: a completed pack purchase no longer produces a
+    # "credits added" banner on the success return — no banner element
+    # at all, just the dollar pricing page; the seeded row is untouched.
     user_id = _login(banner_env)
-    _seed_purchase(banner_env, user_id, "completed", pack_id="growth")
+    pid = _seed_purchase(banner_env, user_id, "completed", pack_id="growth")
     page = banner_env.client.get("/credits?checkout=success")
     assert page.status_code == 200
-    banner = _banner(page.text)
-    assert f"Payment complete {EM_DASH} 25 credits added to your balance." in banner
-    assert "on their way" not in banner
+    assert "checkout-banner" not in page.text
+    assert "credits added to your balance" not in page.text
     assert "on their way" not in page.text
+    assert 'id="offers"' in page.text
+    _assert_seed_untouched(banner_env, pid, "completed")
 
 
 def test_pending_purchase_renders_on_their_way_banner(banner_env):
+    # Phase C premise: a still-pending pack purchase produces no
+    # "on their way" banner either — settlement state is not rendered
+    # on the pricing page in any form.
     user_id = _login(banner_env)
-    _seed_purchase(banner_env, user_id, "pending", pack_id="growth")
+    pid = _seed_purchase(banner_env, user_id, "pending", pack_id="growth")
     page = banner_env.client.get("/credits?checkout=success")
     assert page.status_code == 200
-    banner = _banner(page.text)
-    assert "on their way" in banner
-    assert "credits added to your balance" not in banner
+    assert "checkout-banner" not in page.text
+    assert "on their way" not in page.text
+    assert "credits added to your balance" not in page.text
+    assert 'id="offers"' in page.text
+    _assert_seed_untouched(banner_env, pid, "pending")
 
 
 def test_polling_script_absent_when_completed(banner_env):
+    # Phase C premise: with a completed purchase there is no polling
+    # script AND no balance strip for it to update — both were removed
+    # with the pack grid (the old test asserted the strip remained).
     user_id = _login(banner_env)
     _seed_purchase(banner_env, user_id, "completed", pack_id="starter")
     page = banner_env.client.get("/credits?checkout=success")
     assert page.status_code == 200
     assert POLL_MARKER not in page.text
-    # The balance strip itself is still rendered.
-    assert 'id="credit-balance"' in page.text
+    assert "/credits/balance" not in page.text
+    assert 'id="credit-balance"' not in page.text
 
 
-def test_polling_script_present_when_pending(banner_env):
+def test_polling_script_absent_when_pending(banner_env):
+    # Phase C premise (was: polling present while pending): a pending
+    # purchase no longer ships the polling script — nothing on the
+    # pricing page polls the retired balance endpoint.
     user_id = _login(banner_env)
     _seed_purchase(banner_env, user_id, "pending", pack_id="starter")
     page = banner_env.client.get("/credits?checkout=success")
     assert page.status_code == 200
-    assert POLL_MARKER in page.text
+    assert POLL_MARKER not in page.text
+    assert "/credits/balance" not in page.text
+    assert 'id="credit-balance"' not in page.text
 
 
 def test_cancelled_return_unchanged(banner_env):
+    # Phase C premise: the cancelled return is still banner-free of
+    # success copy — and now carries no banner at all: no "no charge"
+    # banner, no polling, only the dollar pricing page.
     user_id = _login(banner_env)
-    _seed_purchase(banner_env, user_id, "completed", pack_id="growth")
+    pid = _seed_purchase(banner_env, user_id, "completed", pack_id="growth")
     page = banner_env.client.get("/credits?checkout=cancelled")
     assert page.status_code == 200
-    banner = _banner(page.text)
-    assert "no charge was made and no credits were added" in banner
+    assert "checkout-banner" not in page.text
+    assert "no charge was made and no credits were added" not in page.text
     assert "on their way" not in page.text
     assert "credits added to your balance" not in page.text
     assert POLL_MARKER not in page.text
+    assert 'id="offers"' in page.text
+    _assert_seed_untouched(banner_env, pid, "completed")

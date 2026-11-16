@@ -50,10 +50,15 @@ def user(db):
 def test_persistence_path_store_and_retrieve(db, user):
     """Paid analysis result: stored, retrievable, integrity-verified.
 
-    Exercises: grant_signup_reward → create_consent → admit_paid_operation →
+    Exercises: seeded legacy balance → create_consent → admit_paid_operation →
     store_result → DB query → integrity digest verification.
+
+    PREMISE CHANGED (#164 Phase C): grant_signup_reward is disabled
+    (new accounts get no grant), so the legacy settlement subject is
+    preserved by seeding the 10-credit balance directly via
+    grant_credits — never via the signup grant.
     """
-    C.grant_signup_reward(db, user, f"{user.hex[:8]}@test.com")
+    C.grant_credits(db, user, "purchase", f"seed-{uuid.uuid4().hex}", 10)
     db.commit()
 
     # 1. Create consent for a paid analysis (1 credit)
@@ -108,8 +113,13 @@ def test_persistence_path_store_and_retrieve(db, user):
 
 
 def test_persistence_path_complete_operation_settles(db, user):
-    """After store_result, complete_operation settles the credit charge."""
-    C.grant_signup_reward(db, user, f"{user.hex[:8]}@test.com")
+    """After store_result, complete_operation settles the credit charge.
+
+    PREMISE CHANGED (#164 Phase C): as above, the 10-credit balance
+    is seeded directly via grant_credits; the signup grant is
+    disabled and must not be the source of a settlement balance.
+    """
+    C.grant_credits(db, user, "purchase", f"seed-{uuid.uuid4().hex}", 10)
     db.commit()
     before = C.get_balance_summary(db, user)["balance"]
     assert before == 10

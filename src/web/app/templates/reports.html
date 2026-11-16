@@ -67,12 +67,11 @@
   .btn-primary:hover{background:#e0bd4a}
   .btn-primary .cost{font-weight:500;opacity:.75}
 
-  /* Issue #129: Export dropdown + popup modals */
-  .menu-wrap{position:relative;display:inline-block}
-  .menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:150px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-  .menu form{margin:0}
-  .menu-item{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font:inherit;font-size:14px;font-weight:600;padding:8px 10px;border-radius:6px;cursor:pointer}
-  .menu-item:hover{background:var(--panel-hover)}
+  /* Issue #129: popup modals (the Export dropdown presentation on
+     My Reports is governed by the 2026-11-10 founder mobile-fix
+     ruling — one Export button with a styled dropdown in the
+     actions cell below, superseding PR #177's direct controls
+     for this surface only) */
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50}
   .modal-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:420px;width:90%}
   .modal-card p{margin:0 0 14px}
@@ -115,6 +114,88 @@
     .nav .nav-links form{display:block !important}
     .nav .nav-links .nav-logout{width:100%;text-align:left}
   }
+  /* Issue #170 S3 (My Reports surface design alignment) — every rule
+     below is scoped to the My Reports surface via the .s3- prefix:
+     reports.html carries its own <style> block (it does not link the
+     shared style.css), so the S3 block lives here, in the page's own
+     tokens. No existing rule above is modified. The table row keeps
+     the .card class because the retention JS scopes its per-row
+     updates with form.closest('.card') (A4 ancestor contract). */
+  .s3-eyebrow{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--accent);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:2px;margin:0 0 10px}
+  .s3-table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel)}
+  .s3-table{width:100%;border-collapse:collapse;font-size:14px}
+  .s3-table th{text-align:left;color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;padding:12px 16px;border-bottom:1px solid var(--border);white-space:nowrap}
+  .s3-table td{padding:16px;border-bottom:1px solid var(--border);vertical-align:middle}
+  .s3-table tbody tr.card{display:table-row;padding:0;background:transparent;border:none;border-radius:0}
+  .s3-table tbody tr:last-child td{border-bottom:none}
+  .s3-report-main{display:flex;align-items:center;gap:14px;min-width:0}
+  .s3-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap;border:1px solid var(--border);color:var(--muted)}
+  .s3-pill::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--muted)}
+  .s3-pill.ok{color:var(--ok)}
+  .s3-pill.ok::before{background:var(--ok)}
+  .s3-pill.warnings{color:var(--warn)}
+  .s3-pill.warnings::before{background:var(--warn)}
+  .s3-pill.errors{color:var(--err)}
+  .s3-pill.errors::before{background:var(--err)}
+  .s3-state-cell .expiry{margin-left:8px}
+  .s3-status-word{font-weight:700}
+  .s3-share-state{display:block;margin-top:8px;color:var(--muted);font-size:13px}
+  .s3-share-state .btn{height:30px;padding:0 10px;font-size:13px;margin-left:6px}
+  .s3-date-cell{white-space:nowrap}
+  .s3-date-line{display:block;white-space:nowrap}
+  .s3-date-sub{display:block;color:var(--muted);font-size:13px;margin-top:2px;white-space:nowrap}
+  /* Row-under actions (founder ruling 2026-11-10 21:57 ET, all
+     widths): the actions live in their own full-width row under
+     the main row — the main row's cells carry no bottom border,
+     the actions row's single spanning cell carries the separator
+     between report groups. */
+  .s3-table tbody tr.s3-row td{border-bottom:none}
+  .s3-table tbody tr.s3-actions-tr td{padding:2px 16px 16px;border-bottom:1px solid var(--border)}
+  .s3-table tbody tr.s3-actions-tr:last-child td{border-bottom:none}
+  .s3-report-sub{color:var(--muted);font-size:13px;margin-top:2px;font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
+  .s3-actions-cell .actions{flex-wrap:wrap}
+  .s3-empty{border-top:3px solid var(--accent)}
+  .s3-entry-card{display:block;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:20px;text-decoration:none;color:var(--text);margin:28px 0 0}
+  .s3-entry-card:hover{border-color:var(--accent)}
+  .s3-entry-title{display:block;font-size:16px;font-weight:700;margin:0 0 6px}
+  .s3-entry-sub{display:block;color:var(--muted);font-size:14px;line-height:1.5}
+  .s3-entry-link{display:block;color:var(--accent);font-weight:600;font-size:14px;margin-top:12px}
+  /* S3 mobile fix (founder ruling 2026-11-10): Export is ONE button
+     with a styled dropdown at ALL widths on My Reports only (the
+     S1 Report page keeps its direct export controls). The menu is
+     positioned against its .s3-export wrapper; on mobile the table
+     wrap stops clipping (overflow visible in the media block below)
+     and rows reflow to the ruled three-line stacked layout. */
+  .s3-export{position:relative;display:inline-block}
+  .s3-export-btn{white-space:nowrap}
+  .s3-caret{font-size:11px;color:var(--accent)}
+  .s3-export-menu{position:absolute;left:0;right:auto;top:calc(100% + 6px);z-index:40;min-width:196px;max-width:calc(100vw - 24px);background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:6px;box-shadow:0 14px 30px rgba(0,0,0,.38);display:flex;flex-direction:column;gap:4px}
+  .s3-export-menu[hidden]{display:none}
+  .s3-export-menu .s3-export-form{display:block;margin:0}
+  .s3-export-menu .s3-export-item{width:100%;justify-content:flex-start}
+  @media (max-width:640px){
+    .s3-table th,.s3-table td{padding:12px}
+    /* Three-line stacked rows: the wrap no longer clips (no
+       overflow-x ancestor at mobile), the thead is hidden, and the
+       row becomes a grid — line 1 Report+Severity, line 2
+       State+Date, line 3 the compact actions row. */
+    .s3-table-wrap{overflow:visible;border:none;background:transparent;border-radius:0}
+    .s3-table{display:block;width:100%}
+    .s3-table thead{display:none}
+    .s3-table tbody{display:block}
+    .s3-table tbody tr.card.s3-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"report severity" "state date";gap:10px 12px;padding:16px;background:var(--panel);border:1px solid var(--border);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0;margin-bottom:0;overflow:visible}
+    .s3-table tbody tr.card.s3-actions-tr{display:block;background:var(--panel);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);margin-bottom:12px;padding:0 16px 16px;overflow:visible}
+    .s3-table td.s3-report-cell{grid-area:report;padding:0;border-bottom:none;min-width:0}
+    .s3-table td.s3-severity-cell{grid-area:severity;padding:0;border-bottom:none;align-self:start;white-space:nowrap}
+    .s3-table td.s3-state-cell{grid-area:state;padding:0;border-bottom:none;min-width:0}
+    .s3-table td.s3-date-cell{grid-area:date;padding:0;border-bottom:none;text-align:right;white-space:nowrap}
+    .s3-table td.s3-actions-cell{display:block;padding:0;border-bottom:none}
+    .s3-report-cell .s3-report-main{min-width:0}
+    .s3-severity-cell .s3-pill{white-space:nowrap}
+    .s3-actions-cell .s3-actions-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;width:100%;padding-top:12px;border-top:1px solid var(--border)}
+    .s3-actions-cell .s3-actions-row .btn{flex:none;height:32px;padding:0 10px;font-size:13px}
+    .s3-export .s3-export-menu{left:0;right:auto}
+  }
 </style>
 </head>
 <body>
@@ -132,7 +213,7 @@
           <button type="submit" class="nav-logout">Log out</button>
         </form>
       {% else %}
-        <a href="/credits">Credits</a>
+        <a href="/credits">Pricing</a>
         <a href="/login">Log in</a>
         <a href="/signup">Sign up</a>
       {% endif %}
@@ -143,64 +224,107 @@
 <main>
   <div class="page-head">
     <div>
+      <p class="s3-eyebrow">My Reports</p>
       <h1>My Reports</h1>
-      <p class="sub">Your analysis reports from the last 7 days.</p>
+      <p class="sub">Open, share, or export your reports. Free reports are kept for 7 days; paid deliverables are kept for 90 days.</p>
     </div>
     <p class="count"><strong>{{ total }}</strong> reports</p>
   </div>
 
   {% if reports %}
-  <ul class="list">
+  <div class="s3-table-wrap">
+  <table class="s3-table">
+    <thead>
+      <tr><th scope="col">Report</th><th scope="col">Date</th><th scope="col">Severity</th><th scope="col">State &amp; retention</th></tr>
+    </thead>
+    <tbody>
     {% for report in reports %}
-    <li class="card">
-      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warn{% elif report.severity == 'errors' %} err{% else %} neutral{% endif %}"></span></div>
+    <tr class="card s3-row">
+      <td class="s3-report-cell" data-s3-line="1"><div class="s3-report-main"><div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg><span class="dot{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warn{% elif report.severity == 'errors' %} err{% else %} neutral{% endif %}"></span></div>
       <div class="info">
-        {# Issue #144: Analysis Report (deep_dive) rows carry an
-           "Analysis Report" title above the filename so they are
+        {# Issue #144: Investigation Report (deep_dive) rows carry an
+           "Investigation Report" title above the filename so they are
            distinguishable from source report rows. #}
         {% if report.type == 'deep_dive' %}
-        <div class="kind-title">Analysis Report</div>
+        <div class="kind-title">Investigation Report</div>
         {% endif %}
         <div class="name">{{ report.filename }}</div>
-        <div class="meta">
-          {# Issue #144: deep_dive rows were Created (derived), not
-             Analyzed; source rows (analysis/comparison/batch) keep
-             "Analyzed". #}
-          <span>{% if report.type == 'deep_dive' %}Created{% else %}Analyzed{% endif %} {{ report.created_at.strftime('%Y-%m-%d %H:%M') }}</span><span class="sep">·</span>
+        {# Fidelity S3-C1 (rides S1-C2): subline = SS-ID + honest
+           format label, each only when the row carries it. #}
+        {% if report.ss_id or report.format_label %}<div class="s3-report-sub" data-s3-report-sub>{{ report.ss_id or '' }}{% if report.ss_id and report.format_label %} · {% endif %}{{ report.format_label or '' }}</div>{% endif %}
+      </div></div></td>
+      <td class="s3-date-cell" data-s3-line="2">
+          {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G4):
+             two-line date cell — date over time (UTC). This
+             supersedes the #144 Analyzed/Created prefix; deep_dive
+             rows stay distinguished by the "Investigation Report"
+             kind-title in the Report cell. #}
+          <span class="s3-date-line">{{ report.created_at.strftime('%b %d, %Y') }}</span>
+          <span class="s3-date-sub">{{ report.created_at.strftime('%H:%M') }} UTC</span>
+      </td>
+      <td class="s3-severity-cell" data-s3-line="1"><span class="s3-pill{% if report.severity == 'ok' %} ok{% elif report.severity == 'warnings' %} warnings{% elif report.severity == 'errors' %} errors{% else %} neutral{% endif %}">{% if report.severity == 'ok' %}OK{% elif report.severity == 'warnings' %}Warnings{% elif report.severity == 'errors' %}Errors{% else %}—{% endif %}</span></td>
+      <td class="s3-state-cell" data-s3-line="2">
+          {# Founder fidelity ruling 2026-11-10 (PR #177, S3-G2):
+             bold status word first — "Expired" exactly for
+             redemption_only rows (the only expired rows this list
+             renders; expired rows without a live entitlement are
+             not listed), "Ready" otherwise. The expiry date span
+             and "Expires in N days" pill below keep their hooks
+             and wording (Decision 8). #}
+          <strong class="s3-status-word">{% if report.redemption_only %}Expired{% else %}Ready{% endif %}</strong>
+          {% if report.redemption_only %}<span class="redemption-only-label">Redemption only — this report has expired; your Investigation Report entitlement can still be redeemed.</span> {% endif %}
           <span data-retention-expiry-date>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
           <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}" data-retention-expiry-pill>Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
-        </div>
-      </div>
-      <div class="actions">
-        <a href="/reports/{{ report.id }}" class="btn btn-ghost">View</a>
-        <span class="menu-wrap">
-          <button type="button" class="btn btn-primary export-toggle" data-menu="menu-{{ report.id }}" aria-haspopup="true" aria-expanded="false">Export</button>
-          <span class="menu" id="menu-{{ report.id }}" style="display:none">
-            <form method="post" action="/reports/{{ report.id }}/pdf" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the PDF download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+          {% if report.share_active and report.type != 'deep_dive' and not report.redemption_only %}
+          <span class="s3-share-state">Link sharing on — anyone with the link can view <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Turn off</button></span>
+          {% endif %}
+      </td>
+    </tr>
+    <tr class="card s3-actions-tr" data-s3-line="3">
+      <td class="s3-actions-cell" colspan="4"><div class="actions s3-actions-row">
+        {# Founder mobile-fix ruling 2026-11-10 (supersedes PR #177
+           S3-G1 FOR MY REPORTS ONLY, at all widths): row Export is
+           ONE button with a styled dropdown. Each export keeps its
+           own form with its action URL, CSRF input and data-confirm
+           text byte-identical; the forms live inside the dropdown
+           panel, not as direct row controls. Every row control is
+           uniformly quiet (btn-ghost). No "Free" tag (S3-R2: staged
+           until #164 Phase C). Row order: Open / Export /
+           Investigation Report / Share / Extend. #}
+        <a href="/reports/{{ report.id }}" class="btn btn-ghost">Open</a>
+        {% if not report.redemption_only %}
+        <div class="s3-export">
+          <button type="button" class="btn btn-ghost s3-export-btn" aria-haspopup="true" aria-expanded="false" data-s3-export-btn>Export <span class="s3-caret" aria-hidden="true">▾</span></button>
+          <div class="s3-export-menu" data-s3-export-menu hidden>
+            <form method="post" action="/reports/{{ report.id }}/pdf" class="s3-export-form" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="menu-item">PDF</button>
+              <button type="submit" class="btn btn-ghost s3-export-item">Export PDF</button>
             </form>
             {% if report.type != 'comparison' and report.report_kind != 'batch' %}
-            <form method="post" action="/reports/{{ report.id }}/exports/csv" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the CSV download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+            <form method="post" action="/reports/{{ report.id }}/exports/csv" class="s3-export-form" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="menu-item">CSV</button>
+              <button type="submit" class="btn btn-ghost s3-export-item">Export CSV</button>
             </form>
-            <form method="post" action="/reports/{{ report.id }}/exports/json" data-confirm="{% if report.export_unlocked %}This report is export-unlocked — the JSON download is free.{% else %}Export costs 2 credits and unlocks PDF, CSV and JSON for this report.{% endif %}">
+            <form method="post" action="/reports/{{ report.id }}/exports/json" class="s3-export-form" style="margin:0">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button type="submit" class="menu-item">JSON</button>
+              <button type="submit" class="btn btn-ghost s3-export-item">Export JSON</button>
             </form>
             {% endif %}
-          </span>
-        </span>
-        {# Issue #106 Stage 2 + founder amendment: row order is
-           View / Export / Analysis / Share / Extend. Analysis opens
-           the shared popup below; an existing Analysis Report links
-           straight to it (no second charge). #}
+          </div>
+        </div>
+        {% endif %}
+        {# Issue #106 Stage 2 + founder amendment: the Investigation
+           Report action opens the shared popup below; an existing
+           Investigation Report links straight to it (no second
+           charge). Label renamed from the bare "Analysis" by the
+           founder ruling 2026-11-10 (2026-11-09 naming ruling:
+           the deliverable is "Investigation Report"); internal
+           ids/classes (analysis-open, analysis-*) unchanged. #}
         {% if report.type == 'analysis' %}
           {% if report.analysis_result_id %}
-          <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Analysis</a>
+          <a href="/reports/{{ report.analysis_result_id }}" class="btn btn-ghost">Investigation Report</a>
           {% else %}
-          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-reason="{{ report.analysis_reason or '' }}">Analysis</button>
+          <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-entitlement="{{ '1' if report.entitlement_available else '' }}" data-reason="{{ report.analysis_reason or '' }}" data-deadline="{{ report.redemption_deadline or '' }}">Investigation Report</button>
           {% endif %}
         {% endif %}
         {# Issue #106 Stage 2 / PR #139 F2: no Share for Analysis
@@ -209,25 +333,36 @@
            a Share button on a deep_dive row always 404s (dead
            button). Mirrors the Extend suppression below; the
            server-side 404 rejection is retained. #}
-        {% if report.type != 'deep_dive' %}
+        {% if report.type != 'deep_dive' and not report.redemption_only %}
         <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
         {% endif %}
-        {# Issue #106 Stage 2: no Extend for Analysis Report rows —
+        {# Issue #106 Stage 2: no Extend for Investigation Report rows —
            the retention route admits only analysis/comparison
            sources, so an Extend form on a deep_dive row would POST
            to a 404 (dead button). Normal reports keep Extend. #}
-        {% if report.type != 'deep_dive' %}
-        <form method="post" action="/reports/{{ report.id }}/retention" data-confirm="Extend this report's retention by {{ retention_extension_days }} days for {{ retention_extension_cost }} credit?" data-retention-form style="display:inline;margin:0">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="idempotency_key" value="{{ report.retention_key }}">
-          <button type="submit" class="btn btn-ghost">Extend</button>
-        </form>
+        {% if report.type != 'deep_dive' and not report.redemption_only %}
+{# Issue #164 Phase C: the Extend control is removed — retention extensions are no longer sold (the route refuses new extensions with 410). #}
+        
         <span class="retention-status" data-retention-status role="status" style="display:none"></span>
         {% endif %}
-      </div>
-    </li>
+      </div></td>
+    </tr>
     {% endfor %}
-  </ul>
+    </tbody>
+  </table>
+  </div>
+
+  <a class="s3-entry-card" href="/batch" data-s3-entry="batch">
+    <span class="s3-entry-title">Batch analysis</span>
+    <span class="s3-entry-sub">Upload 2 to 5 log files and get one combined report, in upload order.</span>
+    <span class="s3-entry-link">Start a batch →</span>
+  </a>
+
+  <a class="s3-entry-card" href="/compare" data-s3-entry="compare">
+    <span class="s3-entry-title">Compare two logs</span>
+    <span class="s3-entry-sub">Upload two log files and see what changed between them.</span>
+    <span class="s3-entry-link">Start a compare →</span>
+  </a>
 
   {% if total_pages > 1 %}
   <nav class="pager" aria-label="Pagination">
@@ -247,7 +382,7 @@
   </nav>
   {% endif %}
   {% else %}
-  <div class="empty">
+  <div class="empty s3-empty">
     <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M12 11v6M9 14h6"/></svg></div>
     <h2>No reports yet. Analyze a log file to get started.</h2>
     <p>Reports are kept for 7 days after analysis.</p>
@@ -257,14 +392,6 @@
 
 </main>
 
-<div id="ss-confirm" class="modal" style="display:none">
-  <div class="modal-card">
-    <p id="ss-confirm-text"></p>
-    <button type="button" class="btn btn-primary" id="ss-confirm-yes">Continue</button>
-    <button type="button" class="btn btn-ghost" id="ss-confirm-no">Cancel</button>
-  </div>
-</div>
-
 <div id="extend-modal" class="modal" style="display:none">
   <div class="modal-card">
     <p id="extend-msg"></p>
@@ -272,13 +399,14 @@
   </div>
 </div>
 
+<script>window.__productReady = {{ 'false' if product_ready is defined and not product_ready else 'true' }};</script>
 <div id="analysis-modal" class="modal" style="display:none">
   <div class="modal-card">
     <p id="analysis-msg"></p>
     <div id="analysis-link-row" style="display:none;margin-bottom:12px">
-      <a class="btn btn-primary" id="analysis-view" href="#">View Analysis Report</a>
+      <a class="btn btn-primary" id="analysis-view" href="#">View Investigation Report</a>
     </div>
-    <button type="button" class="btn btn-primary" id="analysis-confirm">Generate Analysis Report</button>
+    <button type="button" class="btn btn-primary" id="analysis-confirm">Generate Investigation Report</button>
     <button type="button" class="btn btn-ghost" id="analysis-close">Cancel</button>
   </div>
 </div>
@@ -310,54 +438,68 @@
 
 <script>
 (function () {
-  document.querySelectorAll('.export-toggle').forEach(function (btn) {
+  // S3 mobile fix: the single Export button toggles its row's
+  // dropdown panel (hidden attribute + aria-expanded); opening one
+  // row's panel closes the others, an outside click or Escape
+  // closes all. Presentation only — the export forms inside the
+  // panel keep their own submit/confirm handling below.
+  function s3Menus() {
+    return document.querySelectorAll('[data-s3-export-menu]');
+  }
+  function s3CloseMenus(except) {
+    s3Menus().forEach(function (menu) {
+      if (menu !== except) { menu.hidden = true; }
+    });
+    document.querySelectorAll('[data-s3-export-btn]').forEach(function (btn) {
+      var wrap = btn.closest ? btn.closest('.s3-export') : null;
+      var menu = wrap ? wrap.querySelector('[data-s3-export-menu]') : null;
+      btn.setAttribute('aria-expanded', menu && !menu.hidden ? 'true' : 'false');
+    });
+  }
+  document.querySelectorAll('[data-s3-export-btn]').forEach(function (btn) {
     btn.addEventListener('click', function () {
-      var menu = document.getElementById(btn.getAttribute('data-menu'));
-      var open = menu.style.display === 'block';
-      document.querySelectorAll('.menu').forEach(function (m) { m.style.display = 'none'; });
-      menu.style.display = open ? 'none' : 'block';
-      btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+      var wrap = btn.closest ? btn.closest('.s3-export') : null;
+      var menu = wrap ? wrap.querySelector('[data-s3-export-menu]') : null;
+      if (!menu) { return; }
+      var willOpen = menu.hidden;
+      s3CloseMenus(menu);
+      menu.hidden = !willOpen;
+      btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
     });
   });
-  var modal = document.getElementById('ss-confirm');
-  var text = document.getElementById('ss-confirm-text');
-  var pending = null;
-  document.querySelectorAll('form[data-confirm]').forEach(function (f) {
-    f.addEventListener('submit', function (e) {
-      if (f.dataset.confirmed) { delete f.dataset.confirmed; return; }
-      e.preventDefault();
-      // PR #132 follow-up (P1): this listener is registered BEFORE
-      // auth_form_script.html's PDF fetch listener (this inline
-      // script precedes that include), so stopImmediatePropagation
-      // keeps the PDF fetch — and its 2-credit charge — from
-      // firing while the confirmation popup is open. Cancel
-      // therefore sends nothing at all.
-      e.stopImmediatePropagation();
-      pending = f;
-      text.textContent = f.getAttribute('data-confirm');
-      modal.style.display = 'flex';
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('click', function (e) {
+      if (!e.target || !e.target.closest || !e.target.closest('.s3-export')) {
+        s3CloseMenus(null);
+      }
     });
-  });
-  document.getElementById('ss-confirm-yes').addEventListener('click', function () {
-    modal.style.display = 'none';
-    if (pending) { var confirmedForm = pending; pending = null; confirmedForm.dataset.confirmed = '1'; confirmedForm.requestSubmit(); }
-  });
-  document.getElementById('ss-confirm-no').addEventListener('click', function () {
-    modal.style.display = 'none';
-    pending = null;
-  });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { s3CloseMenus(null); }
+    });
+  }
+})();
+</script>
+
+<script>
+(function () {
+  // Release #7 F1: the export confirmation popup and its
+  // confirm wiring are removed — exports are free and fire
+  // directly on click. The PDF form's submit is intercepted exactly
+  // once by the fetch listener in auth_form_script.html; CSV/JSON
+  // forms submit natively.
   // Issue #141: Extend (retention) is an IN-PAGE action. Its endpoint
-  // returns a JSON document, so the confirmed form must NOT be
-  // submitted natively — the browser navigated to the raw JSON page
-  // and stranded the user there. This listener mirrors the PDF fetch
-  // pattern in auth_form_script.html: it is registered AFTER the
-  // data-confirm handler above, which stopImmediatePropagation()s
-  // the first (unconfirmed) submit, so this listener only ever runs
-  // on the confirmed resubmit; it preventDefault()s that resubmit
+  // returns a JSON document, so its form must NOT be submitted
+  // natively — the browser navigated to the raw JSON page and
+  // stranded the user there. This listener mirrors the PDF fetch
+  // pattern in auth_form_script.html: it preventDefault()s the submit
   // and posts the SAME form fields (CSRF token + the form's hidden
   // idempotency_key, unchanged) via fetch. A retry therefore replays
   // the same key server-side and cannot double-charge, and the key
-  // is deliberately NOT rotated after success.
+  // is deliberately NOT rotated after success. (Release #7 F1: the
+  // confirmation handler this listener was originally sequenced
+  // after is removed; no retention form renders since #164 Phase C,
+  // so this wiring currently matches no form and is retained only
+  // alongside the #extend-modal markup.)
   var extendModal = document.getElementById('extend-modal');
   var extendMsg = document.getElementById('extend-msg');
   document.getElementById('extend-close').addEventListener('click', function () {
@@ -367,58 +509,23 @@
     extendMsg.textContent = message || 'Retention extension failed. Please try again.';
     extendModal.style.display = 'flex';
   }
-  function refreshCreditBadgeFromBalance() {
-    // PR #143 remediation (Codex P2): a replayed success means the
-    // server committed the charge on an EARLIER attempt whose
-    // response never reached this page (e.g. it was lost to a
-    // network error), so the badge was never decremented for a
-    // charge that did happen. The local badge value cannot be
-    // trusted in that case — refresh it from the authoritative
-    // GET /auth/balance payload (the same payload
-    // auth_form_script.html renders #credit-badge from). If the
-    // balance fetch fails or carries no usable balance, leave the
-    // badge unchanged and show no error: the extension itself
-    // succeeded, so this refresh is best-effort only.
-    var badge = document.getElementById('credit-badge');
-    if (!badge) { return Promise.resolve(); }
-    try {
-      return fetch('/auth/balance', { credentials: 'same-origin' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (!data) { return; }
-          var balance = data.balance;
-          var parsed = null;
-          if (typeof balance === 'number' && isFinite(balance)) {
-            parsed = balance;
-          } else if (typeof balance === 'string' && /^-?\d+$/.test(balance.trim())) {
-            parsed = parseInt(balance.trim(), 10);
-          }
-          if (parsed === null) { return; }
-          badge.textContent = '\u{1FA99} ' + parsed + ' credits';
-        })
-        .catch(function () {});
-    } catch (err) {
-      return Promise.resolve();
-    }
-  }
-  function updateCreditBadge(cost, replayed) {
-    // The header badge (#credit-badge, rendered by
-    // auth_form_script.html from /auth/balance) is the page's credit
-    // balance display. A fresh extension charged `cost` just now,
-    // so decrement locally. A replayed response charged nothing
-    // new on THIS attempt, but the original attempt may have
-    // committed without its response reaching the page — refresh
-    // from the server instead of guessing (see above).
-    if (replayed) { return refreshCreditBadgeFromBalance(); }
-    var badge = document.getElementById('credit-badge');
-    if (!badge) { return; }
-    var match = String(badge.textContent || '').match(/-?\d+/);
-    if (!match) { return; }
-    var next = parseInt(match[0], 10) - (cost || 1);
-    badge.textContent = '\u{1FA99} ' + next + ' credits';
-  }
   function updateExtendedRow(form, data) {
-    var card = form.closest ? form.closest('.card') : null;
+    var actionsCard = form.closest ? form.closest('.card') : null;
+    var card = actionsCard;
+    // Row-under actions (2026-11-10 21:57): the Extend form now
+    // sits in the actions row (.card) UNDER the main row, whose
+    // cells carry the expiry date/pill. If the closest .card has
+    // no expiry element, fall back to the previous sibling row
+    // for the expiry lookups. The retention status element lives
+    // in the ACTIONS row (next to the form), so it is looked up
+    // on actionsCard below, not on the fallen-back main row
+    // (PR #179 Codex P2: looking it up on the main row always
+    // returned null, so "Retention extended." never displayed).
+    if (card && typeof card.querySelector === 'function'
+        && !card.querySelector('[data-retention-expiry-date]')
+        && card.previousElementSibling) {
+      card = card.previousElementSibling;
+    }
     if (!card || !data.expires_at) { return; }
     var expiry = new Date(data.expires_at);
     if (isNaN(expiry.getTime())) { return; }
@@ -437,7 +544,13 @@
         else { pillEl.classList.remove('soon'); }
       }
     }
-    var statusEl = card.querySelector('[data-retention-status]');
+    var statusEl = null;
+    if (actionsCard && typeof actionsCard.querySelector === 'function') {
+      statusEl = actionsCard.querySelector('[data-retention-status]');
+    }
+    if (!statusEl && typeof card.querySelector === 'function') {
+      statusEl = card.querySelector('[data-retention-status]');
+    }
     if (statusEl) {
       statusEl.textContent = 'Retention extended.';
       statusEl.style.display = '';
@@ -462,7 +575,6 @@
         .then(function (d) {
           if (d._httpOk && d.status === 'extended') {
             updateExtendedRow(f, d);
-            return updateCreditBadge(d.cost, d.replayed);
           } else {
             showExtendError(d.error || d.message);
           }
@@ -501,10 +613,85 @@
     var raw = btn ? btn.getAttribute('data-formats') : '';
     return raw ? raw.split(',').filter(function (f) { return f; }) : [];
   }
+  // PR #177 P1 remediation: two controls per report since S3-G2
+  // (the row Share button and the share-state line's Turn off
+  // control); state is per-report, mirrored across both controls.
+  // Both controls carry separate DOM copies of the same
+  // server-rendered keys/formats, so every mutation must sync all
+  // peers for that report — otherwise a peer keeps a consumed
+  // idempotency key and a later action through it replays that key
+  // as a server-side no-op while reporting success.
+  function sharePeersFor(btn) {
+    if (!btn) { return []; }
+    var reportId = btn.getAttribute('data-report');
+    var peers = [];
+    document.querySelectorAll('.share-open').forEach(function (candidate) {
+      if (candidate.getAttribute('data-report') === reportId) { peers.push(candidate); }
+    });
+    return peers.length ? peers : [btn];
+  }
+  function setShareKeyFor(btn, attr, value) {
+    sharePeersFor(btn).forEach(function (peer) { peer.setAttribute(attr, value); });
+  }
   function setActiveFormatsFor(btn, formats) {
     if (!btn) { return; }
-    btn.setAttribute('data-formats', formats.join(','));
-    btn.setAttribute('data-active', formats.length ? '1' : '');
+    sharePeersFor(btn).forEach(function (peer) {
+      peer.setAttribute('data-formats', formats.join(','));
+      peer.setAttribute('data-active', formats.length ? '1' : '');
+    });
+    syncShareStateLineFor(btn);
+  }
+  // PR #177 P2 remediation (Codex thread r4527852735): the
+  // .s3-share-state line ("Link sharing on ..." + its Turn off
+  // control) is rendered server-side only when the row was
+  // share-active at page load, so peer attribute mirroring alone
+  // left it stale: revoking the last active format kept the line
+  // (and a live Turn off control) visible until reload, and
+  // creating the first link on an initially unshared report never
+  // added it. Every successful create/revoke funnels through
+  // setActiveFormatsFor, so the line syncs here. Hide (never
+  // remove) on empty formats so the hidden Turn off peer stays in
+  // the DOM and peer-sync keeps working; show restores it. When
+  // the line was never rendered, build it to match the server
+  // render and wire its Turn off button through openShareModal
+  // exactly like the existing .share-open controls.
+  function syncShareStateLineFor(btn) {
+    var formats = activeFormatsFor(btn);
+    var row = (btn && typeof btn.closest === 'function') ? btn.closest('.card') : null;
+    // Row-under actions (2026-11-10 21:57): the row Share button
+    // sits in the actions row (.card) UNDER the main row, whose
+    // state cell carries the share-state line. If the closest
+    // .card has no state cell, fall back to the previous sibling.
+    if (row && typeof row.querySelector === 'function'
+        && !row.querySelector('.s3-state-cell')
+        && row.previousElementSibling) {
+      row = row.previousElementSibling;
+    }
+    if (!row || typeof row.querySelector !== 'function') { return; }
+    var line = row.querySelector('.s3-share-state');
+    if (formats.length > 0) {
+      if (line) { line.style.display = ''; return; }
+      if (typeof document.createElement !== 'function'
+          || typeof document.createTextNode !== 'function') { return; }
+      var cell = row.querySelector('.s3-state-cell');
+      if (!cell) { return; }
+      var span = document.createElement('span');
+      span.className = 's3-share-state';
+      span.appendChild(document.createTextNode('Link sharing on — anyone with the link can view '));
+      var turnOff = document.createElement('button');
+      turnOff.setAttribute('type', 'button');
+      turnOff.className = 'btn btn-ghost share-open';
+      turnOff.textContent = 'Turn off';
+      ['data-report', 'data-create-key', 'data-rotate-key', 'data-revoke-key',
+       'data-active', 'data-formats', 'data-unlocked'].forEach(function (attr) {
+        turnOff.setAttribute(attr, btn.getAttribute(attr) || '');
+      });
+      turnOff.addEventListener('click', function () { openShareModal(turnOff); });
+      span.appendChild(turnOff);
+      cell.appendChild(span);
+    } else if (line) {
+      line.style.display = 'none';
+    }
   }
   function shareFormatIsActiveFor(btn, fmt) {
     return activeFormatsFor(btn).indexOf(fmt) !== -1;
@@ -598,23 +785,24 @@
         });
       });
   }
-  document.querySelectorAll('.share-open').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      current = btn;
-      clearDisplayedLink();
-      var txtRadio = document.querySelector('input[name="share-format"][value="txt"]');
-      if (txtRadio) { txtRadio.checked = true; }
-      var active = shareFormatIsActiveFor(btn, 'txt');
-      createBtn.style.display = active ? 'none' : '';
-      rotateBtn.style.display = active ? '' : 'none';
-      revokeBtn.style.display = active ? '' : 'none';
-      shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
-      var unlocked = btn.getAttribute('data-unlocked') === '1';
-      document.querySelectorAll('.share-lock-note').forEach(function (n) {
-        n.style.display = unlocked ? 'none' : '';
-      });
-      shareModal.style.display = 'flex';
+  function openShareModal(btn) {
+    current = btn;
+    clearDisplayedLink();
+    var txtRadio = document.querySelector('input[name="share-format"][value="txt"]');
+    if (txtRadio) { txtRadio.checked = true; }
+    var active = shareFormatIsActiveFor(btn, 'txt');
+    createBtn.style.display = active ? 'none' : '';
+    rotateBtn.style.display = active ? '' : 'none';
+    revokeBtn.style.display = active ? '' : 'none';
+    shareMsg.textContent = active ? 'Sharing is on for this report.' : '';
+    var unlocked = btn.getAttribute('data-unlocked') === '1';
+    document.querySelectorAll('.share-lock-note').forEach(function (n) {
+      n.style.display = unlocked ? 'none' : '';
     });
+    shareModal.style.display = 'flex';
+  }
+  document.querySelectorAll('.share-open').forEach(function (btn) {
+    btn.addEventListener('click', function () { openShareModal(btn); });
   });
   document.getElementById('share-close').addEventListener('click', function () {
     shareModal.style.display = 'none';
@@ -630,7 +818,7 @@
     var createdFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share',
               originBtn.getAttribute('data-create-key')).then(function (d) {
-      if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); }
+      if (d._httpOk) { originBtn.setAttribute('data-create-key', freshShareKey()); setShareKeyFor(originBtn, 'data-create-key', originBtn.getAttribute('data-create-key')); }
       if (d._httpOk && d.share_url) { addActiveShareFormatFor(originBtn, createdFormat); }
       if (current !== originBtn) { return; }
       if (d._httpOk && d.share_url) {
@@ -653,7 +841,7 @@
     var rotatedFormat = selectedShareFormat();
     postShare('/reports/' + originBtn.getAttribute('data-report') + '/share/rotate',
               originBtn.getAttribute('data-rotate-key')).then(function (d) {
-      if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); }
+      if (d._httpOk) { originBtn.setAttribute('data-rotate-key', freshShareKey()); setShareKeyFor(originBtn, 'data-rotate-key', originBtn.getAttribute('data-rotate-key')); }
       if (current !== originBtn) { return; }
       if (d._httpOk && d.share_url) {
         // PR #138 remediation round 3: as in create above, guard
@@ -676,7 +864,7 @@
       // leaves the link active: surface the error and keep state.
       var revoked = d._httpOk && d.status === 'revoked';
       if (revoked) {
-        originBtn.setAttribute('data-revoke-key', freshShareKey());
+        originBtn.setAttribute('data-revoke-key', freshShareKey()); setShareKeyFor(originBtn, 'data-revoke-key', originBtn.getAttribute('data-revoke-key'));
         removeActiveShareFormatFor(originBtn, revokedFormat);
       }
       if (current !== originBtn) { return; }
@@ -713,9 +901,25 @@
       analysisCurrent = btn;
       document.getElementById('analysis-link-row').style.display = 'none';
       if (btn.getAttribute('data-eligible') === '1') {
-        analysisMsg.textContent = 'Analysis Report costs {{ analysis_report_cost }} credits. You are charged only if generation succeeds. The Analysis Report is kept for 7 days.';
-        analysisConfirm.style.display = '';
-        analysisConfirm.disabled = false;
+        // Remediation4 (fix 7): the entitlement check comes FIRST —
+        // a holder of an available entitlement redeems even when
+        // product sales are disabled (generation needs no Price);
+        // the Coming soon gate below applies only to NEW purchases.
+        var hasEntitlement = btn.getAttribute('data-entitlement') === '1';
+        if (window.__productReady === false && !hasEntitlement) {
+          // Issue #164 (P2-3): fail-closed display state — no live
+          // $9 buy action while the product Price env is unset.
+          analysisMsg.textContent = 'Investigation Report: Coming soon — purchases are not available yet. Please check back later.';
+          analysisConfirm.style.display = 'none';
+        } else if (hasEntitlement) {
+          analysisMsg.textContent = 'You hold an unused entitlement for this report\u2019s Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.' + (btn.getAttribute('data-deadline') ? ' Redeem by ' + btn.getAttribute('data-deadline') + ' (the source report\u2019s expiry plus 30 days).' : '');
+          analysisConfirm.style.display = '';
+          analysisConfirm.disabled = false;
+        } else {
+          analysisMsg.textContent = 'Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. You pay by card at checkout. If we can\'t generate your report, your purchase isn\'t used up — you can try again. If a purchase can never be used, we\'ll refund it — email disputes@goodfolkdigital.com.' + (btn.getAttribute('data-deadline') ? ' Redeem by ' + btn.getAttribute('data-deadline') + ' (the source report\u2019s expiry plus 30 days).' : '');
+          analysisConfirm.style.display = '';
+          analysisConfirm.disabled = false;
+        }
       } else {
         analysisMsg.textContent = btn.getAttribute('data-reason') || '';
         analysisConfirm.style.display = 'none';
@@ -748,26 +952,30 @@
       .then(function (d) {
         if (analysisCurrent !== originBtn) { return; }
         if (d.report_url) {
-          analysisMsg.textContent = 'Analysis Report ready.';
+          analysisMsg.textContent = 'Investigation Report ready.';
           var link = document.getElementById('analysis-view');
           link.href = d.report_url;
           document.getElementById('analysis-link-row').style.display = 'block';
           analysisConfirm.style.display = 'none';
         } else if (d._httpStatus === 402 && d.purchase_url) {
-          analysisMsg.textContent = '';
-          analysisMsg.appendChild(document.createTextNode(d.error || 'Insufficient credits. '));
-          var buy = document.createElement('a');
-          buy.href = d.purchase_url;
-          buy.textContent = 'Buy credits';
-          analysisMsg.appendChild(buy);
-          analysisConfirm.disabled = false;
+          // #164: no entitlement — start the $9 product checkout.
+          analysisMsg.textContent = d.error || 'Investigation Report costs $9.';
+          var cfd = new FormData();
+          cfd.append('csrf_token', '{{ csrf_token }}');
+          fetch(d.purchase_url, { method: 'POST', body: cfd, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (c) {
+              if (analysisCurrent !== originBtn) { return; }
+              if (c.checkout_url) { window.location = c.checkout_url; }
+              else { analysisMsg.textContent = c.error || 'Checkout is not available yet.'; analysisConfirm.disabled = false; }
+            }, function () { analysisConfirm.disabled = false; });
         } else {
-          analysisMsg.textContent = d.error || 'Analysis Report generation failed.';
+          analysisMsg.textContent = d.error || 'Investigation Report generation failed.';
           analysisConfirm.disabled = false;
         }
       }, function () {
         if (analysisCurrent !== originBtn) { return; }
-        analysisMsg.textContent = 'Analysis Report generation failed.';
+        analysisMsg.textContent = 'Investigation Report generation failed.';
         analysisConfirm.disabled = false;
       });
   });

@@ -9,7 +9,9 @@ unknown/malformed/tampered/revoked/rotated/expired/deleted/corrupt.
 
 #135: GET /s/<token> serves the report FILE in the link's format
 (the recipient web view is gone); TXT is the free default format;
-PDF/JSON/CSV link creation requires the #129 export unlock.
+PDF/JSON/CSV link creation requires the #129 export unlock —
+PREMISE CHANGED by issue #164 Phase C (C8): that gate is removed,
+all formats create free; token authority + identical 404 unchanged.
 T4: public sharing is single-file only; compare/batch get 422 BEFORE
 link creation.
 """
@@ -23,7 +25,7 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 from test_account_migrations import migrated_engine  # noqa: F401  (fixture)
-from test_phase2b_paid_e2e import paid_env, _signup_verify_login, _http_balance  # noqa: F401
+from test_phase2b_paid_e2e import paid_env, _signup_verify_login  # noqa: F401
 
 from app import auth, credits as C, main, models as M
 from app.sample_data import SAMPLE_LOG
@@ -74,6 +76,56 @@ def _token_from(resp):
     return m.group(1)
 
 
+def _db_balance(env, uid):
+    """Balance read directly from the account row (Phase C re-base:
+    /credits/balance is retired (410) and the signup grant is gone —
+    a fresh user has balance 0; sharing stays free)."""
+    with env.sessions() as db:
+        acct = db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == uid).first()
+        return acct.balance if acct else 0
+
+
+def _seed_completed_pdf_artifact(env, uid, rid):
+    """Seed a legacy completed PDF operation + stored artifact
+    directly (Phase C: a free owner export creates neither), in the
+    production shape — artifact Result origin-linked to its
+    operation, operation pointing back via result_id."""
+    import base64 as _b64
+
+    from app.pdf_export import generate_report_pdf
+
+    with env.sessions() as db:
+        source = db.get(M.Result, rid)
+        payload = C.result_payload(
+            source, user_id=uid, operation_id=source.operation_id,
+            free_request_id=source.free_request_id)
+        filename = payload.get("filename", "test.log")
+        pdf_bytes = generate_report_pdf(source.storage_manifest, filename)
+        now = C._utcnow()
+        op = M.Operation(
+            user_id=uid, type="pdf", idempotency_key=f"pdf-{rid}",
+            request_hash="a" * 64, cost=2, worker_id="seed-worker",
+            lease_expires_at=now + timedelta(minutes=5),
+            status="completed")
+        db.add(op)
+        db.flush()
+        raw = json.dumps({
+            "pdf_base64": _b64.b64encode(pdf_bytes).decode("ascii"),
+            "filename": filename})
+        artifact = M.Result(
+            user_id=uid, operation_id=op.id, type="pdf",
+            storage_manifest=raw,
+            integrity_digest=C.hash_input(raw.encode()),
+            byte_count=len(raw.encode()), ready_at=now,
+            expires_at=now + timedelta(days=7))
+        db.add(artifact)
+        db.flush()
+        op.result_id = artifact.id
+        db.commit()
+        return artifact.id
+
+
 def _setup_shared(env):
     email, uid, csrf = _signup_verify_login(env)
     rid = _make_report(env, uid)
@@ -93,7 +145,7 @@ def test_create_share_is_free_and_stores_hash_only(paid_env):
     rid = _make_report(env, uid)
     resp = _create_share(env, rid, csrf)
     assert resp.status_code == 200, resp.text[:400]
-    assert _http_balance(env) == 10  # FREE: no debit (T1)
+    assert _db_balance(env, uid) == 0  # FREE: no debit (T1); Phase C: no signup grant
     token = _token_from(resp)
     with env.sessions() as db:
         row = db.query(M.ReportSharing).filter(M.ReportSharing.result_id == rid).one()
@@ -163,13 +215,13 @@ def test_revoke_is_free_idempotent_and_immediate(paid_env):
     r = env.client.post(f"/reports/{rid}/share/revoke",
                         data={"csrf_token": csrf, "idempotency_key": "rev-1"})
     assert r.status_code == 200, r.text[:300]
-    assert _http_balance(env) == 10
+    assert _db_balance(env, uid) == 0
     assert anon.get(f"/s/{token}").status_code == 404
     # Idempotent: a second revoke (new key) still succeeds, still free.
     r2 = env.client.post(f"/reports/{rid}/share/revoke",
                          data={"csrf_token": csrf, "idempotency_key": "rev-2"})
     assert r2.status_code == 200
-    assert _http_balance(env) == 10
+    assert _db_balance(env, uid) == 0
 
 
 def test_rotate_is_free_replaces_token_and_replay_does_not_rotate_again(paid_env):
@@ -179,7 +231,7 @@ def test_rotate_is_free_replaces_token_and_replay_does_not_rotate_again(paid_env
     r = env.client.post(f"/reports/{rid}/share/rotate",
                         data={"csrf_token": csrf, "idempotency_key": "rot-1"})
     assert r.status_code == 200, r.text[:400]
-    assert _http_balance(env) == 10
+    assert _db_balance(env, uid) == 0
     new_token = _token_from(r)
     assert new_token != token
     assert anon.get(f"/s/{token}").status_code == 404
@@ -205,7 +257,7 @@ def test_create_replay_does_not_reveal_or_replace_token(paid_env):
     r = _create_share(env, rid, csrf, key="share-1")
     assert r.status_code == 200
     assert "share_url" not in r.json()
-    assert _http_balance(env) == 10
+    assert _db_balance(env, uid) == 0
     assert anon.get(f"/s/{token}").status_code == 200
 
 
@@ -249,33 +301,39 @@ def test_shared_pdf_only_when_paid_and_unexpired(paid_env):
     pdf-FORMAT link, not a subroute of a text link. Creation is
     blocked pre-unlock; post-unlock the pdf link serves the PDF;
     the PDF artifact's own expiry (T6) still kills it, while the
-    txt link is unaffected."""
+    txt link is unaffected.
+
+    PREMISE CHANGED AGAIN (issue #164 Phase C, C8): the unlock gate
+    is REMOVED — a pdf link creates free with no unlock, and with no
+    completed PDF operation the shared PDF is generated on the fly
+    (C7.1). The T6 leg is preserved via a seeded completed operation
+    + stored artifact: once that artifact expires, the share dies
+    (no regeneration), while the txt link is unaffected."""
     env = paid_env
     email, uid, csrf, rid, token = _setup_shared(env)
     anon = _anon_client()
     # The txt link does not serve PDF at the old subroute.
     assert anon.get(f"/s/{token}/pdf").status_code == 404
-    # Pre-unlock, creating a pdf link is refused (402, no charge).
-    blocked = env.client.post(
-        f"/reports/{rid}/share",
-        data={"csrf_token": csrf, "idempotency_key": "pdf-blocked",
-              "format": "pdf"})
-    assert blocked.status_code == 402, blocked.text[:300]
-    pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    # No gate: creating a pdf link succeeds immediately, free.
     created = env.client.post(
         f"/reports/{rid}/share",
         data={"csrf_token": csrf, "idempotency_key": "pdf-link-1",
               "format": "pdf"})
     assert created.status_code == 200, created.text[:300]
+    assert _db_balance(env, uid) == 0
     pdf_token = _token_from(created)
+    # The owner's own PDF export is free too and stores nothing.
+    pdf = env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
+    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
     got = anon.get(f"/s/{pdf_token}")
     assert got.status_code == 200, got.text[:300]
     assert got.content[:4] == b"%PDF"
     assert "application/pdf" in got.headers.get("content-type", "")
     # The legacy subroute works for a pdf-format link too.
     assert anon.get(f"/s/{pdf_token}/pdf").content[:4] == b"%PDF"
-    # PDF shareability dies with the PDF Result's own expiry (T6).
+    # PDF shareability dies with the PDF Result's own expiry (T6):
+    # seed the completed operation + artifact, then expire it.
+    _seed_completed_pdf_artifact(env, uid, rid)
     with env.sessions() as db:
         pdf_result = db.query(M.Result).filter(
             M.Result.user_id == uid, M.Result.type == "pdf").one()
@@ -361,17 +419,27 @@ def test_shared_headers_on_hit_and_miss(paid_env):
 
 
 def test_revoked_link_stays_revoked_after_extension(paid_env):
-    """Extending a report never revives a revoked link (draft §3)."""
+    """Extending a report never revives a revoked link (draft §3).
+
+    PREMISE CHANGED (issue #164 Phase C, Decision 5 / C5): a new
+    retention extension can no longer be bought (410, no mutation) —
+    the revoked link stays revoked either way, and a fresh share
+    still creates under the source's existing window."""
     env = paid_env
     email, uid, csrf, rid, token = _setup_shared(env)
     anon = _anon_client()
     env.client.post(f"/reports/{rid}/share/revoke",
                     data={"csrf_token": csrf, "idempotency_key": "rev-x"})
+    with env.sessions() as db:
+        before_expiry = db.get(M.Result, rid).expires_at
     ext = env.client.post(f"/reports/{rid}/retention",
                           data={"csrf_token": csrf, "idempotency_key": "ext-x"})
-    assert ext.status_code == 200, ext.text[:300]
+    assert ext.status_code == 410, ext.text[:300]
+    assert "no longer sold" in ext.json()["error"]
+    with env.sessions() as db:
+        assert db.get(M.Result, rid).expires_at == before_expiry
     assert anon.get(f"/s/{token}").status_code == 404
-    # ...but an active link follows the source's extended expiry.
+    # ...and a fresh active link still creates and serves.
     resp = _create_share(env, rid, csrf, key="share-again")
     assert resp.status_code == 200
 
@@ -444,7 +512,7 @@ def test_share_actions_rate_limited_11th_distinct_action_429_no_mutation(paid_en
     assert (gen_after, hash_after) == (gen_before, hash_before)
     assert hash_after == auth.hash_token(last_token)
     assert _share_action_count(env, uid, rid) == 10
-    assert _http_balance(env) == 10  # still FREE: no debit
+    assert _db_balance(env, uid) == 0  # still FREE: no debit
     assert _anon_client().get(f"/s/{last_token}").status_code == 200
 
 

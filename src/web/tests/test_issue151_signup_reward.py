@@ -6,6 +6,16 @@ idempotency (existing 3-credit accounts keep 3 — no top-up, founder
 ruling 2026-11-05), and the user-facing copy on the pricing/signup
 surfaces plus the pack framing (per-report unlock of ALL formats,
 not PDF-only).
+
+PREMISE CHANGED (#164 Phase C, Decision 3 + amendment C4): the
+signup grant is REMOVED. `grant_signup_reward` is disabled
+deliberately (early return before any eligibility/account/grant/
+ledger write; the SIGNUP_REWARD_CREDITS constant and the
+`grant_credits` quantity>0 invariant stay, per C4), and every
+free-signup-credit claim is gone from pricing/signup copy. Exports
+are framed as FREE for all reports, not as a credit unlock. The
+tests below pin the retirement with the same strength as the
+original grant pins.
 """
 
 import pathlib
@@ -50,30 +60,43 @@ def test_signup_reward_constant_is_ruled_10():
     assert C.SIGNUP_REWARD_CREDITS == 10
 
 
-def test_signup_reward_grants_10_once(db, user):
+def test_signup_reward_disabled_grants_nothing(db, user):
+    # Phase C / C4: the helper returns None BEFORE any write, on the
+    # first and on a repeat call (the old one-grant idempotency pin,
+    # re-based: zero grants, not exactly one).
     email = f"{user.hex[:8]}@test.com"
-    g = C.grant_signup_reward(db, user, email)
-    db.commit()
-    assert g is not None and g.issued == 10
-    assert C.get_balance_summary(db, user)["balance"] == 10
-    # Idempotent: a second grant for the same email issues nothing.
     assert C.grant_signup_reward(db, user, email) is None
     db.commit()
-    assert C.get_balance_summary(db, user)["balance"] == 10
+    assert C.grant_signup_reward(db, user, email) is None
+    db.commit()
+    assert C.get_balance_summary(db, user)["balance"] == 0
+    assert db.query(models.CreditGrant).filter(
+        models.CreditGrant.user_id == user).count() == 0
+    assert db.query(models.CreditAccount).filter(
+        models.CreditAccount.user_id == user).count() == 0
+    assert db.query(models.CreditLedger).filter(
+        models.CreditLedger.user_id == user).count() == 0
+    assert db.query(models.SignupEligibility).filter(
+        models.SignupEligibility.email_normalized == email).count() == 0
 
 
-def test_pricing_and_signup_copy_say_10_not_3():
+def test_pricing_and_signup_copy_have_no_free_credit_claim():
     pricing = (APP_DIR / "templates" / "pricing.html").read_text()
     signup = (APP_DIR / "templates" / "signup.html").read_text()
-    assert "10 free credits" in pricing
-    assert "10 free credits" in signup
-    assert "3 free credits" not in pricing
-    assert "3 free credits" not in signup
+    for page in (pricing, signup):
+        assert "10 free credits" not in page
+        assert "3 free credits" not in page
+        assert "free credits" not in page.lower()
+    # The retirement is stated honestly on the Pricing page (FAQ).
+    assert "new accounts no longer receive signup credits" in pricing
 
 
-def test_pack_framing_is_all_format_unlock_not_pdf_only():
-    billing = (APP_DIR / "stripe_billing.py").read_text()
-    assert "PDF exports" not in billing
-    assert "report unlocks (all formats)" in billing
+def test_pricing_exports_free_framing_not_credit_unlock():
     pricing = (APP_DIR / "templates" / "pricing.html").read_text()
-    assert "2 credits per report unlocks all formats" in pricing
+    # Exports are free for all reports — no unlock is sold or priced.
+    assert "Exports are free" in pricing
+    assert "Nothing. Exports are free for all reports" in pricing
+    assert "2 credits per report unlocks all formats" not in pricing
+    assert "unlock" not in pricing.lower()
+    assert "unlock" not in (APP_DIR / "templates" / "signup.html") \
+        .read_text().lower()

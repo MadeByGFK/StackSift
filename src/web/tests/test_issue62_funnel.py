@@ -258,7 +258,11 @@ def _login(route_env, email="funnelbuyer@example.com"):
 
 
 def test_checkout_route_emits_purchase_start(route_env, monkeypatch):
-    from app import stripe_billing
+    # Phase C premise (spec Decision 12): events naming credit packs
+    # stop being emitted when the pack UI goes. The retired checkout
+    # route emits NO purchase_start, creates no purchase row, and makes
+    # no Stripe call — it answers the uniform 410 retirement.
+    from app import models, stripe_billing
 
     user_id, csrf = _login(route_env)
     captured = []
@@ -267,18 +271,19 @@ def test_checkout_route_emits_purchase_start(route_env, monkeypatch):
         status_code = 200
 
         def json(self):
-            # The merged checkout path (#84) requires the session id as well
-            # as the URL — it records pending purchases before the call.
             return {"id": "cs_test_123", "url": "https://checkout.stripe.com/pay/cs_test_123"}
 
     monkeypatch.setattr(stripe_billing.httpx, "post",
                         lambda url, data=None, auth=None, headers=None, timeout=None: (
                             captured.append(url) or _FakeResp()))
     resp = route_env.client.post("/credits/checkout", data={"pack_id": "growth", "csrf_token": csrf})
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 410, resp.text
+    assert "retired" in resp.json()["error"].lower()
+    assert captured == []
     rows = _events_from_sessions(route_env, funnel.PURCHASE_START, user_id)
-    assert len(rows) == 1
-    assert rows[0].meta == {"pack_id": "growth"}
+    assert rows == []
+    with route_env.sessions() as db:
+        assert db.query(models.CreditPurchase).count() == 0
 
 
 def _events_from_sessions(route_env, event_name, user_id):

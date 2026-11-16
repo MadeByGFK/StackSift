@@ -16,6 +16,7 @@ Presentation only: no content, engine, pricing or credit behavior here.
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -121,6 +122,9 @@ class ResolvedTokens:
     client_name: str | None = None
     report_title: str | None = None
     logo_path: str | None = None
+    # Issue #163 (A6): stored pixel dimensions for contain-fit scaling.
+    logo_width: int | None = None
+    logo_height: int | None = None
 
 
 def resolve_tokens(branding=None) -> ResolvedTokens:
@@ -143,6 +147,8 @@ def resolve_tokens(branding=None) -> ResolvedTokens:
         client_name=b.get("client_name") or None,
         report_title=b.get("report_title") or None,
         logo_path=b.get("logo_path") or None,
+        logo_width=b.get("logo_width") or None,
+        logo_height=b.get("logo_height") or None,
     )
 
 
@@ -321,13 +327,35 @@ class _DesignedPDF(FPDF):
         pdf = self
         tok = self.tokens
         if tok.logo_path:
+            # Issue #163 (A6): contain-fit inside max 40mm x 10mm,
+            # aspect preserved, dimensions computed from the stored
+            # pixel dimensions (or the image file itself). A render
+            # failure never fails the export — the business-name text
+            # still renders — but it is logged as a warning containing
+            # no branding text or bytes.
             try:
                 if Path(str(tok.logo_path)).is_file():
-                    pdf.image(str(tok.logo_path), x=pdf.l_margin,
-                              y=pdf.get_y(), h=10)
-                    pdf.ln(12)
+                    px_w, px_h = tok.logo_width, tok.logo_height
+                    if not px_w or not px_h:
+                        from PIL import Image as _PILImage
+                        with _PILImage.open(str(tok.logo_path)) as _im:
+                            px_w, px_h = _im.size
+                    if px_w and px_h:
+                        scale = min(40.0 / px_w, 10.0 / px_h)
+                        img_w, img_h = px_w * scale, px_h * scale
+                    else:
+                        img_w, img_h = None, 10.0
+                    if img_w:
+                        pdf.image(str(tok.logo_path), x=pdf.l_margin,
+                                  y=pdf.get_y(), w=img_w, h=img_h)
+                    else:
+                        pdf.image(str(tok.logo_path), x=pdf.l_margin,
+                                  y=pdf.get_y(), h=img_h)
+                    pdf.ln(img_h + 2)
             except Exception:
-                pass  # a bad logo must never fail an export
+                logging.getLogger(__name__).warning(
+                    "Branding logo could not be rendered; export "
+                    "continues without the logo image.")
         if tok.business_name:
             self.font("B", 9)
             pdf.set_text_color(*tok.accent)
@@ -708,10 +736,16 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
         for point in data.get("diagnostic_explanation") or []:
             para(f"- {point}")
 
-    # Incident
+    # Incident — Issue #170 S1 (Decision 14 as amended by A3): the
+    # numbered heading aligns the standard PDF with the web Report
+    # surface, and the Observed/Correlated/Hypothesized groups below
+    # NEWLY DISPLAY existing supporting_evidence data in the standard
+    # PDF (it rendered none before this slice — a content addition,
+    # not a rename). Captions are the A1 membership-faithful strings.
+    # The 'none' branch carries no supporting_evidence key: guarded.
     incident = data.get("incident_section") or {}
     if incident:
-        heading("Incident")
+        heading("01 Incident")
         if incident.get("type") == "none":
             if incident.get("message"):
                 para(incident["message"])
@@ -724,11 +758,34 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
                 line(f"Starting point: {incident['starting_point']}", size=10)
             if incident.get("timing_note"):
                 para(incident["timing_note"], style="I")
+            _se = incident.get("supporting_evidence") or {}
+            for _key, _label, _caption in (
+                ("observed", "Observed",
+                 "Shares infrastructure with the lead issue."),
+                ("correlated", "Correlated",
+                 "Aligned with the degradation window, or persistent "
+                 "across the observation window; "
+                 "no shared cause is established."),
+                ("hypothesized", "Hypothesized",
+                 "Shares infrastructure with the lead issue and shows "
+                 "a possible contributor signal \u2014 unproven."),
+            ):
+                _items = _se.get(_key) or []
+                if not _items:
+                    continue
+                line(_label, size=11, style="B")
+                para(_caption, size=9)
+                for _item in _items:
+                    para(f"[{_item[2]}] {_item[0]} (x{_item[1]})", size=10)
+                _total = _se.get(f"{_key}_total", len(_items))
+                if _total > len(_items):
+                    para(f"{_total - len(_items)} more not shown",
+                         size=9, style="I")
 
     # Notable events
     notable = data.get("notable_events") or []
     if notable:
-        heading("Notable Events")
+        heading("02 Notable Events")
         for event in notable:
             para(f"[{event.get('level', '')}] {event.get('template', '')} "
                  f"(x{event.get('count', '')})")
@@ -740,7 +797,7 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
         # legend would not fit on this page, start the section on a new one.
         if pdf.get_y() + 66 > pdf.h - pdf.b_margin:
             pdf.add_page()
-        heading("Timeline")
+        heading("03 Timeline")
         line("Warnings + errors per 5 min", size=10)
         totals = [
             (b.get("critical", 0) or 0) + (b.get("error", 0) or 0)
@@ -801,7 +858,7 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
 
     # All issues
     if sorted_issues:
-        heading("All Issues")
+        heading("04 All Issues")
         for template, detail in sorted_issues[:MAX_ISSUES]:
             detail = detail or {}
             line(f"[{detail.get('level', '')}] (x{detail.get('count', '')})",
@@ -811,13 +868,20 @@ def generate_report_pdf(manifest_json: str, filename: str = "report",
             para(f"... and {len(sorted_issues) - MAX_ISSUES} more issue patterns "
                  f"not shown.", style="I")
     elif results:
-        heading("All Issues")
+        heading("04 All Issues")
         para("No warnings, errors, or critical entries found.")
 
-    # Malformed notice
+    # Analysis notices — Issue #170 S1 §05: the malformed-lines notice
+    # keeps its exact base text, gathered under the numbered heading
+    # with the adapted-format notice (web parity).
+    if results.get("malformed_lines", 0) > 0 or data.get("adapted"):
+        heading("05 Analysis Notices")
     if results.get("malformed_lines", 0) > 0:
         para(f"{results['malformed_lines']} lines could not be parsed and were "
              f"excluded.", style="I")
+    if data.get("adapted"):
+        para("Your file was detected as JSON-lines and converted "
+             "automatically.", style="I")
 
 
     buf = BytesIO()

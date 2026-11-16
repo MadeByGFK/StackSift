@@ -424,25 +424,31 @@ def test_t34_invariant_snapshot_consistent(db, user):
 # --- T35: Signup replay ------------------------------------------------------
 
 def test_t35_signup_replay(db, user):
-    """Verify twice / recreate same email -> at most one reward."""
+    """Phase C re-base (C4): the signup reward is DISABLED deliberately.
+
+    Old premise: verify twice / recreate same email -> at most one
+    10-credit reward, with the eligibility row recording the grant.
+    New premise, same replay shapes and stronger: EVERY call returns
+    None and writes nothing — no grant, no credit account, no ledger
+    row, and no SignupEligibility row at all (the disabled early
+    return fires before any eligibility mutation), for the first
+    user, on replay, and for a second user id with the same email.
+    """
     email = f"{user.hex[:8]}@test.com"
-    g1 = C.grant_signup_reward(db, user, email)
+    assert C.grant_signup_reward(db, user, email) is None
     db.commit()
-    assert g1 is not None and g1.issued == 10
 
     assert C.grant_signup_reward(db, user, email) is None
     db.commit()
 
-    elig = db.get(models.SignupEligibility, email.strip().lower())
-    elig.user_id = None  # simulates ON DELETE SET NULL
-    db.commit()
-    elig = db.get(models.SignupEligibility, email.strip().lower())
-    assert elig is not None and elig.user_id is None
-    assert elig.grant_issued is True
-
     uid2 = uuid.uuid4()
     assert C.grant_signup_reward(db, uid2, email) is None
     db.commit()
+
+    assert db.query(models.CreditGrant).count() == 0
+    assert db.query(models.CreditAccount).count() == 0
+    assert db.query(models.CreditLedger).count() == 0
+    assert db.query(models.SignupEligibility).count() == 0
 
 
 # --- T36: Revocation queue ----------------------------------------------------

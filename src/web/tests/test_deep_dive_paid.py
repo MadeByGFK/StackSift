@@ -78,34 +78,67 @@ def _eligible_payload():
 
 
 def _generate(auth_env, rid, csrf):
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): NEW
+    # Analysis Report generation is dollar-only. Fixtures seed a
+    # completed $9 product purchase + available entitlement for the
+    # source owner, and the POST redeems it — no credits move.
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     return auth_env.client.post(
         f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
+
+
+def _generate_raw(auth_env, rid, csrf):
+    """POST deep-dive WITHOUT seeding an entitlement (402 premise)."""
+    return auth_env.client.post(
+        f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
+
+
+def _redemptions(auth_env, user_id):
+    from app import models
+    db = auth_env.sessions()
+    try:
+        return db.query(models.EntitlementRedemption).join(
+            models.Entitlement,
+            models.Entitlement.id == models.EntitlementRedemption.entitlement_id,
+        ).filter(models.Entitlement.user_id == user_id).all()
+    finally:
+        db.close()
 
 
 # --- charging core -----------------------------------------------------------
 
 def test_analysis_success_charges_3_once_and_creates_report(auth_env):
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): the
+    # 3-credit charge is retired for NEW purchases. Success now
+    # redeems the $9 entitlement exactly once: price_cents == 900,
+    # credit balance and credit Operations untouched, artifact is a
+    # distinct deep_dive Result with a 90-day life (Phase A terms).
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     r = _generate(auth_env, rid, csrf)
     assert r.status_code == 200, r.text[:300]
     body = r.json()
     assert body["status"] == "completed"
-    assert body["cost"] == 3 == C.COST_DEEP_DIVE
-    assert _balance(auth_env, user_id) == before - 3
-    ops = _analysis_ops(auth_env, user_id)
-    assert len(ops) == 1 and ops[0].status == "completed"
-    # The derived artifact is a distinct deep_dive Result, own 7-day life.
+    assert body["price_cents"] == 900
+    assert _balance(auth_env, user_id) == before  # no credit movement
+    assert _analysis_ops(auth_env, user_id) == []  # no credit Operation
+    reds = _redemptions(auth_env, user_id)
+    assert len(reds) == 1 and reds[0].status == "completed"
     from app import models
     db = auth_env.sessions()
     try:
         artifact = db.get(models.Result, uuid.UUID(body["analysis_result_id"]))
         assert artifact is not None and artifact.type == "deep_dive"
+        assert artifact.product_redemption_id == reds[0].id
         manifest = json.loads(artifact.storage_manifest)
         assert manifest["report_kind"] == "deep_dive"
         assert manifest["source_result_id"] == str(rid)
         assert (C._as_aware(artifact.expires_at)
-                - C._as_aware(artifact.ready_at)).days == 7
+                - C._as_aware(artifact.ready_at)).days == 90
+        ent = db.query(models.Entitlement).filter(
+            models.Entitlement.user_id == user_id).one()
+        assert ent.status == "redeemed"
     finally:
         db.close()
     with auth_env.sessions() as db:
@@ -113,6 +146,8 @@ def test_analysis_success_charges_3_once_and_creates_report(auth_env):
 
 
 def test_analysis_replay_same_identity_free_returns_same_artifact(auth_env):
+    # PREMISE CHANGED (#164): replay is still free and returns the
+    # same artifact — now it also consumes no second entitlement.
     _, user_id, rid, csrf = _setup(auth_env)
     first = _generate(auth_env, rid, csrf)
     assert first.status_code == 200
@@ -124,7 +159,9 @@ def test_analysis_replay_same_identity_free_returns_same_artifact(auth_env):
             first.json()["analysis_result_id"]
         assert again.json()["replayed"] is True
     assert _balance(auth_env, user_id) == before  # replay never re-charges
-    assert len(_analysis_ops(auth_env, user_id)) == 1
+    assert _analysis_ops(auth_env, user_id) == []
+    reds = _redemptions(auth_env, user_id)
+    assert len([r for r in reds if r.status == "completed"]) == 1
 
 
 def test_analysis_invalid_csrf_403_no_charge(auth_env):
@@ -138,25 +175,37 @@ def test_analysis_invalid_csrf_403_no_charge(auth_env):
 
 
 def test_analysis_insufficient_credits_402_no_operation(auth_env):
-    # Signup balance is 10 (issue #151); re-base it to 3, grant nothing
-    # extra and drain via a first generation on report 1, leaving 0
-    # (genuinely below the 3-credit cost) for report 2.
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product): credits no
+    # longer buy an Analysis Report at ANY balance. With no $9
+    # entitlement held, generation is a 402 directing to the product
+    # checkout — even with a positive credit balance — and creates no
+    # credit Operation and no redemption.
     _, user_id, rid, csrf = _setup(auth_env, extra_credits=0)
-    _drain_signup(auth_env, user_id, 7)
-    assert _balance(auth_env, user_id) == 3
+    # PREMISE CHANGED (#164 Phase C): the signup grant is removed,
+    # so the "credits exist but do not apply" balance is seeded
+    # directly in the fixture (never via the signup grant).
+    _grant(auth_env, user_id, 5)
     assert _generate(auth_env, rid, csrf).status_code == 200
-    assert _balance(auth_env, user_id) == 0
     payload = _eligible_payload()
     rid2 = _custom_result(auth_env, user_id, payload)
     csrf2 = _session_csrf(auth_env)
-    r = _generate(auth_env, rid2, csrf2)
+    before = _balance(auth_env, user_id)
+    assert before > 0  # credits exist; they simply do not apply here
+    r = _generate_raw(auth_env, rid2, csrf2)
     assert r.status_code == 402, r.text[:300]
-    assert r.json()["purchase_url"] == "/credits"
-    assert _balance(auth_env, user_id) == 0
-    assert len(_analysis_ops(auth_env, user_id)) == 1  # no new reservation
+    assert r.json()["purchase_url"] == f"/reports/{rid2}/investigation-checkout"
+    assert r.json()["checkout_url"] == f"/reports/{rid2}/investigation-checkout"
+    assert r.json()["price_cents"] == 900
+    assert _balance(auth_env, user_id) == before
+    assert _analysis_ops(auth_env, user_id) == []  # no credit reservation
+    assert len(_redemptions(auth_env, user_id)) == 1  # only report 1's
 
 
 def test_analysis_failure_charges_zero_then_retry_succeeds_once(auth_env, monkeypatch):
+    # PREMISE CHANGED (#164 / F2): a generation failure NEVER consumes
+    # the purchase — the entitlement is released back to available
+    # (redemption row 'released', no credit movement anywhere), and
+    # the retry succeeds on that same entitlement, exactly once.
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
     real = dd.build_deep_dive
@@ -164,13 +213,16 @@ def test_analysis_failure_charges_zero_then_retry_succeeds_once(auth_env, monkey
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     r = _generate(auth_env, rid, csrf)
     assert r.status_code == 500
-    assert _balance(auth_env, user_id) == before  # full release, net 0
-    ops = _analysis_ops(auth_env, user_id)
-    assert len(ops) == 1 and ops[0].status == "failed"
+    assert _balance(auth_env, user_id) == before
+    assert _analysis_ops(auth_env, user_id) == []
+    reds = _redemptions(auth_env, user_id)
+    assert len(reds) == 1 and reds[0].status == "released"
     monkeypatch.setattr(dd, "build_deep_dive", real)
     retry = _generate(auth_env, rid, csrf)
     assert retry.status_code == 200, retry.text[:300]
-    assert _balance(auth_env, user_id) == before - 3  # charged exactly once
+    assert _balance(auth_env, user_id) == before  # dollars, not credits
+    reds = _redemptions(auth_env, user_id)
+    assert sorted(x.status for x in reds) == ["completed", "released"]
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
 
@@ -233,7 +285,10 @@ def test_analysis_expired_source_410_no_charge(auth_env):
     _login(auth_env, email)
     csrf = _session_csrf(auth_env)
     before = _balance(auth_env, user_id)
-    r = _generate(auth_env, rid, csrf)
+    # No entitlement held for this source: the expired-source 410
+    # gate stands (the F5 within-window redemption case, where an
+    # entitlement IS held, is covered by the Phase A suite).
+    r = _generate_raw(auth_env, rid, csrf)
     assert r.status_code == 410
     assert _balance(auth_env, user_id) == before
     assert _analysis_ops(auth_env, user_id) == []
@@ -280,6 +335,8 @@ def test_analysis_of_batch_rejected_422_before_reservation(auth_env):
 
 
 def test_analysis_of_analysis_report_rejected_422(auth_env):
+    # PREMISE CHANGED (#164): still rejected 422 before any money
+    # movement — now measured on redemptions, not credit Operations.
     _, user_id, rid, csrf = _setup(auth_env)
     first = _generate(auth_env, rid, csrf)
     assert first.status_code == 200
@@ -288,7 +345,8 @@ def test_analysis_of_analysis_report_rejected_422(auth_env):
     r = _generate(auth_env, analysis_id, csrf)
     assert r.status_code == 422
     assert _balance(auth_env, user_id) == before
-    assert len(_analysis_ops(auth_env, user_id)) == 1
+    assert len(_redemptions(auth_env, user_id)) == 1  # no new redemption
+    assert _analysis_ops(auth_env, user_id) == []
 
 
 def test_analysis_too_many_groups_422_no_charge(auth_env):
@@ -335,28 +393,54 @@ def test_analysis_view_renders_without_internal_labels(auth_env):
     analysis_id = first.json()["analysis_result_id"]
     page = auth_env.client.get(f"/reports/{analysis_id}")
     assert page.status_code == 200, page.text[:300]
-    assert "Analysis Report" in page.text
+    # PREMISE CHANGED (fidelity rename S1-N3, 2026-11-09 naming
+    # ruling): the paid page title/heading is Investigation Report.
+    assert "Investigation Report" in page.text
     for forbidden in ("_evidence_refs", "evidence_refs",
                       "source_integrity_digest", "generator_version"):
         assert forbidden not in page.text
 
 
-def test_report_page_analysis_action_after_export(auth_env):
+def test_report_page_analysis_action_after_export(auth_env, monkeypatch):
     # PREMISE CHANGED (issue #136, one job per page): the Export ·
     # Analysis · Share button row collapsed into ONE "Actions" menu.
-    # The placement rule survives inside the menu: the Export items
-    # come first, then Analysis, then Share.
+    # PREMISE CHANGED AGAIN (fidelity G1, 2026-11-10): the menu is
+    # retired for direct controls; the placement rule survives in
+    # the cluster: Export forms first, then Share (the Analysis
+    # cluster button was later removed by the 2026-11-10 follow-up
+    # ruling — the premium card CTA is the purchase entry).
+    # #164: the dollar copy renders when the product Price is
+    # configured (this fixture env does not set it by default).
+    monkeypatch.setenv("STRIPE_PRICE_INVESTIGATION_REPORT",
+                       "price_test_investigation")
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
-    assert page.text.count('id="actions-btn"') == 1
+    assert 'id="actions-btn"' not in page.text
+    assert 'data-s1-actions' in page.text
     assert 'id="export-btn"' not in page.text
     export_at = page.text.index(f'action="/reports/{rid}/pdf"')
-    analysis_at = page.text.index('id="analysis-btn"')
     share_at = page.text.index('id="share-btn"')
-    assert export_at < analysis_at < share_at
-    assert "Analysis Report costs 3 credits" in page.text
-    assert "charged only if generation succeeds" in page.text
+    assert export_at < share_at
+    # PREMISE CHANGED (report follow-up, founder ruling 2026-11-10):
+    # the cluster "Analysis" button after the Export controls is
+    # removed — the Investigation Report purchase entry is the
+    # premium card CTA, which renders after the action cluster.
+    assert 'id="analysis-btn"' not in page.text
+    assert page.text.index('id="premium-upsell-btn"') > share_at
+    # PREMISE CHANGED (#164): dollar copy replaces the credit copy;
+    # the legacy "charged only if generation succeeds" phrase must
+    # NOT appear on the dollar path (A6(3) — payment is captured at
+    # checkout; a failure simply never consumes the purchase).
+    # PREMISE CHANGED (Release #7 F4 residue, Remediation 1 Part B):
+    # the report page's purchase paragraphs now carry the approved
+    # PAY_NOW_PROMISE wording instead of the old captured/never-
+    # consumed segment.
+    assert "Investigation Report costs $9" in page.text
+    assert "You pay by card at checkout" in page.text
+    assert "Payment is captured at checkout" not in page.text
+    assert "Analysis Report costs 3 credits" not in page.text
+    assert "charged only if generation succeeds" not in page.text
 
 
 def test_reports_list_row_has_analysis_action(auth_env):
@@ -366,55 +450,72 @@ def test_reports_list_row_has_analysis_action(auth_env):
     assert "analysis-open" in page.text
 
 
-def test_reports_list_deep_dive_row_has_no_extend_but_normal_row_does(auth_env):
-    # The retention route only admits analysis/comparison sources, so
-    # an Extend action on an Analysis Report (deep_dive) row is a dead
-    # button (its POST 404s). It must not be rendered for that row,
-    # while a normal report row keeps Extend unchanged.
+def test_reports_list_rows_have_no_extend_after_phase_c_removal(auth_env):
+    # Was test_reports_list_deep_dive_row_has_no_extend_but_normal_row_does.
+    # PREMISE CHANGED (#164 Phase C, Decision 5): the My Reports
+    # Extend control is REMOVED for every row — retention extensions
+    # are no longer sold. The #106 Stage 2 suppression for Analysis
+    # Report (deep_dive) rows is therefore subsumed: neither the
+    # deep_dive row nor a normal report row renders an Extend
+    # control or a retention form action.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200, gen.text[:300]
     analysis_id = gen.json()["analysis_result_id"]
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
-    cards = page.text.split('<li class="card">')
+    cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
-        # Match the row's own View link (not e.g. a source row's
-        # Analysis link, which also points at the derived report).
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+        # Match the row's own Open link (not e.g. a source row's
+        # Investigation Report link, which also points at the
+        # derived report). (Label premise changed 2026-11-10,
+        # PR #177 S3-G1/rename: "View" -> "Open", "Analysis" ->
+        # "Investigation Report".)
+        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]
 
+    # The Extend control is a submit button inside a form posting
+    # to the row's retention URL; assert on those exact markers
+    # (the trailing page script mentions retention in comments).
     normal_card = _card_for(str(rid))
-    assert "Extend" in normal_card
-    assert f"/reports/{rid}/retention" in normal_card
+    assert ">Extend</button>" not in normal_card
+    assert f"/reports/{rid}/retention" not in normal_card
     deep_dive_card = _card_for(analysis_id)
-    assert "Extend" not in deep_dive_card
+    assert ">Extend</button>" not in deep_dive_card
     assert f"/reports/{analysis_id}/retention" not in deep_dive_card
 
 
 # --- cross-feature interactions ------------------------------------------------
 
 def test_export_times_analysis_charges_are_independent(auth_env):
+    # PREMISE CHANGED (#164 Phase A): the independence survives with
+    # new terms — the SOURCE export unlock is still its own 2-credit
+    # charge and does not pay for the Analysis Report; the Analysis
+    # Report is bought with the $9 entitlement (no credits), and ITS
+    # exports are included free (they never hit the credit unlock).
+    # PREMISE CHANGED AGAIN (#164 Phase C): exports are FREE for ALL
+    # reports — the source PDF no longer charges the 2-credit unlock
+    # either, so independence is now shown by a balance that never
+    # moves on any leg while each leg still succeeds on its own
+    # terms (free export; $9 entitlement generation; free artifact
+    # export), with no credit Operation created by any of them.
     _, user_id, rid, csrf = _setup(auth_env)
     before = _balance(auth_env, user_id)
-    # Export unlock on the SOURCE (2) does not pay for Analysis (3),
-    # and Analysis does not unlock the source's exports.
     pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200
-    assert _balance(auth_env, user_id) == before - 2
+    assert _balance(auth_env, user_id) == before  # export is free
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200
-    assert _balance(auth_env, user_id) == before - 5
-    # The Analysis Report is a distinct report identity: the source's
-    # unlock does NOT carry over — its first export charges its own 2.
+    assert _balance(auth_env, user_id) == before  # dollar, not credits
     analysis_id = gen.json()["analysis_result_id"]
     apdf = auth_env.client.post(
         f"/reports/{analysis_id}/pdf", data={"csrf_token": csrf})
     assert apdf.status_code == 200 and apdf.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 7
+    assert _balance(auth_env, user_id) == before  # exports included
+    assert _analysis_ops(auth_env, user_id) == []  # no credit Operation
     with auth_env.sessions() as db:
         assert C.verify_account_invariants(db, user_id) == []
 
@@ -429,7 +530,9 @@ def test_share_times_analysis_share_stays_free_and_separate(auth_env):
     assert _balance(auth_env, user_id) == before  # sharing is free
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200
-    assert _balance(auth_env, user_id) == before - 3
+    # PREMISE CHANGED (#164): generation is the $9 entitlement —
+    # the credit balance is untouched by it.
+    assert _balance(auth_env, user_id) == before
     # The Analysis Report itself is not shareable through the
     # single-file share path (fails closed, still no charge).
     analysis_id = gen.json()["analysis_result_id"]
@@ -437,10 +540,16 @@ def test_share_times_analysis_share_stays_free_and_separate(auth_env):
         f"/reports/{analysis_id}/share",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
     assert share2.status_code in (404, 422)
-    assert _balance(auth_env, user_id) == before - 3
+    assert _balance(auth_env, user_id) == before
 
 
 def test_retention_times_analysis_source_extension_leaves_artifact(auth_env):
+    # PREMISE CHANGED (#164 Phase C, Decision 5): a source extension
+    # can no longer be bought — the attempt refuses 410 with the
+    # retirement message, no charge, and NO date change anywhere:
+    # the source keeps its recorded expiry and the Analysis
+    # artifact's own retention is equally untouched (independent
+    # life — 90 days under the #164 dollar terms).
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200
@@ -456,13 +565,14 @@ def test_retention_times_analysis_source_extension_leaves_artifact(auth_env):
     ext = auth_env.client.post(
         f"/reports/{rid}/retention",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
-    assert ext.status_code == 200, ext.text[:300]
-    assert _balance(auth_env, user_id) == before - 1  # retention's own price
+    assert ext.status_code == 410, ext.text[:300]
+    assert ext.json()["error"] == (
+        "Retention extensions are no longer sold; paid reports "
+        "include 90 days of retention.")
+    assert _balance(auth_env, user_id) == before  # no charge
     db = auth_env.sessions()
     try:
-        # Source extended +90 days; the Analysis artifact's own
-        # retention is untouched (independent 7-day life).
-        assert db.get(models.Result, rid).expires_at > source_expiry
+        assert db.get(models.Result, rid).expires_at == source_expiry
         assert db.get(models.Result, analysis_id).expires_at == artifact_expiry
     finally:
         db.close()

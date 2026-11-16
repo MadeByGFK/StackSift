@@ -538,7 +538,13 @@ def test_8_web_card_structure():
 
 
 def test_8_actions_menu_preserved_verbatim(auth_env):
+    # PREMISE CHANGED (#164 Phase A, A10: dollar-product; Phase C,
+    # Decision 4: exports free for ALL reports): the menu structure
+    # is preserved verbatim, but the Export confirm copy is the
+    # Phase C free copy, not the 2-credit or export-unlocked one.
     _, _user_id, rid, csrf = _setup(auth_env)
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     resp = auth_env.client.post(
         f"/reports/{rid}/deep-dive", data={"csrf_token": csrf})
     assert resp.status_code == 200, resp.text[:300]
@@ -546,15 +552,33 @@ def test_8_actions_menu_preserved_verbatim(auth_env):
     page = auth_env.client.get(f"/reports/{analysis_id}")
     assert page.status_code == 200, page.text[:300]
     html = page.text
-    assert 'id="actions-btn"' in html
-    assert 'id="actions-menu"' in html
-    assert 'id="ss-confirm"' in html
+    # PREMISE CHANGED (fidelity G1, 2026-11-10): the Actions menu
+    # is retired for direct export controls; the forms, endpoints
+    # and confirm copy below are preserved exactly.
+    assert 'id="actions-btn"' not in html
+    assert 'id="actions-menu"' not in html
+    assert 'data-s1-actions' in html
+    # PREMISE CHANGED (Release #7 F1, 2026-11-14): the ss-confirm
+    # modal is REMOVED from the page.
+    assert 'id="ss-confirm"' not in html
     for action in (f"/reports/{analysis_id}/pdf",
                    f"/reports/{analysis_id}/exports/csv",
                    f"/reports/{analysis_id}/exports/json"):
         assert f'action="{action}"' in html
+    # PREMISE CHANGED (#164 Phase C, Decision 4 / C2): exports are
+    # free for ALL reports, so every export form carries the single
+    # free confirm copy — the export-unlocked wording (which implied
+    # a paid unlock state) and the 2-credit wording are both gone.
+    # PREMISE CHANGED (Release #7 F1): the free confirm copy is
+    # retired with the popup — NO export form carries data-confirm;
+    # exports fire directly.
+    assert html.count("data-confirm") == 0
+    assert html.count('data-confirm="Exports are free for this '
+                      'report."') == 0
+    assert ('data-confirm="This report is export-unlocked — the PDF '
+            'download is free."') not in html
     assert ('data-confirm="Export costs 2 credits and unlocks PDF, CSV '
-            'and JSON for this report."') in html
+            'and JSON for this report."') not in html
     assert 'class="severity-chip"' in html
     assert 'class="count-badge"' in html
 

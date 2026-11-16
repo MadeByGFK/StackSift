@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackSift — {{ product_name }}</title>
+<link rel="icon" type="image/png" sizes="512x512" href="/static/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css?v=4">
+<style>
+.consent-box { max-width: 520px; margin: 48px auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 32px; text-align: center; }
+.consent-box h1 { margin: 0 0 12px; font-size: 1.5rem; }
+.consent-box .file { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: rgba(0,0,0,0.2); padding: 8px 12px; border-radius: 6px; margin: 12px 0; word-break: break-all; }
+.consent-actions { display: flex; gap: 12px; justify-content: center; }
+.btn-confirm { background: var(--accent); color: #1a1a2e; border: none; padding: 12px 32px; border-radius: 8px; font-weight: 700; font-size: 1rem; cursor: pointer; }
+.btn-confirm:hover { filter: brightness(1.1); }
+.btn-cancel { border: 1px solid var(--border); color: var(--text); background: transparent; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 1rem; cursor: pointer; font-family: inherit; }
+.btn-cancel:hover { border-color: var(--accent); }
+.consent-note { margin-top: 20px; font-size: 0.85rem; color: var(--muted); }
+</style>
+</head>
+<body>
+{# Issue #164 S6/S7 port (amendment A3): Batch/Compare returns get the
+   header + the shared s6- consent composition (the same class family
+   as the ported paid_consent.html renders, so the two templates
+   cannot drift); Large-File (oversize) returns keep the legacy
+   composition exactly. The five states' markup/text are shared — only
+   the class names switch — so no state's copy can diverge. #}
+{% set s6_return = operation in ["batch", "compare_logs"] %}
+{% set box_class = "s6-consent-panel" if s6_return else "consent-box" %}
+{% set file_class = "s6-chip" if s6_return else "file" %}
+{% set actions_class = "s6-actions" if s6_return else "consent-actions" %}
+{% set confirm_class = "s6-btn-confirm" if s6_return else "btn-confirm" %}
+{% set cancel_class = "s6-btn-cancel" if s6_return else "btn-cancel" %}
+{% set note_class = "s6-note" if s6_return else "consent-note" %}
+{% if s6_return %}
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="logo">stacksift<span>.</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg></button>
+    <nav class="nav-links" id="site-nav">
+      {% if current_user %}
+        <a href="/reports">My Reports</a>
+        <a href="/settings">Settings</a>
+        <form method="post" action="/auth/logout" data-auth-form data-success-url="/" style="display:inline;margin:0">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="nav-logout">Log out</button>
+        </form>
+      {% else %}
+        <a href="/credits">Pricing</a>
+        <a href="/login" class="btn-login">Log in</a>
+        <a href="/signup" class="btn-signup">Sign up</a>
+      {% endif %}
+    </nav>
+  </header>
+</div>
+<main class="s6-shell">
+{% endif %}
+<div class="{{ box_class }}">
+  {% if state == "ready" %}
+  <h1>Payment received — {{ product_name }}</h1>
+  <p>Your purchase is settled and ready to run. Re-confirm the same
+     files below to start — you will not be charged again.</p>
+  {% if filename %}<div class="{{ file_class }}">{{ filename }}</div>{% endif %}
+  <form method="post" action="{{ confirm_action }}" class="{{ actions_class }}">
+    <input type="hidden" name="consent_id" value="{{ consent_id }}">
+    <input type="hidden" name="file_hash" value="{{ file_hash }}">
+    <input type="hidden" name="idempotency_key" value="{{ consent_id }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="{{ confirm_class }}">{{ run_label }}</button>
+  </form>
+  <p class="{{ note_class }}">Exports are included. Results are available for 90 days.</p>
+  {% elif state == "settling" %}
+  <h1>Payment received — {{ product_name }}</h1>
+  <p>Your payment is still settling. This usually takes a few seconds —
+     you do not need to pay again. Check again in a moment and this page
+     will offer the Run action for the files you bought.</p>
+  {% if filename %}<div class="{{ file_class }}">{{ filename }}</div>{% endif %}
+  <div class="{{ actions_class }}">
+    <a href="{{ return_url }}" class="{{ confirm_class }}">Check again</a>
+    <a href="/" class="{{ cancel_class }}">Home</a>
+  </div>
+  <p class="{{ note_class }}">If this does not clear shortly, contact disputes@goodfolkdigital.com.</p>
+  {% elif state == "no_consent" %}
+  <h1>Payment received — {{ product_name }}</h1>
+  <p>You already hold this purchase — do not buy it again. The upload
+     from before checkout is no longer saved, so upload the same
+     file(s) once more and the quote step will offer the Run action
+     instead of checkout.</p>
+  <div class="{{ actions_class }}">
+    <a href="{{ start_path }}" class="{{ confirm_class }}">Upload the same files</a>
+    <a href="/" class="{{ cancel_class }}">Home</a>
+  </div>
+  <p class="{{ note_class }}">Exports are included. Results are available for 90 days.</p>
+  {% elif state == "cancelled" %}
+  <h1>Checkout cancelled — {{ product_name }}</h1>
+  <p>Nothing was charged. You can start again whenever you are ready.</p>
+  <div class="{{ actions_class }}">
+    <a href="{{ start_path }}" class="{{ confirm_class }}">Start again</a>
+    <a href="/" class="{{ cancel_class }}">Home</a>
+  </div>
+  {% else %}
+  <h1>{{ product_name }}</h1>
+  <p>We could not find a purchase or a pending upload for this
+     checkout. If you were charged, contact
+     disputes@goodfolkdigital.com and we will sort it out.</p>
+  <div class="{{ actions_class }}">
+    <a href="/" class="{{ cancel_class }}">Home</a>
+  </div>
+  {% endif %}
+</div>
+{% if s6_return %}
+</main>
+{% set suppress_credit_badge = true %}
+{% include "auth_form_script.html" %}
+{% include "nav_script.html" %}
+{% endif %}
+</body>
+</html>

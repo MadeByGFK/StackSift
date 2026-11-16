@@ -105,7 +105,10 @@ def test_sample_report_public_brief_banner_sequence(sample_client):
     assert r.status_code == 200, r.text[:300]
     body = r.text
     assert BANNER in body
-    assert "Investigation Brief" in body
+    # PREMISE CHANGED (fidelity rename S1-N3): the sample page's
+    # §01 heading is "Investigation Report" (PDF/text keep the
+    # internal Brief label — see the PDF test below).
+    assert "Investigation Report" in body
     assert LEAD in body
     assert dd.BRIEF_NOT_ESTABLISHED in body
     assert dd.BRIEF_SEQUENCE_CAPTION in body
@@ -129,6 +132,11 @@ def test_sample_pdf_public_brief_and_sample_label(sample_client):
     assert "connection pool exhausted" in text
     assert "SAMPLE" in text
     assert "08:31:07" in text and "08:35:44" in text
+    # Issue #163 (A9 premise change 2): EXTENDED — the sample PDF now
+    # ALSO carries the WellInstance brand header (Decision 8 / A5
+    # constant profile), together with the SAMPLE label above, never
+    # instead of it.
+    assert "WellInstance" in text
 
 
 def test_sample_secret_redacted_on_both_surfaces(sample_client):
@@ -274,9 +282,13 @@ def _fresh_projection_and_pdf_text():
     artifact = _sample_artifact()
     projection = dd.public_projection(dd.validate_artifact(artifact))
     from app.pdf_export import generate_deep_dive_pdf
+    # Issue #163 (A9 premise change 1): the helper's branding dict is
+    # now the A5 constant sample profile (WellInstance brand + the
+    # SAMPLE report_title), not the title-only dict.
+    from app import branding as _branding
     pdf = generate_deep_dive_pdf(
         json.dumps(artifact), filename="sample-analysis-report",
-        branding={"report_title": "SAMPLE — StackSift Analysis Report"})
+        branding=_branding.sample_branding_dict())
     return projection, _pdf_text(pdf)
 
 
@@ -357,7 +369,14 @@ def test_teeth_sample_template_gating_controls_scripts():
     sample = template.render(analysis_projection=projection,
                              filename="sample-incident.log",
                              is_sample=True)
-    assert "/auth/balance" in owned
+    # PREMISE CHANGED (#164 Phase C, C3): the shared account script
+    # no longer fetches the retired balance API on ANY page — the
+    # owned render carries the script's surviving non-credit duties
+    # (wireAuthForm) and NO balance fetch; the sample render carries
+    # neither. The gating contrast is the script itself, as before.
+    assert "wireAuthForm" in owned
+    assert "wireAuthForm" not in sample
+    assert "/auth/balance" not in owned
     assert "Back to My Reports" in owned
     assert "/auth/balance" not in sample
     assert "<form" not in sample.lower()
@@ -372,12 +391,17 @@ def test_credits_faq_sample_link_exactly_one_and_pricing_redirect(
     assert r.status_code == 200
     body = r.text
     assert body.count('href="/sample-report"') == 1
-    anchor = body.index("What does the Analysis Report include?")
+    # PREMISE CHANGED (#170 S5a, naming ruling 2026-11-09): the FAQ
+    # heading was renamed "Analysis Report" -> "Investigation Report".
+    anchor = body.index("What does the Investigation Report include?")
     entry = body[anchor:body.index("<h3", anchor + 1)]
     assert 'href="/sample-report"' in entry
     assert "See a sample Investigation Report" in entry
-    assert "3 credits per run" in entry
-    assert "$9" not in entry
+    # PREMISE CHANGED (#164): the FAQ entry states the ruled dollar
+    # price — "$9 per report" — not the retired credit price.
+    assert "3 credits per run" not in entry
+    assert "$9" in entry
+    assert "It costs $9 per report" in entry
     redir = sample_client.get("/pricing", follow_redirects=False)
     assert redir.status_code == 301
     assert redir.headers["location"] == "/credits"
@@ -492,6 +516,10 @@ def test_owned_deep_dive_page_and_pdf_untouched(auth_env, cold_cache):
     """Regression gate: owned Analysis Report rendering keeps its
     controls/scripts and its PDF carries no SAMPLE label."""
     _email, _user_id, rid, csrf = _setup(auth_env)
+    # PREMISE CHANGED (#164): generation redeems a seeded $9
+    # entitlement (dollar-paid owned report; rendering untouched).
+    from product_seed import seed_entitlement_for_source
+    seed_entitlement_for_source(auth_env.sessions, rid)
     gen = auth_env.client.post(f"/reports/{rid}/deep-dive",
                                data={"csrf_token": csrf})
     assert gen.status_code == 200, gen.text[:300]
@@ -500,7 +528,10 @@ def test_owned_deep_dive_page_and_pdf_untouched(auth_env, cold_cache):
     assert page.status_code == 200
     assert "<form" in page.text.lower()
     assert "Back to My Reports" in page.text
-    assert "/auth/balance" in page.text
+    # PREMISE CHANGED (#164 Phase C, C3): the owned page's shared
+    # script no longer fetches the retired balance API.
+    assert "/auth/balance" not in page.text
+    assert "credit-badge" not in page.text
     assert BANNER not in page.text
     pdf = auth_env.client.post(f"/reports/{analysis_id}/pdf",
                                data={"csrf_token": csrf})

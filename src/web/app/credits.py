@@ -46,6 +46,45 @@ def _as_aware(dt: datetime | None) -> datetime | None:
     return dt
 
 
+def assign_ss_id(db: Session, result, when: datetime) -> str:
+    """Issue #170 fidelity (S1-C2): assign the SS-format display ID.
+
+    Daily sequence: the suffix is one past the highest suffix already
+    stored for the analysis date, so values are unique per day and
+    stable once flushed. Called inside the store transaction, after
+    the Result row exists; the column's unique index is the backstop.
+
+    PR #178 remediation (F1): assignment is serialized BEFORE the
+    existing IDs are read by taking the dedicated ``global:ss_id``
+    capacity-scope row lock (the _ensure_capacity_scope /
+    lock_share_rate_bucket precedent: upsert-then-SELECT FOR UPDATE).
+    All three writers (store_result, store_product_result,
+    finish_free) funnel through this function, so the central lock
+    serializes every assignment with no call-site changes; without
+    it, concurrent completions on PostgreSQL could read the same
+    maximum and collide on the unique index. The scope's limit is 1
+    (a single serialized assignment stream; ``used`` is never
+    incremented — the row exists purely as the lock). On SQLite
+    FOR UPDATE is a no-op, so single-connection tests pin the
+    lock-row contract.
+    """
+    from app.fidelity import format_ss_id
+    _ensure_capacity_scope(db, "global:ss_id", 1)
+    prefix = f"SS-{when.strftime('%Y%m%d')}-"
+    existing = db.execute(
+        select(models.Result.ss_id).where(
+            models.Result.ss_id.like(prefix + "%"))
+    ).scalars().all()
+    highest = 0
+    for value in existing:
+        try:
+            highest = max(highest, int(str(value).rsplit("-", 1)[1]))
+        except (ValueError, IndexError):
+            continue
+    result.ss_id = format_ss_id(when, highest + 1)
+    return result.ss_id
+
+
 # ---------------------------------------------------------------------------
 # Configuration (v11.1 Section 6: unvalidated proposals, config not hardcoded)
 # ---------------------------------------------------------------------------
@@ -267,7 +306,17 @@ def grant_credits(
 
 
 def grant_signup_reward(db: Session, user_id: uuid.UUID, email: str) -> models.CreditGrant | None:
-    """Grant the ruled 10-credit signup reward. Idempotent per email."""
+    """Issue #164 Phase C (C4): the signup reward is RETIRED.
+
+    Deliberate disabled early return BEFORE any eligibility, account,
+    grant, or ledger write — never a zero-quantity grant (grant_credits
+    keeps its quantity > 0 invariant; routing 0 through it would send
+    every signup down the AssertionError/log path). Existing accounts
+    are neither clawed back nor topped up; historical grant rows stay
+    untouched (Decision 7). The helper below the return is preserved
+    verbatim for historical/helper tests.
+    """
+    return None
     normalized = email.strip().lower()
     elig = db.get(models.SignupEligibility, normalized)
     if elig is None:
@@ -394,6 +443,33 @@ def create_consent(
     return consent
 
 
+def create_product_consent(
+    db: Session,
+    user_id: uuid.UUID,
+    operation_type: str,
+    input_hash: str,
+    sku: str,
+) -> models.Consent:
+    """Create a zero-cost product (dollar) consent (B-7).
+
+    A product consent is a single-use authorization, NOT the value
+    token (the entitlement is): max_cost=0 with the SKU bound on the
+    row, same pricing version and 15-minute TTL as credit consents.
+    """
+    consent = models.Consent(
+        user_id=user_id,
+        operation_type=operation_type,
+        input_hash=input_hash,
+        max_cost=0,
+        sku=sku,
+        pricing_version=PRICING_VERSION,
+        expires_at=_utcnow() + CONSENT_TTL,
+    )
+    db.add(consent)
+    db.flush()
+    return consent
+
+
 def validate_consent(
     db: Session,
     consent_id: uuid.UUID,
@@ -401,11 +477,27 @@ def validate_consent(
     operation_type: str,
     input_hash: str,
     cost: int,
+    *,
+    sku: str | None = None,
 ) -> models.Consent:
-    """Validate a consent is usable for this operation. Raises AdmissionError."""
+    """Validate a consent is usable for this operation. Raises AdmissionError.
+
+    Billing mode (B-7): with ``sku`` given (dollar admission), the
+    consent must be a product consent for exactly that SKU at zero
+    cost — a credit consent, a cross-SKU consent, or a nonzero-cost
+    consent fails with a billing-mode mismatch. Without ``sku``
+    (every existing credit caller), the consent must be a credit
+    consent (sku IS NULL): a product consent can never satisfy a
+    credit charge on any path.
+    """
     consent = db.get(models.Consent, consent_id, populate_existing=True)
     if consent is None:
         raise AdmissionError("consent not found")
+    if sku is not None:
+        if consent.sku != sku or consent.max_cost != 0:
+            raise AdmissionError("consent billing mode mismatch")
+    elif getattr(consent, "sku", None) is not None:
+        raise AdmissionError("consent billing mode mismatch")
     if consent.user_id != user_id:
         raise AdmissionError("consent owner mismatch")
     if consent.operation_type != operation_type:
@@ -760,12 +852,19 @@ def export_unlock_state(db: Session, user_id, source_result_id):
     rather than race a second charge.
     """
     ops = export_operations(db, user_id, source_result_id)
-    unlocked = any(op.status == "completed" for op in ops)
+    # Issue #164 Phase C (Decision 4 / C7a): exports are FREE for all
+    # reports — the unlock is an access fact (owner/share authority),
+    # not a purchase, so `unlocked` is unconditionally True. The
+    # in-progress fence is unchanged: a reserved export generation in
+    # any format still serializes concurrent generation (409).
+    unlocked = True
     in_progress = any(op.status == "reserved" for op in ops)
     return unlocked, in_progress
 
 
 def is_export_unlocked(db: Session, user_id, source_result_id) -> bool:
+    # Issue #164 Phase C: every report is export-unlocked (exports are
+    # free); kept as a function so historical callers keep their shape.
     unlocked, _ = export_unlock_state(db, user_id, source_result_id)
     return unlocked
 
@@ -805,35 +904,170 @@ def analysis_operations(db: Session, user_id, source_result_id):
     ]
 
 
+def product_analysis_completions(db: Session, user_id, source_result_id):
+    """Completed product-redemption Analysis Reports for a source (A2)."""
+    rows = db.execute(
+        select(models.EntitlementRedemption).join(
+            models.Entitlement,
+            models.Entitlement.id == models.EntitlementRedemption.entitlement_id,
+        ).where(
+            models.Entitlement.user_id == user_id,
+            models.EntitlementRedemption.source_result_id == source_result_id,
+            models.EntitlementRedemption.status == "completed",
+            models.EntitlementRedemption.result_id.isnot(None),
+        )
+    ).scalars().all()
+    return rows
+
+
 def completed_analysis_result_id(db: Session, user_id, source_result_id):
     """The derived Analysis Report Result id for a source, or None.
 
-    F4 (PR #139 remediation): only return the id when the derived
-    Result is still available — it exists, is not deleted, and is
-    not expired. The derived report keeps its own 7-day life even
-    when the source is retention-extended, so an expired/deleted
-    derived report must not be linked (report_view would 410);
-    returning None restores the source's normal Analysis action.
-    Expiry/deletion semantics match reports_list/report_view:
-    ``expires_at > now`` and ``deleted_at is None``.
+    Origin-aware union (A2): legacy credit Operations and product
+    entitlement redemptions are discovered together; the existing
+    availability rules (exists, not deleted, not expired; latest wins
+    by creation) apply identically per origin. Canonical replay
+    consults this union before any entitlement is consumed.
     """
+    candidates: list[tuple] = []  # (created_at, id_str, result_id)
     completed = [
         op for op in analysis_operations(db, user_id, source_result_id)
         if op.status == "completed" and op.result_id
     ]
-    if not completed:
+    for op in completed:
+        candidates.append((op.created_at, str(op.result_id), op.result_id))
+    for red in product_analysis_completions(db, user_id, source_result_id):
+        candidates.append((red.created_at, str(red.result_id), red.result_id))
+    if not candidates:
         return None
-    latest = max(completed, key=lambda op: (op.created_at, str(op.id)))
-    derived = db.get(models.Result, latest.result_id)
-    if derived is None:
+    candidates.sort(key=lambda c: (c[0] or _utcnow(), c[1]))
+    # Legacy rule preserved: the LATEST completion wins; if its
+    # artifact is gone/expired there is no link (None), exactly as the
+    # single-origin implementation behaved.
+    result_id = candidates[-1][2]
+    derived = db.get(models.Result, result_id)
+    if derived is None or derived.deleted_at is not None:
         return None
-    if derived.deleted_at is not None:
+    if derived.expires_at is None or _as_aware(derived.expires_at) <= _utcnow():
         return None
-    if derived.expires_at is None:
+    return result_id
+
+
+def current_replay_result_id(db: Session, user_id, source):
+    """The completed canonical Analysis Report that a Generate
+    request for ``source`` would replay TODAY, or None.
+
+    Mirrors report_deep_dive's canonical replay blocks exactly
+    (A2): a completion of either origin (legacy credit Operation,
+    product entitlement redemption) whose stored request_hash
+    equals the source's CURRENT analysis request hash. The hash
+    binds the source identity, its integrity digest, and the
+    grouping/evidence/generator/schema versions — so a report
+    produced by an older generator version has a different hash,
+    does NOT replay, and does not make a new purchase
+    unconsumable (the report page's re-purchase offer for a stale
+    prior report depends on this). A renamed re-upload is a new
+    source row with its own hash and is likewise unaffected.
+
+    Returns the replayed artifact's Result id (latest matching
+    completion wins, as in replay), or None when no hash-matching
+    completion exists — including when the source payload can no
+    longer be built (AdmissionError), in which case no replay
+    could be proven either. Artifact availability is NOT checked:
+    replay pre-empts consumption even when the artifact is gone
+    (it answers 410), so existence is what the purchase guards
+    need; callers that link the buyer to the report check the
+    artifact themselves.
+    """
+    from app import deep_dive as dd
+    try:
+        payload = result_payload(
+            source, user_id=user_id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+            product_redemption_id=source.product_redemption_id,
+            allow_expired=True)
+    except AdmissionError:
         return None
-    if _as_aware(derived.expires_at) <= _utcnow():
+    request_hash = dd.analysis_request_hash(source, payload)
+    candidates: list[tuple] = []  # (created_at, id_str, result_id)
+    for op in analysis_operations(db, user_id, source.id):
+        if op.status == "completed" and op.result_id \
+                and op.request_hash == request_hash:
+            candidates.append((op.created_at, str(op.result_id), op.result_id))
+    for red in product_analysis_completions(db, user_id, source.id):
+        if red.request_hash == request_hash:
+            candidates.append((red.created_at, str(red.result_id), red.result_id))
+    if not candidates:
         return None
-    return latest.result_id
+    candidates.sort(key=lambda c: (c[0] or _utcnow(), c[1]))
+    return candidates[-1][2]
+
+
+def is_product_paid_result(db: Session, result) -> bool:
+    """True when a Result's origin is a product redemption (#164).
+
+    Trusted provenance only (A9(c)): the origin FK on the Result row,
+    never the type or manifest labels. Phase B (B-8/B-17): this is the
+    ONE implementation — a Result whose Operation carries
+    ``entitlement_redemption_id`` is product-paid too. Every other
+    caller imports this helper; no second implementation exists.
+    """
+    if result is None:
+        return False
+    if getattr(result, "product_redemption_id", None) is not None:
+        return True
+    operation_id = getattr(result, "operation_id", None)
+    if operation_id is None:
+        return False
+    op = db.get(models.Operation, operation_id)
+    return op is not None and getattr(op, "entitlement_redemption_id", None) is not None
+
+
+def is_product_backed_operation(op) -> bool:
+    """B-17's single predicate: an Operation paid by an entitlement
+    redemption rather than by credits."""
+    return op is not None and getattr(op, "entitlement_redemption_id", None) is not None
+
+
+def export_is_free(db: Session, user_id, result) -> bool:
+    """Exports are FREE for a dollar-paid report (Decision 8 / A9(c)).
+
+    Decided from the A2 Result origin before any consent/admission is
+    created on the export routes.
+    """
+    return is_product_paid_result(db, result)
+
+
+def store_product_result(db, user_id, redemption_id, data, *, result_type="deep_dive",
+                         severity="__default__", retention_days=90):
+    """Store a Result born of a product redemption (A2/A7).
+
+    Parallel to store_result: locks/CAS the redemption row like
+    _lock_operation locks an Operation, requires it still RESERVED and
+    its entitlement not revoked (revocation CAS wins — A5), and takes
+    retention as a parameter (90 days for Phase A Investigation
+    Reports). No Operation, Consent, or ledger row is ever created.
+    """
+    from app import product_billing as _pb
+    redemption, entitlement = _pb.lock_redemption(db, redemption_id)
+    if redemption.status != "reserved":
+        raise AdmissionError("redemption is no longer reserved")
+    if entitlement.status == "revoked":
+        raise AdmissionError("entitlement revoked")
+    raw = json.dumps({k: v for k, v in data.items() if k not in ("current_user", "csrf_token")}, default=str)
+    now = _utcnow()
+    if severity == "__default__":
+        severity = outcome_severity(data)
+    result = models.Result(user_id=user_id, product_redemption_id=redemption_id,
+        type=result_type, severity=severity,
+        storage_manifest=raw, integrity_digest=hash_input(raw.encode()), byte_count=len(raw.encode()),
+        ready_at=now, expires_at=now + timedelta(days=retention_days))
+    db.add(result)
+    db.flush()
+    assign_ss_id(db, result, now)
+    db.flush()
+    return result
 
 
 def lock_share_rate_bucket(db: Session, owner: str):
@@ -930,12 +1164,29 @@ def find_operation(db, user_id, operation_type, key, request_hash):
 
 
 def _lock_operation(db, operation_id):
-    """Discovery is non-authoritative; all settlement paths use this lock order."""
+    """Discovery is non-authoritative; all settlement paths use this lock order.
+
+    Lock order (B-21, stated separately per billing mode):
+    - Credit branch (legacy, preserved exactly): capacity scopes
+      (sorted) -> CreditAccount -> CreditGrants (ID order) ->
+      Operation.
+    - Product branch (Phase B): capacity scopes (sorted) ->
+      Operation -> Entitlement -> EntitlementRedemption. NO
+      CreditAccount or CreditGrant locks, and no digest admission
+      scope (that scope belongs to admission only).
+    Returns (op, account, grants); the product branch returns
+    (op, None, {}).
+    """
     with db.no_autoflush:
         owner = db.execute(select(models.Operation.user_id).where(
             models.Operation.id == operation_id)).scalar_one_or_none()
         if owner is None:
             raise AdmissionError("operation not found")
+        # Plain (non-locking) peek at the billing-mode discriminator:
+        # it decides which branch's lock set is taken below. The
+        # authoritative row is re-read FOR UPDATE in-branch.
+        redemption_id = db.execute(select(models.Operation.entitlement_redemption_id).where(
+            models.Operation.id == operation_id)).scalar_one_or_none()
         scope_keys = db.execute(select(models.PermitScope.scope_key)
             .join(models.Permit, models.Permit.id == models.PermitScope.permit_id)
             .where(models.Permit.operation_id == operation_id)
@@ -943,6 +1194,18 @@ def _lock_operation(db, operation_id):
         for key in scope_keys:
             db.execute(select(models.CapacityScope).where(models.CapacityScope.scope_key == key)
                 .with_for_update().execution_options(populate_existing=True)).scalar_one()
+        if redemption_id is not None:
+            op = db.execute(select(models.Operation).where(models.Operation.id == operation_id)
+                .with_for_update().execution_options(populate_existing=True)).scalar_one()
+            redemption = db.execute(select(models.EntitlementRedemption).where(
+                models.EntitlementRedemption.id == redemption_id)).scalar_one()
+            db.execute(select(models.Entitlement).where(
+                models.Entitlement.id == redemption.entitlement_id)
+                .with_for_update().execution_options(populate_existing=True)).scalar_one()
+            db.execute(select(models.EntitlementRedemption).where(
+                models.EntitlementRedemption.id == redemption_id)
+                .with_for_update().execution_options(populate_existing=True)).scalar_one()
+            return op, None, {}
         account = db.execute(select(models.CreditAccount).where(models.CreditAccount.user_id == owner)
             .with_for_update().execution_options(populate_existing=True)).scalar_one()
         grant_ids = select(models.OperationAllocation.grant_id).where(
@@ -955,10 +1218,41 @@ def _lock_operation(db, operation_id):
     return op, account, {g.id: g for g in grants}
 
 
-def result_payload(result, *, user_id, operation_id=None, free_request_id=None, allow_expired=False):
-    """Validate identity and integrity before publication or replay."""
+def _product_redemption_rows(db, op):
+    """The (redemption, entitlement) rows for a product-backed
+    Operation, as locked by _lock_operation's product branch."""
+    redemption = db.execute(select(models.EntitlementRedemption).where(
+        models.EntitlementRedemption.id == op.entitlement_redemption_id)
+        .execution_options(populate_existing=True)).scalar_one()
+    entitlement = db.execute(select(models.Entitlement).where(
+        models.Entitlement.id == redemption.entitlement_id)
+        .execution_options(populate_existing=True)).scalar_one()
+    return redemption, entitlement
+
+
+def _assert_no_allocations(db, op):
+    count = db.execute(select(func.count()).select_from(models.OperationAllocation).where(
+        models.OperationAllocation.operation_id == op.id)).scalar() or 0
+    if count:
+        raise AdmissionError("product operation carries credit allocations")
+
+
+_PRODUCT_ORIGIN_UNSET = object()
+
+
+def result_payload(result, *, user_id, operation_id=None, free_request_id=None, product_redemption_id=_PRODUCT_ORIGIN_UNSET, allow_expired=False):
+    """Validate identity and integrity before publication or replay.
+
+    Issue #164 (A2): callers that know the expected product origin pass
+    product_redemption_id explicitly and it is enforced. Legacy callers
+    (written before the third origin existed) omit it; their operation /
+    free-request checks are unchanged.
+    """
     if (result is None or result.user_id != user_id or result.operation_id != operation_id
-            or result.free_request_id != free_request_id or not result.ready_at or result.deleted_at):
+            or result.free_request_id != free_request_id
+            or (product_redemption_id is not _PRODUCT_ORIGIN_UNSET
+                and getattr(result, "product_redemption_id", None) != product_redemption_id)
+            or not result.ready_at or result.deleted_at):
         raise AdmissionError("result unavailable")
     if not allow_expired and _as_aware(result.expires_at) <= _utcnow():
         raise AdmissionError("result expired")
@@ -1011,12 +1305,19 @@ def store_result(db, user_id, operation_id, data, *, result_type="analysis", sev
     # keep the previous outcome_severity behavior.
     if severity == "__default__":
         severity = outcome_severity(data)
+    # Phase B Decision 7: dollar-paid artifacts carry 90-day
+    # retention, decided by the operation's billing mode (B-8 helper
+    # predicate); credit-era artifacts keep their 7-day terms.
+    retention_days = 90 if is_product_backed_operation(op) else 7
     result = models.Result(user_id=user_id, operation_id=operation_id, type=result_type,
         severity=severity,
         storage_manifest=raw, integrity_digest=hash_input(raw.encode()), byte_count=len(raw.encode()),
-        ready_at=now, expires_at=now + timedelta(days=7))
+        ready_at=now, expires_at=now + timedelta(days=retention_days))
     db.add(result)
     db.flush()
+    if result_type in ("analysis", "comparison", "deep_dive"):
+        assign_ss_id(db, result, now)
+        db.flush()
     return result
 
 
@@ -1134,6 +1435,32 @@ def store_report_action_receipt(db, user_id, operation_id, manifest_fields: dict
 
 
 def _settle_complete(db, op, grants, result):
+    if is_product_backed_operation(op):
+        # B-17 product branch: ZERO allocations (asserted, fail
+        # closed), no grant mutation, no ledger, NO CREDIT_SPEND (the
+        # dollar purchase was counted at purchase settlement; a
+        # redemption completion is not a second spend). Completes the
+        # Operation, releases capacity exactly once, and completes
+        # the redemption in the same commit (B-8 joint settlement).
+        # Revocation wins: a revoked entitlement can never publish.
+        _assert_no_allocations(db, op)
+        redemption, entitlement = _product_redemption_rows(db, op)
+        if entitlement.status == "revoked":
+            raise AdmissionError("entitlement revoked")
+        if redemption.status != "reserved":
+            raise AdmissionError(f"redemption already {redemption.status}")
+        result_payload(result, user_id=op.user_id, operation_id=op.id)
+        op.status, op.completed_at, op.result_id = "completed", _utcnow(), result.id
+        permit = db.execute(select(models.Permit).where(models.Permit.operation_id == op.id)).scalar_one()
+        _release_capacity(db, permit, op.user_id)
+        redemption.status = "completed"
+        redemption.result_id = result.id
+        entitlement.status = "redeemed"
+        entitlement.version += 1
+        entitlement.redeemed_result_id = result.id
+        entitlement.redeemed_at = _utcnow()
+        db.flush()
+        return op
     result_payload(result, user_id=op.user_id, operation_id=op.id)
     allocations = db.execute(select(models.OperationAllocation).where(
         models.OperationAllocation.operation_id == op.id, models.OperationAllocation.state == "reserved")
@@ -1170,6 +1497,40 @@ def complete_operation(db, operation_id, worker_id, result_id=None, *, lease_gen
 
 
 def _settle_release(db, op, account, grants, failure_code):
+    if is_product_backed_operation(op):
+        # B-17 product branch: no reserve-ledger row exists for a
+        # product Operation — skip its lookup and the reversal append
+        # entirely. Terminalizes the Operation, releases capacity
+        # exactly once, and releases the redemption (F2 at both
+        # layers). A revoked entitlement is never revived or consumed:
+        # the redemption releases with failure_code
+        # 'entitlement_revoked' and the entitlement stays revoked
+        # (B-18/B-20; this ordinary release path is a live worker
+        # reporting its own failure, which IS termination evidence
+        # for its generation, so no evidence gate applies here).
+        _assert_no_allocations(db, op)
+        redemption, entitlement = _product_redemption_rows(db, op)
+        op.status = "expired" if failure_code == "expired" else "failed"
+        op.completed_at = _utcnow()
+        op.lease_generation += 1  # late publication is rejected
+        permit = db.execute(select(models.Permit).where(models.Permit.operation_id == op.id)).scalar_one()
+        _release_capacity(db, permit, op.user_id)
+        if redemption.status == "reserved":
+            redemption.status = "released"
+            redemption.lease_generation += 1
+            if entitlement.status == "revoked":
+                redemption.failure_code = "entitlement_revoked"
+                op.failure_code = "entitlement_revoked"
+            else:
+                redemption.failure_code = str(failure_code)[:50]
+                op.failure_code = failure_code
+                if entitlement.status == "reserved":
+                    entitlement.status = "available"
+                    entitlement.version += 1
+        else:
+            op.failure_code = failure_code
+        db.flush()
+        return op
     allocations = db.execute(select(models.OperationAllocation).where(
         models.OperationAllocation.operation_id == op.id, models.OperationAllocation.state == "reserved")
         .with_for_update().execution_options(populate_existing=True)).scalars().all()
@@ -1227,6 +1588,39 @@ def recover_expired_operations(db, batch_size=100, *, executor_stopped=None):
                 continue
             result = db.execute(select(models.Result).where(models.Result.operation_id == op_id,
                 models.Result.deleted_at.is_(None))).scalar_one_or_none()
+            if is_product_backed_operation(op):
+                # B-18: this path is the SINGLE recovery owner for
+                # Operation-linked redemptions. Result discovery is
+                # through Operation origin (above), never through
+                # Result.product_redemption_id. Terminalization is
+                # inline under the B-21 product lock set, fenced by
+                # the Operation's worker + lease generation (already
+                # re-checked above); complete_redemption /
+                # release_redemption are never called on an expired
+                # lease here.
+                redemption, entitlement = _product_redemption_rows(db, op)
+                if entitlement.status == "revoked":
+                    # B-20: revocation is NOT executor evidence. Hold
+                    # (capacity stays held, redemption stays reserved)
+                    # until an evidence class arrives: an authoritative
+                    # stored Result, or confirmed executor termination.
+                    if result is None and not stopped:
+                        logging.getLogger(__name__).warning(
+                            "Expired operation %s awaits executor termination evidence", op_id)
+                        db.rollback()
+                        continue
+                    _terminalize_revoked_product(db, op, result)
+                elif result is not None:
+                    _settle_complete(db, op, grants, result)
+                elif stopped:
+                    _settle_release(db, op, account, grants, "expired")
+                else:
+                    logging.getLogger(__name__).warning("Expired operation %s awaits executor termination evidence", op_id)
+                    db.rollback()
+                    continue
+                db.commit()
+                recovered += 1
+                continue
             if result is not None:
                 _settle_complete(db, op, grants, result)
             elif stopped:
@@ -1241,6 +1635,35 @@ def recover_expired_operations(db, batch_size=100, *, executor_stopped=None):
             db.rollback()
             logging.getLogger(__name__).exception("Recovery failed for operation %s", op_id)
     return recovered
+
+
+def _terminalize_revoked_product(db, op, result):
+    """B-20 terminal states for a revoked product Operation, one
+    commit under the caller's lock set: Operation failed /
+    'entitlement_revoked'; redemption released /
+    'entitlement_revoked' (inline — release_redemption's revoked
+    raise is routed around, per B-18); entitlement stays revoked
+    (version unchanged); permit released exactly once; NO Result
+    published (a stored Result is suppressed via deleted_at, so it
+    never becomes visible, exportable, or retention-bearing); no
+    ledger/allocation/CREDIT_SPEND effects (B-17 product branch).
+    """
+    _assert_no_allocations(db, op)
+    redemption, entitlement = _product_redemption_rows(db, op)
+    if result is not None:
+        result.deleted_at = _utcnow()
+    op.status = "failed"
+    op.failure_code = "entitlement_revoked"
+    op.completed_at = _utcnow()
+    op.lease_generation += 1  # late publication is rejected by the fence
+    permit = db.execute(select(models.Permit).where(models.Permit.operation_id == op.id)).scalar_one()
+    _release_capacity(db, permit, op.user_id)
+    if redemption.status == "reserved":
+        redemption.status = "released"
+        redemption.failure_code = "entitlement_revoked"
+        redemption.lease_generation += 1
+    db.flush()
+    return op
 
 
 # ---------------------------------------------------------------------------
@@ -1319,6 +1742,25 @@ def _verify_account_invariants(db: Session, user_id: uuid.UUID) -> list[str]:
         if net != grant.remaining - grant.reserved:
             violations.append(f"A1: grant {grant.id} ledger attribution mismatch")
     for op in db.execute(select(models.Operation).where(models.Operation.user_id == user_id)).scalars():
+        if is_product_backed_operation(op):
+            # B-17: product-backed Operations are checked for their
+            # own invariants instead of the credit A4/A5/A6
+            # reservation/reversal checks (which would raise false
+            # violations — no reserve debit exists by design):
+            # cost == 0, zero allocations, and a linked redemption in
+            # a state consistent with the Operation's status.
+            if op.cost != 0:
+                violations.append(f"A4: product operation {op.id} cost is not zero")
+            product_allocs = db.execute(select(models.OperationAllocation).where(
+                models.OperationAllocation.operation_id == op.id)).scalars().all()
+            if product_allocs:
+                violations.append(f"A4: product operation {op.id} carries allocations")
+            redemption = db.get(models.EntitlementRedemption, op.entitlement_redemption_id)
+            expected_red = {'reserved': 'reserved', 'completed': 'completed',
+                            'failed': 'released', 'expired': 'released'}.get(op.status)
+            if redemption is None or redemption.status != expected_red:
+                violations.append(f"A5: product operation {op.id} redemption state mismatch")
+            continue
         allocations = db.execute(select(models.OperationAllocation).where(models.OperationAllocation.operation_id == op.id)).scalars().all()
         if sum(a.quantity for a in allocations) != op.cost:
             violations.append(f"A4: operation {op.id} allocation total mismatch")

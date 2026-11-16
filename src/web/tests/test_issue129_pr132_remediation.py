@@ -59,6 +59,11 @@ def _insert_export_op(auth_env, user_id, op_type, key, status):
 
 
 # --- F5: canonical PDF keys at creation --------------------------------------
+# PREMISE CHANGED (issue #164 Phase C): exports are free and create
+# NO operation at all, so there is no stored key to canonicalize.
+# The URL-form tolerance subject is preserved: an uppercase /
+# unhyphenated report URL still serves the PDF, later formats are
+# free, and the balance / operation set never moves.
 
 def test_pdf_first_via_uppercase_url_then_csv_charges_once(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
@@ -66,17 +71,16 @@ def test_pdf_first_via_uppercase_url_then_csv_charges_once(auth_env):
     pdf = auth_env.client.post(
         f"/reports/{str(rid).upper()}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 2
-    # The stored operation key is the canonical form, not the raw
-    # uppercase URL segment.
-    pdf_ops = _ops(auth_env, user_id, "pdf")
-    assert [op.idempotency_key for op in pdf_ops] == [f"pdf-{rid}"]
+    assert _balance(auth_env, user_id) == before
+    # No operation is stored for a free export (canonical or not).
+    assert _ops(auth_env, user_id, "pdf") == []
     csv_r = auth_env.client.post(
         f"/reports/{rid}/exports/csv", data={"csrf_token": csrf})
     assert csv_r.status_code == 200, csv_r.text[:300]
-    # Exactly ONE 2-credit unlock charge total.
-    assert _balance(auth_env, user_id) == before - 2
-    assert len(_completed_charges(auth_env, user_id)) == 1
+    # Zero charges total across both formats.
+    assert _balance(auth_env, user_id) == before
+    assert _completed_charges(auth_env, user_id) == []
+    assert _ops(auth_env, user_id, "pdf") == []
 
 
 def test_pdf_first_via_unhyphenated_url_then_json_charges_once(auth_env):
@@ -85,14 +89,13 @@ def test_pdf_first_via_unhyphenated_url_then_json_charges_once(auth_env):
     pdf = auth_env.client.post(
         f"/reports/{rid.hex}/pdf", data={"csrf_token": csrf})
     assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
-    assert _balance(auth_env, user_id) == before - 2
-    pdf_ops = _ops(auth_env, user_id, "pdf")
-    assert [op.idempotency_key for op in pdf_ops] == [f"pdf-{rid}"]
+    assert _balance(auth_env, user_id) == before
+    assert _ops(auth_env, user_id, "pdf") == []
     json_r = auth_env.client.post(
         f"/reports/{rid}/exports/json", data={"csrf_token": csrf})
     assert json_r.status_code == 200, json_r.text[:300]
-    assert _balance(auth_env, user_id) == before - 2
-    assert len(_completed_charges(auth_env, user_id)) == 1
+    assert _balance(auth_env, user_id) == before
+    assert _completed_charges(auth_env, user_id) == []
 
 
 # --- F5: discovery tolerates existing noncanonical keys ----------------------
@@ -129,7 +132,9 @@ def test_reserved_noncanonical_pdf_op_fences_csv(auth_env):
     _insert_export_op(auth_env, user_id, "pdf", f"pdf-{rid.hex}", "reserved")
     with auth_env.sessions() as db:
         unlocked, in_progress = C.export_unlock_state(db, user_id, rid)
-        assert unlocked is False
+        # Phase C: unlocked is unconditionally True (exports free);
+        # the reserved-operation in-progress fence is RETAINED.
+        assert unlocked is True
         assert in_progress is True
     before = _balance(auth_env, user_id)
     csv_r = auth_env.client.post(
@@ -229,6 +234,10 @@ def test_reports_page_share_script_contracts(auth_env):
 # via requestSubmit(), and the confirmed flag is cleared on the
 # confirmed pass so a later export asks again. No JS runtime harness
 # exists in this repo, so these are rendered-page contract tests.
+# PREMISE CHANGED (Release #7 F1, 2026-11-14): the confirmation
+# popup is removed entirely — Finding 1's gating contract is
+# superseded by the direct-fire contract pinned at the bottom of
+# this file (renamed tests).
 # Finding 2 (P2, JS contract): share controls reflect create/revoke
 # success immediately, without a reload.
 # Finding 3 (P2, behavioral): has_pdf_export_operation /
@@ -244,6 +253,50 @@ def _rewrite_pdf_op_key(env, user_id, new_key):
             M.Operation.type == "pdf").one()
         op.idempotency_key = new_key
         db.commit()
+
+
+def _seed_completed_pdf_artifact(env, user_id, rid):
+    """Seed a legacy completed PDF operation + its stored artifact
+    directly (Phase C re-base: a free owner export no longer creates
+    either, so the stored-artifact subject is seeded in fixtures,
+    mirroring test_issue164_phase_c.py's _seed_pdf_op shape — the
+    artifact Result's origin is its operation and the operation
+    points back via result_id)."""
+    import base64 as _b64
+    import json as _json
+
+    from app.pdf_export import generate_report_pdf
+
+    with env.sessions() as db:
+        source = db.get(M.Result, rid)
+        payload = C.result_payload(
+            source, user_id=user_id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id)
+        filename = payload.get("filename", "test.log")
+        pdf_bytes = generate_report_pdf(source.storage_manifest, filename)
+        op = M.Operation(
+            user_id=user_id, type="pdf", idempotency_key=f"pdf-{rid}",
+            request_hash="a" * 64, cost=2, worker_id="test-worker",
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            status="completed")
+        db.add(op)
+        db.flush()
+        raw = _json.dumps({
+            "pdf_base64": _b64.b64encode(pdf_bytes).decode("ascii"),
+            "filename": filename})
+        now = C._utcnow()
+        artifact = M.Result(
+            user_id=user_id, operation_id=op.id, type="pdf",
+            storage_manifest=raw,
+            integrity_digest=C.hash_input(raw.encode()),
+            byte_count=len(raw.encode()), ready_at=now,
+            expires_at=now + timedelta(days=7))
+        db.add(artifact)
+        db.flush()
+        op.result_id = artifact.id
+        db.commit()
+        return op.id
 
 
 # --- Follow-up F3: legacy PDF keys in report_access --------------------------
@@ -269,9 +322,9 @@ def test_has_pdf_export_operation_recognizes_unhyphenated_retry_key(auth_env):
 
 def test_find_shareable_pdf_recognizes_uppercase_key(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
-    pdf = auth_env.client.post(
-        f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    # Phase C: seed the completed op + artifact directly (a free
+    # owner export creates neither); subject preserved.
+    _seed_completed_pdf_artifact(auth_env, user_id, rid)
     _rewrite_pdf_op_key(auth_env, user_id, f"pdf-{str(rid).upper()}")
     with auth_env.sessions() as db:
         source = db.get(M.Result, rid)
@@ -284,9 +337,8 @@ def test_find_shareable_pdf_recognizes_uppercase_key(auth_env):
 
 def test_find_shareable_pdf_recognizes_unhyphenated_key(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
-    pdf = auth_env.client.post(
-        f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+    # Phase C: seed the completed op + artifact directly (see above).
+    _seed_completed_pdf_artifact(auth_env, user_id, rid)
     _rewrite_pdf_op_key(auth_env, user_id, f"pdf-{rid.hex}")
     with auth_env.sessions() as db:
         source = db.get(M.Result, rid)
@@ -310,10 +362,11 @@ def _create_share_token(auth_env, rid, csrf, key="followup-share-1"):
 def test_shared_pdf_expired_legacy_uppercase_key_returns_identical_404(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     anon = _anon_client()
-    pdf = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
-    # Issue #135: the PDF is shared through a pdf-FORMAT link (the
-    # export above unlocked the report, so creation is allowed).
+    # Phase C: seed the completed op + artifact directly (a free
+    # owner export creates neither); subject preserved.
+    _seed_completed_pdf_artifact(auth_env, user_id, rid)
+    # Issue #135: the PDF is shared through a pdf-FORMAT link (share
+    # creation is ungated under Phase C, so it is allowed directly).
     resp = auth_env.client.post(
         f"/reports/{rid}/share",
         data={"csrf_token": csrf, "idempotency_key": "followup-pdf-share-1",
@@ -339,36 +392,50 @@ def test_shared_pdf_expired_legacy_uppercase_key_returns_identical_404(auth_env)
     assert got.content == baseline.content
 
 
-# --- Follow-up F1: PDF confirmation gates the fetch (contract) ---------------
+# --- Follow-up F1: PDF fetch fires directly, no confirmation gate ------------
+# RENAMED + PREMISE CHANGED (Release #7 F1, 2026-11-14): these were
+# test_pdf_confirmation_gates_fetch_on_report_page /
+# test_pdf_confirmation_gates_fetch_on_reports_page. The confirmation
+# popup that gated the PDF fetch is REMOVED — the contract is now
+# the inverse at the same strength: no confirm listener, no
+# confirmed-flag machinery, no ss-confirm modal anywhere in the
+# rendered page, and the PDF fetch listener in
+# auth_form_script.html is the single submit listener on PDF forms,
+# so an export click fires the fetch directly.
 
-def test_pdf_confirmation_gates_fetch_on_report_page(auth_env):
+def test_pdf_fires_directly_no_confirmation_gate_on_report_page(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
     text = page.text
-    # Unconfirmed submit stops the later-registered PDF fetch listener.
-    assert "e.stopImmediatePropagation();" in text
-    # Continue re-dispatches through the submit event (so the PDF
-    # fetch handler performs the download), exactly once.
-    assert "confirmedForm.requestSubmit();" in text
+    # No confirmation gate remains: no confirm listener, no
+    # confirmed re-dispatch, no one-shot confirmed flag.
+    assert "form[data-confirm]" not in text
+    assert "data-confirm" not in text
+    assert "ss-confirm" not in text
+    assert "confirmedForm.requestSubmit();" not in text
     assert "pending.submit()" not in text
-    # The confirmed flag is cleared on the confirmed pass, so a
-    # later export asks again.
-    assert "delete f.dataset.confirmed;" in text
-    # The confirm listener is registered before the PDF fetch listener.
-    assert text.index("form[data-confirm]") < text.index('form[action$="/pdf"]')
+    assert "delete f.dataset.confirmed;" not in text
+    # The PDF fetch listener is present (it performs the download
+    # directly on submit).
+    assert 'form[action$="/pdf"]' in text
+    # The export form itself is present and carries no gate.
+    assert f'action="/reports/{rid}/pdf"' in text
 
 
-def test_pdf_confirmation_gates_fetch_on_reports_page(auth_env):
+def test_pdf_fires_directly_no_confirmation_gate_on_reports_page(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
     text = page.text
-    assert "e.stopImmediatePropagation();" in text
-    assert "confirmedForm.requestSubmit();" in text
+    assert "form[data-confirm]" not in text
+    assert "data-confirm" not in text
+    assert "ss-confirm" not in text
+    assert "confirmedForm.requestSubmit();" not in text
     assert "pending.submit()" not in text
-    assert "delete f.dataset.confirmed;" in text
-    assert text.index("form[data-confirm]") < text.index('form[action$="/pdf"]')
+    assert "delete f.dataset.confirmed;" not in text
+    assert 'form[action$="/pdf"]' in text
+    assert f'action="/reports/{rid}/pdf"' in text
 
 
 # --- Follow-up F2: share controls update in place (contract) -----------------

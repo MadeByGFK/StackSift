@@ -19,11 +19,32 @@ code changes):
   direct "Export PDF (2 credits)" button — each has exactly ONE
   action (PDF only), so there is nothing to consolidate and a
   one-item menu would hide the up-front price behind an extra click.
-- ``reports.html`` (My Reports): the full row View · Export ·
-  Analysis · Share · Extend is unchanged, including the PR #139
-  suppression of Share and Extend on deep_dive rows.
+- ``reports.html`` (My Reports): the full row actions were
+  unchanged BY THIS PASS. PREMISE CHANGED (founder fidelity
+  ruling 2026-11-10, PR #177 S3-G1 + naming ruling): the row now
+  renders Open · Export PDF/CSV/JSON (direct inline forms, no
+  dropdown) · Investigation Report · Share · Extend — same
+  actions, endpoints and gating, direct-control presentation;
+  the PR #139 suppression of Share and Extend on deep_dive rows
+  is unchanged.
 - ``settings.html``: unchanged — Credits and Report Access already
   live on the account page.
+
+PREMISE CHANGED (fidelity G1, founder ruling 2026-11-10): the
+Actions menu this issue built is RETIRED — Report surfaces now use
+the design's direct export controls (gold Export PDF + CSV/JSON
+chips, Analysis/Share as direct controls). The menu-structure and
+menu-behaviour tests below were rewritten to the direct-control
+contract: old menu selectors gone, the SAME export forms/endpoints/
+data-confirm gating invoked directly. The PDF re-enable fix and the
+batch/compare + My Reports + Settings guards are unchanged.
+
+PREMISE CHANGED (Release #7 F1, 2026-11-14): the export
+confirmation popup (data-confirm / ss-confirm) is REMOVED from
+every export form — exports fire directly on click. The tests
+below pin the absence of the confirm gating at the same strength
+as they previously pinned its presence; endpoints, order, labels
+and the neighbouring modals are unchanged.
 
 Consistency fix (the #129 closure quirk): the PDF fetch handler in
 ``auth_form_script.html`` disabled the submit button and re-enabled
@@ -66,58 +87,71 @@ def _menu_slice(html):
 # --- report page: one Actions menu -------------------------------------------
 
 def test_report_page_single_actions_menu_holds_all_actions(auth_env):
+    # REWRITTEN for fidelity G1: direct controls replace the menu.
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
     text = page.text
-    # Exactly one menu trigger and one menu; old row triggers gone.
-    assert text.count('id="actions-btn"') == 1
-    assert text.count('id="actions-menu"') == 1
-    assert ">Actions</button>" in text
-    assert 'id="export-btn"' not in text
-    assert 'id="export-dropdown"' not in text
-    menu = _menu_slice(text)
-    # Same actions, same order: Export PDF/CSV/JSON, Analysis, Share.
-    pdf_at = menu.index(f'action="/reports/{rid}/pdf"')
-    csv_at = menu.index(f'action="/reports/{rid}/exports/csv"')
-    json_at = menu.index(f'action="/reports/{rid}/exports/json"')
-    analysis_at = menu.index('id="analysis-btn"')
-    share_at = menu.index('id="share-btn"')
-    assert pdf_at < csv_at < json_at < analysis_at < share_at
-    assert ">Export PDF</button>" in menu
-    assert ">Export CSV</button>" in menu
-    assert ">Export JSON</button>" in menu
-    # The #129 confirmation behaviour is intact on every export form.
-    assert menu.count("data-confirm") == 3
-    assert "Export costs 2 credits and unlocks PDF, CSV and JSON" in menu
-    # The modals the menu items open are still on the page, unchanged.
+    # Old menu selectors are gone; the direct cluster is present.
+    assert 'id="actions-btn"' not in text
+    assert 'id="actions-menu"' not in text
+    assert 'data-s1-actions' in text
+    cluster = text[text.index('data-s1-actions'):text.index('id="analysis-modal"')]
+    # Same export actions, same order, then Share. PREMISE CHANGED
+    # (report follow-up, founder ruling 2026-11-10): the cluster's
+    # bare "Analysis" button is removed — the premium card CTA is
+    # the Investigation Report purchase entry.
+    pdf_at = cluster.index(f'action="/reports/{rid}/pdf"')
+    csv_at = cluster.index(f'action="/reports/{rid}/exports/csv"')
+    json_at = cluster.index(f'action="/reports/{rid}/exports/json"')
+    share_at = cluster.index('id="share-btn"')
+    assert pdf_at < csv_at < json_at < share_at
+    assert 'id="analysis-btn"' not in cluster
+    assert ">Analysis</button>" not in cluster
+    assert ">Export PDF" in cluster and ">Export CSV" in cluster
+    assert ">Export JSON" in cluster
+    # Gold PDF control + Free tag. PREMISE CHANGED (#164 Phase C,
+    # Decision 4): exports are free for ALL reports — there is no
+    # locked state and no 2-credit tag.
+    assert 'class="s1-btn-gold" data-export="pdf"' in cluster
+    assert ">Free</span>" in cluster
+    assert "2 credits" not in cluster
+    # PREMISE CHANGED (Release #7 F1, 2026-11-14): the #129 export
+    # confirmation popup is REMOVED — exports are free and fire
+    # directly. No export form carries data-confirm and no
+    # ss-confirm modal exists on the page.
+    assert cluster.count("data-confirm") == 0
+    assert 'data-confirm="Exports are free for this report."' not in cluster
+    assert "Export costs 2 credits and unlocks PDF, CSV and JSON" not in cluster
+    # The modals the controls open are still on the page, unchanged.
     assert 'id="analysis-modal"' in text
     assert 'id="share-modal"' in text
-    assert 'id="ss-confirm"' in text
-    # Nothing account-level / manage-level leaked onto the read page:
-    # no retention (Extend) form and no share FORM (the share modal
-    # posts via fetch, as before).
+    assert 'id="ss-confirm"' not in text
     assert f'action="/reports/{rid}/retention"' not in text
     assert f'action="/reports/{rid}/share"' not in text
 
 
 def test_report_page_actions_menu_links_to_existing_analysis(auth_env):
+    # REWRITTEN for fidelity G1: the existing-report link is a direct
+    # control in the cluster, not a menu item.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200, gen.text[:300]
     analysis_id = gen.json()["analysis_result_id"]
     page = auth_env.client.get(f"/reports/{rid}")
     assert page.status_code == 200
-    menu = _menu_slice(page.text)
-    # With an Analysis Report already generated, the menu item is the
-    # link to it (no second charge path) and the modal opener is gone.
-    assert f'href="/reports/{analysis_id}"' in menu
-    assert ">Analysis</a>" in menu
+    cluster = page.text[page.text.index('data-s1-actions'):]
+    assert f'href="/reports/{analysis_id}"' in cluster
+    # PREMISE CHANGED (report follow-up State C rename, 2026-11-11):
+    # the view link carries the deliverable's ruled name.
+    assert ">Investigation Report</a>" in cluster
+    assert ">Analysis</a>" not in cluster
     assert 'id="analysis-btn"' not in page.text
-    assert 'id="share-btn"' in menu
+    assert 'id="share-btn"' in cluster
 
 
 def test_analysis_report_page_single_actions_menu(auth_env):
+    # REWRITTEN for fidelity G1: direct controls on the paid page.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200, gen.text[:300]
@@ -125,16 +159,18 @@ def test_analysis_report_page_single_actions_menu(auth_env):
     page = auth_env.client.get(f"/reports/{analysis_id}")
     assert page.status_code == 200
     text = page.text
-    assert text.count('id="actions-btn"') == 1
-    assert text.count('id="actions-menu"') == 1
-    assert 'id="export-btn"' not in text
-    assert 'id="export-dropdown"' not in text
-    menu = _menu_slice(text)
-    assert f'action="/reports/{analysis_id}/pdf"' in menu
-    assert f'action="/reports/{analysis_id}/exports/csv"' in menu
-    assert f'action="/reports/{analysis_id}/exports/json"' in menu
-    assert menu.count("data-confirm") == 3
-    # The Analysis Report page has no Analysis/Share actions.
+    assert 'id="actions-btn"' not in text
+    assert 'id="actions-menu"' not in text
+    assert 'data-s1-actions' in text
+    # PREMISE CHANGED (Release #7 F1): the ss-confirm modal that
+    # used to bound this slice is removed; the branding panel is
+    # the next surface after the actions cluster on this page.
+    cluster = text[text.index('data-s1-actions'):text.index('class="branding-panel"')]
+    assert f'action="/reports/{analysis_id}/pdf"' in cluster
+    assert f'action="/reports/{analysis_id}/exports/csv"' in cluster
+    assert f'action="/reports/{analysis_id}/exports/json"' in cluster
+    assert cluster.count("data-confirm") == 0
+    assert 'id="ss-confirm"' not in text
     assert 'id="analysis-btn"' not in text
     assert 'id="share-btn"' not in text
 
@@ -171,7 +207,10 @@ def test_batch_and_compare_keep_single_direct_pdf_button():
         material_change={"version": 1, "min_absolute": 3,
                          "min_fraction_of_a": 0.5})
     for html in (batch_html, compare_html):
-        assert "Export PDF (2 credits)" in html
+        # PREMISE CHANGED (#164 Phase C, Decision 4 / C2): the owner
+        # PDF export is free — the label says so, not 2 credits.
+        assert "Export PDF (free)" in html
+        assert "Export PDF (2 credits)" not in html
         assert 'id="actions-btn"' not in html
         assert 'id="actions-menu"' not in html
         assert html.count('action="/reports/') == 1
@@ -186,18 +225,40 @@ def test_my_reports_row_keeps_full_actions_and_deep_dive_suppression(auth_env):
     analysis_id = gen.json()["analysis_result_id"]
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
-    cards = page.text.split('<li class="card">')
+    cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+        # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1):
+        # the row's first control is labelled "Open", not "View".
+        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]
 
-    normal = _card_for(str(rid))
-    assert "export-toggle" in normal and ">Export</button>" in normal
+    # Slice at </tbody> (the s3 _row_for convention): the last row's
+    # split segment otherwise runs into the page scripts, which
+    # mention the export hooks by name.
+    normal = _card_for(str(rid)).split("</tbody>")[0]
+    # PREMISE CHANGED (S3-M1, founder ruling 2026-11-10 — supersedes
+    # the S3-G1 direct-control premise this test previously pinned):
+    # Export is ONE button with a dropdown panel holding the three
+    # export forms. PREMISE CHANGED (#164 Phase C, Decision 5): the
+    # Extend control is removed from every row (retention extensions
+    # are no longer sold).
+    assert normal.count("data-s3-export-btn") == 1
+    assert normal.count("data-s3-export-menu") == 1
+    assert ">Export PDF</button>" in normal
+    assert ">Export CSV</button>" in normal
+    assert ">Export JSON</button>" in normal
+    # PREMISE CHANGED (Release #7 F1): no data-confirm on any
+    # export form — the confirmation popup is removed and the
+    # dropdown exports fire directly.
+    assert normal.count("data-confirm") == 0
+    assert normal.count('data-confirm="Exports are free for this '
+                        'report."') == 0
     assert "share-open" in normal and ">Share</button>" in normal
-    assert f"/reports/{rid}/retention" in normal and ">Extend</button>" in normal
+    assert f"/reports/{rid}/retention" not in normal
+    assert ">Extend</button>" not in normal
     # PR #139 remediation F2 + Extend guard: deep_dive rows keep
     # neither Share nor Extend (both routes 404 for those rows).
     deep = _card_for(str(analysis_id))
@@ -210,10 +271,15 @@ def test_settings_keeps_account_features(auth_env):
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get("/settings")
     assert page.status_code == 200
-    for marker in ("Account settings", "Credits", 'id="purchase-history"',
+    # PREMISE CHANGED (#164 Phase C, Decision 9): §02 is Purchases,
+    # not Credits, and no balance/Buy-credits copy remains.
+    for marker in ("Account settings", "Purchases", 'id="purchase-history"',
                    "Purchase history", 'id="report-access"', "Report Access",
-                   "Connected accounts", "Active sessions"):
+                   "Connected accounts", "Active sessions",
+                   "Pay per report — no subscription."):
         assert marker in page.text, marker
+    assert "Buy credits" not in page.text
+    assert "Your current balance" not in page.text
 
 
 # --- Node harnesses: menu behaviour + the PDF re-enable fix -------------------
@@ -295,7 +361,11 @@ def _inline_script(template_name, marker):
 
 
 def _menu_script(template_name):
-    script = _inline_script(template_name, "ss-confirm")
+    # PREMISE CHANGED (Release #7 F1): no script in report.html
+    # mentions ss-confirm anymore (the modal and its wiring are
+    # removed); the main actions script is found by its share-modal
+    # wiring, which is preserved verbatim.
+    script = _inline_script(template_name, "share-modal")
     script = script.replace("{{ share_create_key }}", "create-key")
     script = script.replace("{{ share_rotate_key }}", "rotate-key")
     script = script.replace("{{ share_revoke_key }}", "revoke-key")
@@ -307,39 +377,23 @@ def _menu_script(template_name):
 
 
 @pytestmark_js
-def test_actions_menu_toggles_on_report_and_analysis_pages():
-    for template in ("report.html", "deep_dive_report.html"):
-        out = _run_js(_menu_script(template), """
-          out.initial = byId('actions-menu').style.display || '';
-          await click(byId('actions-btn'));
-          out.openDisplay = byId('actions-menu').style.display || '';
-          out.openAria = byId('actions-btn').getAttribute('aria-expanded');
-          await click(byId('actions-btn'));
-          out.closedDisplay = byId('actions-menu').style.display || '';
-          out.closedAria = byId('actions-btn').getAttribute('aria-expanded');
-        """)
-        assert out["openDisplay"] == "block", (template, out)
-        assert out["openAria"] == "true", (template, out)
-        assert out["closedDisplay"] == "none", (template, out)
-        assert out["closedAria"] == "false", (template, out)
-
-
-@pytestmark_js
-def test_actions_menu_items_open_existing_modals_and_close_menu():
+def test_direct_controls_open_existing_modals():
+    # REWRITTEN for fidelity G1: no menu to toggle — the Share
+    # direct control opens its existing modal immediately.
+    # PREMISE CHANGED (report follow-up, founder ruling 2026-11-10):
+    # the cluster "Analysis" button is removed, so nothing in this
+    # script opens the analysis modal — clicking the (now absent)
+    # analysis-btn stub must leave it closed. The modal's real
+    # opener is the premium card CTA, covered by the runtime tests
+    # in test_issue170_report_followup.py.
     out = _run_js(_menu_script("report.html"), """
-      await click(byId('actions-btn'));
       await click(byId('share-btn'));
-      out.afterShareMenu = byId('actions-menu').style.display || '';
       out.afterShareModal = byId('share-modal').style.display || '';
-      await click(byId('actions-btn'));
       await click(byId('analysis-btn'));
-      out.afterAnalysisMenu = byId('actions-menu').style.display || '';
       out.afterAnalysisModal = byId('analysis-modal').style.display || '';
     """)
     assert out["afterShareModal"] == "flex", out
-    assert out["afterShareMenu"] == "none", out
-    assert out["afterAnalysisModal"] == "flex", out
-    assert out["afterAnalysisMenu"] == "none", out
+    assert out["afterAnalysisModal"] != "flex", out
 
 
 _PDF_HARNESS = r"""

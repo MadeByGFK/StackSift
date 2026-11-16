@@ -232,6 +232,11 @@ def _identity_key(event, links: dict):
 def d2_summary(db, days: int = 30) -> dict:
     """D2 funnel report for the last ``days`` days.
 
+    Issue #164 Phase C (C6b): LEGACY-PACK-ONLY after cutover. Buyer
+    counts here derive from CreditPurchase (pack) records only;
+    dollar buyers are counted by the product purchase records, and
+    no report may claim this summary measures the dollar funnel.
+
     Counts are intent only, never demand evidence (GFK-013 §5.12).
     Conservative by construction: identity-less events are skipped
     for uniques, and exposure requires a linked visitor with an

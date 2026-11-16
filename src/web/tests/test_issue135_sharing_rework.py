@@ -3,7 +3,9 @@
 Supersedes the #107 recipient web view: the Share popup offers
 PDF / TXT / JSON / CSV; TXT is free with no unlock and no charge;
 PDF/JSON/CSV require the report's #129 2-credit per-report export
-unlock (no charge beyond the unlock itself); each link serves ONLY
+unlock (no charge beyond the unlock itself) — PREMISE CHANGED by
+issue #164 Phase C (C8): the unlock gate is removed, ALL formats
+create free with no charge; each link serves ONLY
 its chosen format with the report's exact content to logged-out
 holders; Settings -> Report Access lists every active link (report,
 format, created time, copyable link, Revoke per link); revoke is
@@ -37,12 +39,31 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 from test_account_migrations import migrated_engine  # noqa: F401  (fixture)
-from test_phase2b_paid_e2e import paid_env, _signup_verify_login, _http_balance  # noqa: F401
+from test_phase2b_paid_e2e import paid_env, _signup_verify_login  # noqa: F401
 from test_report_sharing import _anon_client, _make_report, _payload, _token_from
 from test_structured_export_e2e import _grant
 
+from pdf_content import pdf_content_signature
+
 from app import auth, credits as C, main, models as M
 from app.service import render_text_report
+
+
+def _db_balance(env, uid):
+    """Balance read directly from the account row (Phase C re-base:
+    the /credits/balance HTTP endpoint is retired, 410, and the
+    signup grant no longer exists — a fresh user has balance 0)."""
+    with env.sessions() as db:
+        acct = db.query(M.CreditAccount).filter(
+            M.CreditAccount.user_id == uid).first()
+        return acct.balance if acct else 0
+
+
+def _export_ops(env, uid):
+    with env.sessions() as db:
+        return db.query(M.Operation).filter(
+            M.Operation.user_id == uid,
+            M.Operation.type.in_(("pdf", "structured_export"))).count()
 
 
 def _create(env, rid, csrf, key, fmt=None):
@@ -89,9 +110,13 @@ def test_txt_share_free_without_unlock_and_no_charge(paid_env):
     resp = _create(env, rid, csrf, "t135-txt-1", "txt")
     assert resp.status_code == 200, resp.text[:300]
     assert resp.json()["format"] == "txt"
-    assert _http_balance(env) == 10  # no unlock bought, no charge
+    # Phase C: no signup grant (balance 0) and no charge for the share.
+    assert _db_balance(env, uid) == 0
+    assert _export_ops(env, uid) == 0
     with env.sessions() as db:
-        assert C.is_export_unlocked(db, uid, rid) is False
+        # Phase C: the unlock is an unconditional access fact, not a
+        # purchase — it reads True with nothing bought or charged.
+        assert C.is_export_unlocked(db, uid, rid) is True
     token = _token_from(resp)
     r = _anon_client().get(f"/s/{token}")
     assert r.status_code == 200
@@ -100,20 +125,25 @@ def test_txt_share_free_without_unlock_and_no_charge(paid_env):
 
 @pytest.mark.parametrize("fmt", ["pdf", "json", "csv"])
 def test_gated_formats_blocked_pre_unlock_no_link_no_charge(paid_env, fmt):
-    """TEETH: on the pre-#135 tree this create returned 200/created
-    (format was ignored); here it must be refused BEFORE anything is
-    created or charged."""
+    """PREMISE CHANGED (issue #164 Phase C, C8): the share-create
+    #135 unlock 402 gate is REMOVED — formerly gated formats create
+    directly, with no unlock, no charge, no operation. (On the
+    pre-Phase-C tree this create was refused 402 before anything was
+    created or charged.)"""
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
     rid = _make_report(env, uid)
     resp = _create(env, rid, csrf, f"t135-blocked-{fmt}", fmt)
-    assert resp.status_code == 402, resp.text[:300]
-    assert resp.json().get("code") == "export_unlock_required"
-    assert resp.json().get("export_unlocked") is False
-    assert _http_balance(env) == 10  # no charge for the denial
+    assert resp.status_code == 200, resp.text[:300]
+    assert resp.json()["format"] == fmt
+    assert "export_unlock_required" not in resp.text
+    assert _db_balance(env, uid) == 0  # no charge for the creation
+    assert _export_ops(env, uid) == 0
     rows = [r for r in _sharing_rows(env, rid)
             if (r.share_format or "txt") == fmt]
-    assert rows == []  # no link row left behind
+    assert len(rows) == 1  # the link row IS created now
+    token = _token_from(resp)
+    assert _anon_client().get(f"/s/{token}").status_code == 200
 
 
 def test_invalid_share_format_400_and_no_link(paid_env):
@@ -128,16 +158,22 @@ def test_invalid_share_format_400_and_no_link(paid_env):
 def test_gated_creation_after_unlock_charges_nothing_beyond_unlock(paid_env):
     env = paid_env
     uid, csrf, rid = _setup_unlocked(env)
-    balance_after_unlock = _http_balance(env)
+    # Phase C: the CSV "unlock" in _setup_unlocked is itself free —
+    # the seeded grant of 10 is fully intact and no export operation
+    # was created.
+    balance_after_unlock = _db_balance(env, uid)
+    assert balance_after_unlock == 10
+    assert _export_ops(env, uid) == 0
     tokens = {}
     for fmt in ("pdf", "json", "csv"):
         resp = _create(env, rid, csrf, f"t135-make-{fmt}", fmt)
         assert resp.status_code == 200, (fmt, resp.text[:300])
         assert resp.json()["format"] == fmt
         tokens[fmt] = _token_from(resp)
-    # Exactly the single 2-credit unlock was charged (by the CSV
-    # export); share creation in every gated format charged 0 more.
-    assert _http_balance(env) == balance_after_unlock
+    # Phase C: zero was charged in total (the CSV export is free);
+    # share creation in every format charged 0 more.
+    assert _db_balance(env, uid) == balance_after_unlock
+    assert _export_ops(env, uid) == 0
     assert len(set(tokens.values())) == 3
     rows = _sharing_rows(env, rid)
     assert sorted(r.share_format for r in rows) == ["csv", "json", "pdf"]
@@ -184,7 +220,19 @@ def test_each_link_serves_only_its_format_with_exact_content(paid_env):
     pdf_r = anon.get(f"/s/{tokens['pdf']}")
     assert pdf_r.status_code == 200
     assert "application/pdf" in pdf_r.headers["content-type"]
-    assert pdf_r.content == owner_pdf.content
+    # Issue #174: the owner export and the share serve are two
+    # independent on-the-fly generations of the same report, and
+    # fpdf2 embeds a per-generation /CreationDate + trailer /ID, so
+    # raw bytes differ whenever the generations cross a one-second
+    # boundary (the PostgreSQL-leg flake). The exact-content intent
+    # is asserted at content level: identical extracted text
+    # (generation furniture stripped), page count, per-page footer,
+    # document title and non-text rendering skeleton — see
+    # pdf_content.pdf_content_signature.
+    # The CSV/JSON legs above stay byte-exact: those serializers are
+    # deterministic and embed no timestamp or trailer ID.
+    assert pdf_content_signature(pdf_r.content) == \
+        pdf_content_signature(owner_pdf.content)
 
     # ONLY its format: the txt link does not serve the PDF subroute,
     # and no link serves another format's content type.
@@ -254,6 +302,10 @@ def test_expired_report_links_serve_nothing_all_formats(paid_env):
 
 
 def test_active_link_follows_retention_extension(paid_env):
+    # PREMISE CHANGED (issue #164 Phase C, Decision 5 / C5): a NEW
+    # retention extension can no longer be bought — the route refuses
+    # 410 with no charge and no expiry mutation. The active link
+    # keeps serving under the report's existing (unextended) window.
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
     rid = _make_report(env, uid)
@@ -261,11 +313,17 @@ def test_active_link_follows_retention_extension(paid_env):
     token = _token_from(resp)
     anon = _anon_client()
     assert anon.get(f"/s/{token}").status_code == 200
+    with env.sessions() as db:
+        before_expiry = db.get(M.Result, rid).expires_at
     ext = env.client.post(
         f"/reports/{rid}/retention",
         data={"csrf_token": csrf, "idempotency_key": "t135-ext-buy"})
-    assert ext.status_code == 200, ext.text[:300]
-    # The link keeps serving under the extended window.
+    assert ext.status_code == 410, ext.text[:300]
+    assert "no longer sold" in ext.json()["error"]
+    with env.sessions() as db:
+        assert db.get(M.Result, rid).expires_at == before_expiry
+    assert _db_balance(env, uid) == 0
+    # The link keeps serving under the existing window.
     assert anon.get(f"/s/{token}").status_code == 200
 
 
@@ -374,6 +432,10 @@ def test_format_scoped_revoke_kills_only_that_format(paid_env):
 # --- popup contract ------------------------------------------------------------
 
 def test_share_popup_offers_four_formats_with_locked_gating(paid_env):
+    # PREMISE CHANGED (issue #164 Phase C, C8): there is no unlock
+    # gate, so no format is ever shown as locked — the popup offers
+    # all four formats unlocked from the start, and a (free) CSV
+    # export changes nothing about the marks.
     env = paid_env
     _, uid, csrf = _signup_verify_login(env)
     rid = _make_report(env, uid)
@@ -382,16 +444,15 @@ def test_share_popup_offers_four_formats_with_locked_gating(paid_env):
     for value in ('value="txt"', 'value="pdf"', 'value="json"', 'value="csv"'):
         assert value in page.text, value
     assert 'name="share-format"' in page.text
-    # Gated formats are shown as locked pre-unlock on the report page.
-    assert "locked — export unlock required" in page.text
-    assert 'data-locked="1"' in page.text
+    assert "locked — export unlock required" not in page.text
+    assert 'data-locked="1"' not in page.text
     # My Reports popup offers the same four formats.
     reports_page = env.client.get("/reports")
     assert 'name="share-format"' in reports_page.text
-    # After the unlock, the report-page popup no longer marks locks.
     _unlock_via_csv(env, rid, csrf)
     page2 = env.client.get(f"/reports/{rid}")
     assert 'data-locked="1"' not in page2.text
+    assert "locked — export unlock required" not in page2.text
 
 
 # --- CSP / headers / log-redaction x file serving ------------------------------

@@ -9,16 +9,24 @@
 <link rel="stylesheet" href="/static/style.css?v=4">
 <style>
 .settings-wrap { max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
-.settings-card { background: #1e2a4a; border: 1px solid #2d3d6b; border-radius: 12px; padding: 2rem; margin-bottom: 1.5rem; }
+.settings-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 2rem; margin-bottom: 1.5rem; }
 .settings-card h1, .settings-card h2 { color: #fff; margin: 0 0 0.5rem 0; }
 .settings-card p { color: #a0aec0; margin: 0 0 1rem 0; font-size: 0.9rem; }
-.session-row { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #2d3d6b; }
+.session-row { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
 .session-row:last-child { border-bottom: none; }
 .session-info { color: #fff; font-size: 0.9rem; }
 .session-meta { color: #a0aec0; font-size: 0.8rem; }
-.btn-small { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid #2d3d6b; background: #0f1a33; color: #fff; cursor: pointer; font-size: 0.85rem; }
+.btn-small { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: #fff; cursor: pointer; font-size: 0.85rem; }
 .btn-danger { border-color: #7a2a2a; background: #4a1e1e; }
 .oauth-row { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; color: #fff; font-size: 0.9rem; }
+.s4-page-head { margin-bottom: 0.5rem; }
+.s4-eyebrow { font-family: var(--font-code, monospace); color: var(--accent); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin: 0 0 8px; }
+.s4-page-head h1 { color: #fff; font-size: 28px; margin: 0 0 4px; }
+.s4-page-sub { color: #a0aec0; margin: 0; font-size: 0.95rem; }
+.s4-field-row { display: flex; gap: 16px; align-items: center; padding: 0.6rem 0; border-bottom: 1px solid var(--border); }
+.s4-field-row:last-child { border-bottom: none; }
+.s4-field-label { width: 90px; flex: none; color: #a0aec0; font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.s4-field-value { color: #fff; font-size: 0.95rem; }
 </style>
 </head>
 <body>
@@ -35,65 +43,34 @@
           <button type="submit" class="nav-logout">Log out</button>
         </form>
       {% else %}
-        <a href="/credits">Credits</a>
+        <a href="/credits">Pricing</a>
         <a href="/login" class="btn-login">Log in</a>
         <a href="/signup" class="btn-signup">Sign up</a>
       {% endif %}
     </nav>
   </header>
-  <div class="settings-wrap">
-    <div class="settings-card">
-      <h1>Account settings</h1>
-      <p><strong style="color:#fff">{{ user.email }}</strong>{% if user.display_name %} · {{ user.display_name }}{% endif %}</p>
-      <p>Email {% if user.email_verified %}✓ verified{% else %}— not verified{% endif %}</p>
+  <div class="settings-wrap s4-settings">
+    {# Fidelity S4-G1: page head per design (eyebrow + h1 + sub). #}
+    <div class="s4-page-head" data-s4-page-head>
+      <p class="s4-eyebrow">Settings</p>
+      <h1>Settings</h1>
+      <p class="s4-page-sub">Your account, purchases, and report access.</p>
     </div>
-    <div class="settings-card">
-      <h2>Credits</h2>
-      <p>Your current balance: <strong style="color:#fff">{{ balance_summary.balance }} credits</strong></p>
-      <p><a href="/credits" class="btn-small" style="text-decoration:none;display:inline-block">Buy credits</a></p>
-    </div>
-    <div class="settings-card" id="purchase-history">
-      <h2>Purchase history</h2>
-      <p>One-time credit pack purchases on this account.</p>
-      {% if purchases %}
-      {% for p in purchases %}
-      <div class="session-row">
-        <div>
-          <div class="session-info">{{ pack_names.get(p.pack_id, p.pack_id) }} — {{ p.credits }} credits</div>
-          <div class="session-meta">{{ p.completed_at.strftime('%Y-%m-%d %H:%M UTC') if p.completed_at else '' }}</div>
-        </div>
+    <section class="s4-group" data-s4-group="account" data-s4-num="01">
+      <div class="s4-section-head">
+        <span class="s4-section-num" aria-hidden="true">01</span>
+        <span class="s4-section-label">Account</span>
       </div>
-      {% endfor %}
-      {% else %}
-      <p>No credit purchases yet.</p>
-      {% endif %}
-    </div>
-    <div class="settings-card" id="report-access">
-      <h2>Report Access</h2>
-      <p>Active share links for your reports. Anyone holding a link can download that report in the link's format. Copy a link to reshare it; revoke a link to stop it working immediately.</p>
-      {% if share_links %}
-      {% for link in share_links %}
-      <div class="session-row report-access-row" data-share-id="{{ link.id }}">
-        <div>
-          <div class="session-info">{{ link.report }} — {{ link.format|upper }}</div>
-          <div class="session-meta">Created {{ link.created_at.strftime('%Y-%m-%d %H:%M UTC') if link.created_at else '' }}</div>
-          {% if link.url %}
-          <input type="text" class="share-access-link" readonly value="{{ link.url }}" style="width:100%;box-sizing:border-box;margin-top:6px">
-          {% else %}
-          <div class="session-meta share-access-unrecoverable" style="margin-top:6px">link not recoverable — revoke and create a new link</div>
-          {% endif %}
-        </div>
-        <div>
-          {% if link.url %}
-          <button type="button" class="btn-small share-access-copy">Copy link</button>
-          {% endif %}
-          <button type="button" class="btn-small btn-danger share-access-revoke" data-share-id="{{ link.id }}">Revoke</button>
-        </div>
-      </div>
-      {% endfor %}
-      {% else %}
-      <p>No active share links.</p>
-      {% endif %}
+    <div class="settings-card">
+      <h2>Account settings</h2>
+      {# Fidelity S4-G2: §01 interior as label/value field rows
+         (Email / Plan / Log out). The Plan VALUE keeps the current
+         truthful interim-model text (S4-C1 deferred to #164
+         Phase C). Connected accounts + Active sessions below stay
+         (ruled content) — composition only. #}
+      <div class="s4-field-row"><span class="s4-field-label">Email</span><span class="s4-field-value"><strong style="color:#fff">{{ user.email }}</strong>{% if user.display_name %} · {{ user.display_name }}{% endif %} · {% if user.email_verified %}✓ verified{% else %}not verified{% endif %}</span></div>
+      <div class="s4-field-row"><span class="s4-field-label">Plan</span><span class="s4-field-value">Pay per report — no subscription. Paid reports include 90-day retention and free exports.</span></div>
+      <div class="s4-field-row"><span class="s4-field-label">Log out</span><span class="s4-field-value"><form method="post" action="/auth/logout" style="display:inline;margin:0"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="btn-small">Log out</button></form></span></div>
     </div>
     <div class="settings-card">
       <h2>Connected accounts</h2>
@@ -139,6 +116,62 @@
         <button class="btn-small btn-danger" onclick="revokeAll()">Log out all other devices</button>
       </div>
     </div>
+    </section>
+    <section class="s4-group" data-s4-group="purchases" data-s4-num="02">
+      <div class="s4-section-head">
+        <span class="s4-section-num" aria-hidden="true">02</span>
+        <span class="s4-section-label">Purchases</span>
+      </div>
+    <div class="settings-card" id="purchase-history">
+      <h2>Purchase history</h2>
+      <p>Per-report purchases on this account. See <a href="/credits">Pricing</a> for current prices.</p>
+      {% if product_purchases %}
+      {% for p in product_purchases %}
+      <div class="session-row">
+        <div>
+          <div class="session-info">{{ p.name }} — ${{ "%.2f"|format(p.amount_cents / 100) if p.amount_cents is not none else "" }}</div>
+          <div class="session-meta">{{ p.completed_at.strftime('%Y-%m-%d %H:%M UTC') if p.completed_at else '' }}</div>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <p>No purchases yet.</p>
+      {% endif %}
+    </div>
+    </section>
+    <section class="s4-group" data-s4-group="report-access" data-s4-num="03">
+      <div class="s4-section-head">
+        <span class="s4-section-num" aria-hidden="true">03</span>
+        <span class="s4-section-label">Report Access</span>
+      </div>
+    <div class="settings-card" id="report-access">
+      <h2>Report Access</h2>
+      <p>Active share links for your reports. Anyone holding a link can download that report in the link's format. Copy a link to reshare it; revoke a link to stop it working immediately.</p>
+      {% if share_links %}
+      {% for link in share_links %}
+      <div class="session-row report-access-row" data-share-id="{{ link.id }}">
+        <div>
+          <div class="session-info">{{ link.report }} — {{ link.format|upper }}</div>
+          <div class="session-meta">Created {{ link.created_at.strftime('%Y-%m-%d %H:%M UTC') if link.created_at else '' }}</div>
+          {% if link.url %}
+          <input type="text" class="share-access-link" readonly value="{{ link.url }}" style="width:100%;box-sizing:border-box;margin-top:6px">
+          {% else %}
+          <div class="session-meta share-access-unrecoverable" style="margin-top:6px">link not recoverable — revoke and create a new link</div>
+          {% endif %}
+        </div>
+        <div>
+          {% if link.url %}
+          <button type="button" class="btn-small share-access-copy">Copy link</button>
+          {% endif %}
+          <button type="button" class="btn-small btn-danger share-access-revoke" data-share-id="{{ link.id }}">Revoke</button>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <p>No active share links.</p>
+      {% endif %}
+    </div>
+    </section>
   </div>
 </div>
 <script>

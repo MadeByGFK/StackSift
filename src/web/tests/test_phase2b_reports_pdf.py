@@ -262,8 +262,10 @@ def test_pdf_export_success(auth_env):
 
 
 def test_pdf_export_deducts_credits(auth_env):
-    """PDF export deducts exactly 2 credits."""
-    from app import credits as credits_helpers
+    """PREMISE CHANGED (issue #164 Phase C): PDF export deducts
+    exactly ZERO credits — it is free, creates no export operation
+    and no ledger movement."""
+    from app import credits as credits_helpers, models
     email, user_id = _signup_and_verify(auth_env)
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
@@ -281,7 +283,12 @@ def test_pdf_export_deducts_credits(auth_env):
     db = auth_env.sessions()
     try:
         after = credits_helpers.get_balance_summary(db, user_id)["balance"]
-        assert after == before - 2
+        assert after == before
+        assert db.query(models.Operation).filter(
+            models.Operation.user_id == user_id,
+            models.Operation.type == "pdf").count() == 0
+        assert db.query(models.CreditLedger).filter(
+            models.CreditLedger.user_id == user_id).count() == 0
     finally:
         db.close()
 
@@ -315,22 +322,31 @@ def test_pdf_export_idempotent(auth_env):
 
 
 def test_pdf_export_insufficient_credits(auth_env):
-    """PDF export with <2 credits returns 402."""
+    """PREMISE CHANGED (issue #164 Phase C): there is no credit
+    price — a user with a zero balance (the signup grant is removed)
+    exports every report free; no 402 is possible."""
+    from app import credits as credits_helpers
     email, user_id = _signup_and_verify(auth_env)
-    # Signup balance is 10 (issue #151); re-base it to 3 so the second
-    # export is genuinely unaffordable.
-    _drain_signup(auth_env, user_id, 7)
+    db = auth_env.sessions()
+    try:
+        assert credits_helpers.get_balance_summary(db, user_id)["balance"] == 0
+    finally:
+        db.close()
     rid = _create_result(auth_env, user_id)
     _login(auth_env, email)
     csrf = _get_csrf_from_page(auth_env, f"/reports/{rid}")
-    # First export: 3 -> 1 credit
     r1 = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert r1.status_code == 200
-    # Second report needs 2, only have 1
+    assert r1.content[:4] == b"%PDF"
     rid2 = _create_result(auth_env, user_id, "second.log")
     r2 = auth_env.client.post(f"/reports/{rid2}/pdf", data={"csrf_token": csrf})
-    assert r2.status_code == 402
-    assert "Insufficient credits" in r2.json()["error"]
+    assert r2.status_code == 200
+    assert r2.content[:4] == b"%PDF"
+    db = auth_env.sessions()
+    try:
+        assert credits_helpers.get_balance_summary(db, user_id)["balance"] == 0
+    finally:
+        db.close()
 
 
 def test_pdf_export_requires_csrf(auth_env):
@@ -409,7 +425,14 @@ def test_pdf_export_concurrent_returns_409(auth_env):
 
 
 def test_pdf_replay_validates_integrity(auth_env):
-    """Replaying a completed export validates the stored PDF result."""
+    """Replaying a completed export validates the stored PDF result.
+
+    Premise changed by Release #7 F2 (founder hand-check 2026-11-14,
+    reproduced on staging): a stored PDF that fails validation no
+    longer dead-ends with the 410 "no longer available" error — the
+    export regenerates from the still-valid source report. Validation
+    still happens (the corrupt stored bytes are never served); it is
+    the OUTCOME that changed from error to regeneration."""
     from app import models, credits as credits_helpers
     from datetime import datetime, timezone
     import base64 as b64
@@ -448,17 +471,23 @@ def test_pdf_replay_validates_integrity(auth_env):
         db.commit()
     finally:
         db.close()
-    # The replay should fail validation and return 410 (not return corrupt data,
-    # not attempt to reuse the completed operation's idempotency key)
+    # Release #7 F2: the replay fails validation, so the route falls
+    # through and REGENERATES from the source report — 200 with a
+    # freshly generated PDF, never the corrupt stored bytes, and no
+    # reuse of the completed operation's idempotency key for a charge
+    # (exports are free; regeneration creates no new operation).
     csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
     auth_env.client.headers["X-CSRF-Token"] = csrf
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
-    assert resp.status_code == 410
-    assert "no longer available" in resp.json()["error"].lower()
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/pdf")
+    assert resp.content[:4] == b"%PDF"
+    assert b"fake-pdf" not in resp.content
 
 
 def test_pdf_export_retry_after_failure(auth_env):
-    """Failed PDF export can be retried with a new operation identity."""
+    """Failed PDF export can be retried — Phase C: as a free
+    generation with no new operation identity at all."""
     from app import models
     from datetime import datetime, timezone
     email, user_id = _signup_and_verify(auth_env)
@@ -483,27 +512,27 @@ def test_pdf_export_retry_after_failure(auth_env):
         failed_op_id = failed_op.id
     finally:
         db.close()
-    # Retry should succeed with a NEW operation (not reuse the failed one)
-    # User has 10 credits from signup, export costs 2
+    # PREMISE CHANGED (issue #164 Phase C): the retry is a free
+    # on-the-fly generation — the seeded failed operation does not
+    # block it (C7.1: failed ops never satisfy the stored-artifact
+    # predicate) and NO new operation is created for the retry.
     csrf = auth_env.client.get("/auth/csrf").json()["csrf_token"]
     auth_env.client.headers["X-CSRF-Token"] = csrf
     resp = auth_env.client.post(f"/reports/{rid}/pdf", data={"csrf_token": csrf})
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/pdf"
-    # Verify a new operation was created (not the failed one)
+    assert resp.content[:4] == b"%PDF"
     db = auth_env.sessions()
     try:
         ops = db.query(models.Operation).filter(
             models.Operation.user_id == user_id,
             models.Operation.type == "pdf",
         ).all()
-        # Should have 2 operations: the failed one and the new successful one
-        assert len(ops) == 2
-        new_ops = [op for op in ops if op.id != failed_op_id]
-        assert len(new_ops) == 1
-        assert new_ops[0].status == "completed"
-        assert new_ops[0].idempotency_key != f"pdf-{rid}"  # New key for retry
-        assert new_ops[0].idempotency_key.startswith(f"pdf-{rid}-retry-")
+        # Only the seeded failed operation exists, unchanged.
+        assert len(ops) == 1
+        assert ops[0].id == failed_op_id
+        assert ops[0].status == "failed"
+        assert ops[0].idempotency_key == f"pdf-{rid}"
     finally:
         db.close()
 
@@ -531,8 +560,10 @@ def test_fresh_analysis_result_shows_pdf_export_button(env):
     # per-format "Export PDF (2 credits)" button on the report page.
     # PREMISE-CHANGED again by issue #136 (one job per page): that
     # dropdown is now the single "Actions" menu on the report page.
-    assert ">Actions</button>" in resp.text
-    assert ">Export PDF</button>" in resp.text
+    # PREMISE CHANGED AGAIN (fidelity G1, 2026-11-10): direct
+    # export controls replace the Actions menu.
+    assert 'data-s1-actions' in resp.text
+    assert ">Export PDF" in resp.text
     assert "Export PDF (2 credits)" not in resp.text
 
     # Replay of the same request (no re-analysis) shows the button too.

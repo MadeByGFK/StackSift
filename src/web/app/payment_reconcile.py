@@ -45,6 +45,28 @@ STRIPE_API_BASE = "https://api.stripe.com/v1"
 PAGE_LIMIT = 100
 LOOKBACK_DAYS = 31  # backfill bound for the first run
 REFUND_ATTRIBUTION_LOOKBACK_DAYS = 60  # late refunds still find their pack
+
+# Issue #164 Phase C (C6a): the durable cutover anchor. Recorded at
+# activation (read-only pending-purchase/payable-session inventory on
+# #164) and supplied via PHASE_C_CUTOVER_AT (ISO-8601 UTC). Any pack
+# purchase COMPLETION after the anchor is an alert condition — it can
+# only be a pre-cutover pending session settling late (grant honoured,
+# founder surfaced) or a bug/bypass — regardless of when its row was
+# created. Unset anchor = pre-cutover, no alerting.
+import os as _os
+
+
+def phase_c_cutover_anchor():
+    raw = _os.environ.get("PHASE_C_CUTOVER_AT") or ""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 SETTLE_LOOKBACK_DAYS = 4  # a session created on day D can settle at most
 # ~4 days later: Checkout Sessions expire 24h after creation and Stripe
 # retries webhook delivery for up to ~3 days, so the prior-session fetch
@@ -375,6 +397,38 @@ def compute_reconciliation(
                 continue
             if sid not in matched_latest or completed_at > matched_latest[sid]:
                 matched_latest[sid] = completed_at
+        # Remediation2 P2-B: product purchases join the SAME
+        # settlement-date bucketing BEFORE family partitioning.
+        # Previously matched_latest was credit-only, so a product
+        # session created before UTC midnight and settled after
+        # counted on its creation day (orphan there, since the
+        # product ledger gross keys on completed_at) and was missing
+        # from its settlement day's prior_sessions pairing — false
+        # mismatches on BOTH days. Product purchases whose current
+        # status moved on to refunded/disputed still settled on
+        # their completed_at, so they bucket identically.
+        # Remediation4 (fix 6): the product bucketing anchor is the
+        # persisted Stripe charge creation time when present (the
+        # day the Stripe charge fetch keys on), falling back to
+        # completed_at for pre-0020 rows — so a charge created
+        # before midnight but settled after it counts on its
+        # CHARGE day on both sides.
+        for sid, _charge_created, completed_at in db.execute(
+            select(M.ProductPurchase.stripe_session_id,
+                   M.ProductPurchase.stripe_charge_created_at,
+                   M.ProductPurchase.completed_at).where(
+                M.ProductPurchase.status.in_(
+                    ("completed", "refunded", "disputed")),
+                M.ProductPurchase.completed_at.isnot(None),
+                M.ProductPurchase.stripe_session_id.in_(all_ids),
+            )
+        ).all():
+            if sid is None or completed_at is None:
+                continue
+            anchor_at = _charge_created if _charge_created is not None \
+                else completed_at
+            if sid not in matched_latest or anchor_at > matched_latest[sid]:
+                matched_latest[sid] = anchor_at
     included: list[dict] = []
     for s in sessions:
         sid = s["id"]
@@ -388,6 +442,18 @@ def compute_reconciliation(
             included.append(s)  # cross-midnight settlement, paired here
         # else: belongs to its created day (or another settlement day)
 
+    # Issue #164 (A8): partition by family ONCE at ingestion. Product
+    # sessions never enter the pack buckets (previously they inflated
+    # UNKNOWN_PACK); unknown stays a discrepancy, never absorbed.
+    def _family_of(sess):
+        meta = sess.get("metadata") or {}
+        if meta.get("kind") == "product" or (meta.get("sku") and not meta.get("pack_id")):
+            return "product"
+        if meta.get("pack_id"):
+            return "pack"
+        return "unknown"
+    product_included = [s for s in included if _family_of(s) == "product"]
+    included = [s for s in included if _family_of(s) != "product"]
     stripe_gross: dict[str, int] = {}
     stripe_session_ids: set[str] = set()
     for s in included:
@@ -395,22 +461,107 @@ def compute_reconciliation(
         amount = int(s.get("amount_total") or 0)
         stripe_gross[pack] = stripe_gross.get(pack, 0) + amount
         stripe_session_ids.add(s["id"])
+    product_stripe_gross = sum(int(s.get("amount_total") or 0) for s in product_included)
+    product_stripe_session_ids = {s["id"] for s in product_included}
+    # Issue #164 Phase B (B-14): per-SKU product buckets on BOTH
+    # sides. Stripe side keys on the session metadata ``sku`` (the
+    # same metadata _family_of keys on); the aggregate product line
+    # remains as a roll-up, asserted consistent below.
+    product_stripe_gross_by_sku: dict[str, int] = {}
+    for s in product_included:
+        _sku = (s.get("metadata") or {}).get("sku") or "unknown"
+        product_stripe_gross_by_sku[_sku] = \
+            product_stripe_gross_by_sku.get(_sku, 0) + int(s.get("amount_total") or 0)
+    product_stripe_refunds_by_sku: dict[str, int] = {}
+    product_stripe_disputes_by_sku: dict[str, int] = {}
+    # PI -> sku map for charge-side bucketing: session metadata
+    # first; the ProductPurchase snapshot (queried with product_pis
+    # below) fills the rest.
+    _pi_sku: dict[str, str] = {}
+    for _s in list(sessions) + list(wide_sessions or []):
+        if _family_of(_s) == "product":
+            _pi = _s.get("payment_intent")
+            if isinstance(_pi, dict):
+                _pi = _pi.get("id")
+            _sku = (_s.get("metadata") or {}).get("sku")
+            if _pi and _sku:
+                _pi_sku[_pi] = _sku
+
+    def _charge_sku(c) -> str:
+        _pi = c.get("payment_intent")
+        if isinstance(_pi, dict):
+            _pi = _pi.get("id")
+        if _pi and _pi in _pi_sku:
+            return _pi_sku[_pi]
+        return (c.get("metadata") or {}).get("sku") or "unknown"
+
+    # Issue #164 (A8/P2-2): charge-side family partition. A charge is
+    # a PRODUCT charge when its own metadata says kind=product, OR
+    # its PaymentIntent belongs to a product session (session/PI
+    # metadata join — real Charge objects do NOT carry the PI's
+    # metadata, so the charge-metadata check alone misses every real
+    # product charge), OR its PI is snapshotted on a ProductPurchase
+    # row. Product charges never enter the pack buckets (previously
+    # they polluted UNKNOWN_PACK via _pack_for_charge).
+    product_pis: set[str] = set()
+    for _s in list(sessions) + list(wide_sessions or []):
+        if _family_of(_s) == "product":
+            _pi = _s.get("payment_intent")
+            if isinstance(_pi, dict):
+                _pi = _pi.get("id")
+            if _pi:
+                product_pis.add(_pi)
+    _charge_pis = set()
+    for _c in charges:
+        _pi = _c.get("payment_intent")
+        if isinstance(_pi, dict):
+            _pi = _pi.get("id")
+        if _pi:
+            _charge_pis.add(_pi)
+    if _charge_pis:
+        for (_pi, _sku) in db.execute(
+            select(M.ProductPurchase.stripe_payment_intent_id,
+                   M.ProductPurchase.sku).where(
+                M.ProductPurchase.stripe_payment_intent_id.in_(_charge_pis))
+        ).all():
+            if _pi:
+                product_pis.add(_pi)
+                if _sku and _pi not in _pi_sku:
+                    _pi_sku[_pi] = _sku
+
+    def _is_product_charge(c) -> bool:
+        meta = c.get("metadata") or {}
+        if meta.get("kind") == "product":
+            return True
+        pi = c.get("payment_intent")
+        if isinstance(pi, dict):
+            pi = pi.get("id")
+        return bool(pi) and pi in product_pis
 
     stripe_refunds: dict[str, int] = {}
     stripe_disputes: dict[str, int] = {}
     refund_charges: list[dict] = []
     disputed_charges: list[dict] = []
+    product_stripe_refunds = 0
+    product_stripe_disputes = 0
     for c in charges:
+        is_product = _is_product_charge(c)
         pack = _pack_for_charge(c, pi_to_pack)
         amount = int(c.get("amount") or 0)
         refunded = int(c.get("amount_refunded") or 0)
         if refunded > 0:
-            stripe_refunds[pack] = stripe_refunds.get(pack, 0) + refunded
-            refund_charges.append({"charge_id": c["id"], "pack": pack,
-                                   "refunded_cents": refunded,
-                                   "payment_intent": c.get("payment_intent")
-                                   if isinstance(c.get("payment_intent"), str)
-                                   else (c.get("payment_intent") or {}).get("id")})
+            if is_product:
+                product_stripe_refunds += refunded
+                _sku = _charge_sku(c)
+                product_stripe_refunds_by_sku[_sku] = \
+                    product_stripe_refunds_by_sku.get(_sku, 0) + refunded
+            else:
+                stripe_refunds[pack] = stripe_refunds.get(pack, 0) + refunded
+                refund_charges.append({"charge_id": c["id"], "pack": pack,
+                                       "refunded_cents": refunded,
+                                       "payment_intent": c.get("payment_intent")
+                                       if isinstance(c.get("payment_intent"), str)
+                                       else (c.get("payment_intent") or {}).get("id")})
         if c.get("disputed"):
             # Net lost amount per charge from the expanded dispute
             # object (Finding 2). A won or charge_refunded dispute
@@ -432,6 +583,16 @@ def compute_reconciliation(
                 dispute_portion = min(dispute_amount,
                                       max(0, amount - refunded))
             if dispute_portion > 0:
+                if is_product:
+                    # P2-2: product disputes count on the product
+                    # Stripe side (previously product_stripe_disputes
+                    # was initialised 0 and never populated) and never
+                    # enter the pack disputed_charges differences.
+                    product_stripe_disputes += dispute_portion
+                    _sku = _charge_sku(c)
+                    product_stripe_disputes_by_sku[_sku] = \
+                        product_stripe_disputes_by_sku.get(_sku, 0) + dispute_portion
+                    continue
                 stripe_disputes[pack] = stripe_disputes.get(pack, 0) \
                     + dispute_portion
                 entry = {"charge_id": c["id"], "pack": pack,
@@ -619,12 +780,279 @@ def compute_reconciliation(
                 dc["open_gross_disputed_cents"]
         differences.append(diff_entry)
 
+    # --- Product family ledger side (A8) ---
+    # Remediation4 (fix 6): product gross AND reversal membership
+    # bucket by ONE shared anchor — the persisted Stripe charge
+    # creation time (stripe_charge_created_at, migration 0020),
+    # falling back to completed_at for pre-0020 rows. The Stripe
+    # charge fetch keys on charge creation time, so a charge
+    # created before midnight whose settlement was processed after
+    # midnight must land on the charge day here too, not on the
+    # local completed_at day.
+    from sqlalchemy import and_ as _and, or_ as _or
+
+    def _product_anchor_in_range():
+        return _or(
+            _and(M.ProductPurchase.stripe_charge_created_at.isnot(None),
+                 M.ProductPurchase.stripe_charge_created_at >= start,
+                 M.ProductPurchase.stripe_charge_created_at < end),
+            _and(M.ProductPurchase.stripe_charge_created_at.is_(None),
+                 M.ProductPurchase.completed_at >= start,
+                 M.ProductPurchase.completed_at < end),
+        )
+
+    product_purchases = db.execute(
+        select(M.ProductPurchase).where(
+            M.ProductPurchase.status.in_(("completed", "refunded", "disputed")),
+            _product_anchor_in_range(),
+        )
+    ).scalars().all()
+    product_ledger_gross = sum(p.amount_cents or 0 for p in product_purchases)
+    product_ledger_session_ids = {p.stripe_session_id for p in product_purchases if p.stripe_session_id}
+    # Remediation2 P2-C: the product ledger refund total is the sum
+    # of PERSISTED refunded amounts (product_purchases.refunded_cents,
+    # migration 0018) — partial refunds included, at their partial
+    # amount. Previously only status='refunded' rows counted, at
+    # FULL amount, so a $3 partial on a $9 purchase left the ledger
+    # net at 900 while the Stripe side netted 600: a permanent false
+    # mismatch. Pre-0018 full-refund rows carry refunded_cents NULL
+    # and fall back to their full amount_cents.
+    # Remediation3 (findings 3+5): BOTH product reversal totals are
+    # bucketed by the charge anchor — originally completed_at as the
+    # ledger's proxy for the charge's creation day, which is exactly
+    # where the Stripe charge loop above attributes amount_refunded
+    # and dispute portions (it iterates charges CREATED this day).
+    # The previous reversed_at (processing-day) bucketing counted a
+    # refund processed days later on the processing day, where the
+    # Stripe side never counts it: false mismatches on both days.
+    # Remediation4 (fix 6) replaces the completed_at proxy with the
+    # persisted charge creation time itself (see _product_anchor_
+    # in_range above); pre-0020 rows still fall back to completed_at.
+    # Membership is keyed on the DEDICATED reversal fields
+    # (refunded_cents / refunded_at / dispute_lost_at, migrations
+    # 0018+0019), never on reversal_kind/reversed_at alone: a later
+    # dispute (or refund) event overwrites that provenance, and the
+    # earlier deduction must survive the overwrite. Fallbacks keep
+    # pre-0019 rows countable: refunded_cents set by the 0018-era
+    # code, status='refunded' for pre-0018 full refunds, and
+    # reversal_kind='dispute_lost' for pre-0019 lost disputes.
+    product_refunded = db.execute(
+        select(M.ProductPurchase).where(
+            _product_anchor_in_range(),
+            _or(M.ProductPurchase.refunded_at.isnot(None),
+                M.ProductPurchase.refunded_cents.isnot(None),
+                M.ProductPurchase.status == "refunded"),
+        )
+    ).scalars().all()
+    product_ledger_refunds = sum(
+        (p.refunded_cents if p.refunded_cents is not None
+         else (p.amount_cents or 0) if p.status == "refunded" else 0)
+        for p in product_refunded)
+    # P2-2: product Stripe refunds/disputes were already partitioned
+    # in the charge loop above via the PaymentIntent join (product_
+    # stripe_refunds / product_stripe_disputes) — real charges do not
+    # carry kind=product metadata on the charge object. The ledger
+    # side of a lost dispute: purchases that EVER lost a dispute
+    # (dedicated dispute_lost_at, or the pre-0019 provenance
+    # fallback), bucketed by the charge anchor as above. The amount
+    # is capped at the unrefunded remainder, mirroring the Stripe
+    # side's per-charge cap, so a refunded-then-disputed (or
+    # disputed-then-refunded) purchase is never deducted twice.
+    # Remediation4 (fix 2): when the dispute's own amount was
+    # persisted (disputed_cents, migration 0020), the deduction is
+    # min(disputed_cents, amount - refunded) — a PARTIAL lost
+    # dispute deducts only its amount, exactly as the Stripe side
+    # caps it. Legacy rows without a persisted amount keep the
+    # full-remainder behaviour as fallback.
+    # Remediation5 (fix 1): disputed_cents holds only the LATEST
+    # dispute event's amount, so a charge with several disputes was
+    # still under-deducted (two lost disputes of 600 + 300 left
+    # disputed_cents=300), and a won dispute could overwrite an
+    # earlier lost one's amount. When per-dispute records exist
+    # (product_purchase_disputes, migration 0021), the deduction is
+    # min(SUM of that purchase's LOST dispute amounts, amount -
+    # refunded) — the aggregate under the same cap, mirroring
+    # _aggregate_disputes on the Stripe side. A lost record without
+    # a persisted amount falls the whole purchase back to the
+    # legacy computation below (its amount is unknowable here);
+    # purchases with no records at all keep the legacy path
+    # untouched (pre-0021 disputes, direct service-level calls).
+    product_disputed = db.execute(
+        select(M.ProductPurchase).where(
+            _product_anchor_in_range(),
+            _or(M.ProductPurchase.dispute_lost_at.isnot(None),
+                M.ProductPurchase.reversal_kind == "dispute_lost"),
+        )
+    ).scalars().all()
+    _dispute_records: dict = {}
+    if product_disputed:
+        for _rec in db.execute(
+            select(M.ProductPurchaseDispute).where(
+                M.ProductPurchaseDispute.product_purchase_id.in_(
+                    [p.id for p in product_disputed]))
+        ).scalars().all():
+            _dispute_records.setdefault(_rec.product_purchase_id, []).append(_rec)
+
+    def _ledger_dispute_cents(p) -> int:
+        remainder = max(0, (p.amount_cents or 0) - (p.refunded_cents or 0))
+        records = _dispute_records.get(p.id)
+        if records:
+            lost = [r for r in records if r.status == "lost"]
+            if all(r.amount_cents is not None for r in lost):
+                return min(sum(r.amount_cents for r in lost), remainder)
+        if getattr(p, "disputed_cents", None) is not None:
+            return min(p.disputed_cents, remainder)
+        return remainder
+
+    product_ledger_disputes = sum(
+        _ledger_dispute_cents(p) for p in product_disputed)
+    # B-14 ledger-side per-SKU buckets, keyed on ProductPurchase.sku
+    # with the same per-row amounts the aggregate sums use.
+    product_ledger_gross_by_sku: dict[str, int] = {}
+    for p in product_purchases:
+        product_ledger_gross_by_sku[p.sku] = \
+            product_ledger_gross_by_sku.get(p.sku, 0) + (p.amount_cents or 0)
+    product_ledger_refunds_by_sku: dict[str, int] = {}
+    for p in product_refunded:
+        _amt = (p.refunded_cents if p.refunded_cents is not None
+                else (p.amount_cents or 0) if p.status == "refunded" else 0)
+        product_ledger_refunds_by_sku[p.sku] = \
+            product_ledger_refunds_by_sku.get(p.sku, 0) + _amt
+    product_ledger_disputes_by_sku: dict[str, int] = {}
+    for p in product_disputed:
+        product_ledger_disputes_by_sku[p.sku] = \
+            product_ledger_disputes_by_sku.get(p.sku, 0) + _ledger_dispute_cents(p)
+    # Per-SKU comparison: a doctored amount in one SKU mismatches
+    # only that bucket and the roll-up.
+    _all_skus = (set(product_stripe_gross_by_sku) | set(product_ledger_gross_by_sku)
+                 | set(product_stripe_refunds_by_sku) | set(product_ledger_refunds_by_sku)
+                 | set(product_stripe_disputes_by_sku) | set(product_ledger_disputes_by_sku))
+    product_per_sku: dict[str, dict] = {}
+    for _sku in sorted(_all_skus):
+        _sg = product_stripe_gross_by_sku.get(_sku, 0)
+        _sr = product_stripe_refunds_by_sku.get(_sku, 0)
+        _sd = product_stripe_disputes_by_sku.get(_sku, 0)
+        _lg = product_ledger_gross_by_sku.get(_sku, 0)
+        _lr = product_ledger_refunds_by_sku.get(_sku, 0)
+        _ld = product_ledger_disputes_by_sku.get(_sku, 0)
+        product_per_sku[_sku] = {
+            "stripe_gross_cents": _sg, "stripe_refund_cents": _sr,
+            "stripe_dispute_cents": _sd, "ledger_gross_cents": _lg,
+            "ledger_refund_cents": _lr, "ledger_dispute_cents": _ld,
+            "stripe_net_cents": _sg - _sr - _sd,
+            "ledger_net_cents": _lg - _lr - _ld,
+            "diff_cents": (_sg - _sr - _sd) - (_lg - _lr - _ld),
+        }
+        if product_per_sku[_sku]["diff_cents"] != 0:
+            differences.append({
+                "kind": "sku_total_mismatch", "family": "product",
+                "sku": _sku,
+                "stripe_net_cents": product_per_sku[_sku]["stripe_net_cents"],
+                "ledger_net_cents": product_per_sku[_sku]["ledger_net_cents"],
+                "diff_cents": product_per_sku[_sku]["diff_cents"],
+            })
+    # Internal consistency: the buckets must sum to the roll-up, so
+    # the extension cannot silently drop a session or a purchase.
+    if (sum(product_stripe_gross_by_sku.values()) != product_stripe_gross
+            or sum(product_ledger_gross_by_sku.values()) != product_ledger_gross
+            or sum(product_stripe_refunds_by_sku.values()) != product_stripe_refunds
+            or sum(product_ledger_refunds_by_sku.values()) != product_ledger_refunds
+            or sum(product_stripe_disputes_by_sku.values()) != product_stripe_disputes
+            or sum(product_ledger_disputes_by_sku.values()) != product_ledger_disputes):
+        differences.append({
+            "kind": "product_sku_bucket_mismatch", "family": "product",
+        })
+    for s in product_included:
+        if s["id"] not in product_ledger_session_ids:
+            differences.append({
+                "kind": "stripe_session_without_purchase", "family": "product",
+                "stripe_session_id": s["id"],
+                "amount_cents": int(s.get("amount_total") or 0),
+            })
+    for p in product_purchases:
+        if p.stripe_session_id and p.stripe_session_id not in product_stripe_session_ids:
+            differences.append({
+                "kind": "purchase_without_stripe_session", "family": "product",
+                "purchase_id": str(p.id),
+                "amount_cents": p.amount_cents or 0,
+            })
+    # Per-family check: every completed product purchase has exactly
+    # one entitlement, and vice versa — a money-clean day with a
+    # missing entitlement alerts.
+    for p in product_purchases:
+        if p.status != "completed":
+            continue
+        count = db.execute(
+            select(func.count()).select_from(M.Entitlement).where(
+                M.Entitlement.product_purchase_id == p.id)
+        ).scalar() or 0
+        if count != 1:
+            differences.append({
+                "kind": "product_purchase_entitlement_mismatch",
+                "family": "product", "purchase_id": str(p.id),
+                "entitlement_count": count,
+            })
+    product_stripe_net = product_stripe_gross - product_stripe_refunds - product_stripe_disputes
+    product_ledger_net = product_ledger_gross - product_ledger_refunds - product_ledger_disputes
+    if product_stripe_net != product_ledger_net:
+        differences.append({
+            "kind": "family_total_mismatch", "family": "product",
+            "stripe_net_cents": product_stripe_net,
+            "ledger_net_cents": product_ledger_net,
+            "diff_cents": product_stripe_net - product_ledger_net,
+        })
+    per_family = {
+        "pack": {
+            "stripe_gross_cents": sum(stripe_gross.values()),
+            "ledger_gross_cents": sum(ledger_gross.values()),
+        },
+        "product": {
+            "stripe_gross_cents": product_stripe_gross,
+            "stripe_refund_cents": product_stripe_refunds,
+            "stripe_dispute_cents": product_stripe_disputes,
+            "ledger_gross_cents": product_ledger_gross,
+            "ledger_refund_cents": product_ledger_refunds,
+            "ledger_dispute_cents": product_ledger_disputes,
+            "stripe_net_cents": product_stripe_net,
+            "ledger_net_cents": product_ledger_net,
+            "diff_cents": product_stripe_net - product_ledger_net,
+            "per_sku": product_per_sku,
+        },
+    }
+
+    # Issue #164 Phase C (C6a): post-cutover pack completions alert.
+    _anchor = phase_c_cutover_anchor()
+    if _anchor is not None:
+        for _pid, _completed_at in db.execute(
+            select(M.CreditPurchase.id, M.CreditPurchase.completed_at).where(
+                M.CreditPurchase.status == "completed",
+                M.CreditPurchase.completed_at.isnot(None),
+            )
+        ).all():
+            _ca = _completed_at
+            if _ca is not None and _ca.tzinfo is None:
+                _ca = _ca.replace(tzinfo=timezone.utc)
+            if _ca is not None and _ca > _anchor and start <= _ca < end:
+                differences.append({
+                    "kind": "post_cutover_pack_completion",
+                    "purchase_id": str(_pid),
+                    "completed_at": _ca.isoformat(),
+                    "note": "pack purchase completed after the Phase C "
+                            "cutover anchor — pre-cutover pending "
+                            "settlement (grant honoured, surface to "
+                            "founder) or a sales bypass",
+                })
+
     return {
-        "stripe_gross_cents": sum(stripe_gross.values()),
-        "stripe_refund_cents": sum(stripe_refunds.values()),
-        "stripe_dispute_cents": sum(stripe_disputes.values()),
-        "ledger_gross_cents": sum(ledger_gross.values()),
-        "ledger_refund_cents": sum(ledger_refunds.values()),
+        "per_family": per_family,
+        "stripe_gross_cents": sum(stripe_gross.values()) + product_stripe_gross,
+        # P2-2: headline refund/dispute totals extend across BOTH
+        # families consistently (previously product amounts counted
+        # in gross only, leaving refund/dispute headlines pack-only).
+        "stripe_refund_cents": sum(stripe_refunds.values()) + product_stripe_refunds,
+        "stripe_dispute_cents": sum(stripe_disputes.values()) + product_stripe_disputes,
+        "ledger_gross_cents": sum(ledger_gross.values()) + product_ledger_gross,
+        "ledger_refund_cents": sum(ledger_refunds.values()) + product_ledger_refunds,
         "per_pack": per_pack,
         "differences": differences,
     }
@@ -781,6 +1209,8 @@ def reconcile_day(db, day: date, *, stripe_get=None,
         existing.ledger_gross_cents = result["ledger_gross_cents"]
         existing.ledger_refund_cents = result["ledger_refund_cents"]
         existing.per_pack = result["per_pack"]
+        existing.per_family = result.get("per_family")
+        existing.schema_version = 2
         existing.differences = result["differences"]
         existing.error_note = None
         if status == "mismatch":
@@ -813,6 +1243,8 @@ def reconcile_day(db, day: date, *, stripe_get=None,
             ledger_gross_cents=result["ledger_gross_cents"],
             ledger_refund_cents=result["ledger_refund_cents"],
             per_pack=result["per_pack"],
+            per_family=result.get("per_family"),
+            schema_version=2,
             differences=result["differences"],
         )
         alert_pending = False
@@ -864,6 +1296,20 @@ def reconcile_missing_days(db, *, stripe_get=None, today: date | None = None
                 M.CreditPurchase.status == "completed"
             )
         ).scalar()
+        # Remediation4 (fix 6): the product scan start is the
+        # earliest product ANCHOR day (charge creation, falling back
+        # to completed_at) — starting at completed_at would skip the
+        # charge day of a first-ever cross-midnight settlement, and
+        # that day would never be reconciled at all.
+        _earliest_product = db.execute(
+            select(func.min(func.coalesce(
+                M.ProductPurchase.stripe_charge_created_at,
+                M.ProductPurchase.completed_at))).where(
+                M.ProductPurchase.status == "completed"
+            )
+        ).scalar()
+        if _earliest_product is not None and (earliest is None or _earliest_product < earliest):
+            earliest = _earliest_product
         if earliest is not None:
             start_day = earliest.date()
         else:

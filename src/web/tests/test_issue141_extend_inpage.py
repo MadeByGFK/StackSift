@@ -50,6 +50,30 @@ c759ded, where a replayed response returned early and never
 refreshed the badge) and passes with the remediation — verified
 by swapping in ``git show HEAD:.../reports.html`` for that run
 (see the remediation report).
+
+PREMISE CHANGED (#164 Phase C, Decision 5 + C3): retention
+extensions are no longer sold — the My Reports Extend control is
+removed from every row, the header credit badge is gone, and both
+balance endpoints (/auth/balance, /credits/balance) are retired
+(410). The page-structure tests below therefore pin the control's
+ABSENCE (the #106 deep_dive suppression is subsumed — no row has
+Extend now), and the Node harness tests pin the surviving in-page
+behaviour of the (now form-less) retention script: a replayed
+success still updates the row in place, and it must NOT fetch a
+balance or touch a badge — there is none. The harness's
+/auth/balance stub remains precisely so balanceCount can prove
+the script never calls it.
+
+PREMISE CHANGED (Release #7 F1, 2026-11-14): the shared
+data-confirm handler that gated EVERY form submit (including the
+retention form's) is REMOVED along with the ss-confirm modal.
+The retention submit listener now fires DIRECTLY on submit.
+The a-e harness tests below are re-aimed at that direct-fire
+behaviour: the same end-state assertions (fetch fired once, no
+navigation, same idempotency key on retry, row updates in place,
+no balance fetch) minus the confirm step — a submit fetches
+immediately and the confirm modal never appears. Test (a) is
+renamed accordingly (its name asserted the confirmed premise).
 """
 
 import json
@@ -81,42 +105,44 @@ def _extend_form_slice(html, rid):
     return html[start:end]
 
 
-def test_reports_page_extend_form_is_fetch_handled_in_page(auth_env):
+def test_reports_page_has_no_extend_form_after_phase_c_removal(auth_env):
+    # Was test_reports_page_extend_form_is_fetch_handled_in_page.
+    # PREMISE CHANGED (#164 Phase C, Decision 5): the Extend control
+    # is removed from My Reports — there is no retention form to
+    # fetch-handle anymore. At the same strength, the page now pins
+    # the control's absence: no form posting to the retention route,
+    # no Extend button, no confirmation wording — while the row's
+    # retention DISPLAY (expiry date + pill + status element) is
+    # preserved, since expiries in force still run.
     _, user_id, rid, csrf = _setup(auth_env)
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
     text = page.text
-    form = _extend_form_slice(text, rid)
-    # The confirmation popup and its exact wording are unchanged,
-    # and the form still carries the CSRF token + idempotency key
-    # the fetch path must send.
-    assert f'data-confirm="{_CONFIRM_TEXT}"' in form
-    assert 'name="csrf_token"' in form
-    assert 'name="idempotency_key"' in form
-    # The fix markers: the form is fetch-handled, the row carries
-    # updatable expiry/status elements, and the in-page error modal
-    # exists.
-    assert "data-retention-form" in form
+    assert f'action="/reports/{rid}/retention"' not in text
+    assert ">Extend</button>" not in text
+    assert _CONFIRM_TEXT not in text
     assert "data-retention-expiry-date" in text
     assert "data-retention-expiry-pill" in text
     assert "data-retention-status" in text
-    assert 'id="extend-modal"' in text
-    assert 'id="extend-msg"' in text
 
 
 def test_reports_page_deep_dive_rows_still_have_no_extend(auth_env):
-    # Guard (passes on both trees by design): the #106 Stage 2
-    # suppression of Extend on Analysis Report rows is untouched.
+    # Guard: the #106 Stage 2 suppression of Extend on Analysis
+    # Report rows is untouched — and PREMISE CHANGED (#164 Phase C):
+    # it is now subsumed by the control's removal from EVERY row, so
+    # the normal row no longer carries Extend either.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200, gen.text[:300]
     analysis_id = gen.json()["analysis_result_id"]
     page = auth_env.client.get("/reports")
     assert page.status_code == 200
-    cards = page.text.split('<li class="card">')
+    cards = page.text.split('<tr class="card s3-row">')
 
     def _card_for(report_id):
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">View'
+        # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1):
+        # the row's own link is labelled "Open", not "View".
+        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]
@@ -125,7 +151,8 @@ def test_reports_page_deep_dive_rows_still_have_no_extend(auth_env):
     assert "Extend" not in deep
     assert f"/reports/{analysis_id}/retention" not in deep
     normal = _card_for(str(rid))
-    assert f"/reports/{rid}/retention" in normal and ">Extend</button>" in normal
+    assert f"/reports/{rid}/retention" not in normal
+    assert ">Extend</button>" not in normal
 
 
 # --- Node harness: the real reports.html inline script, driven as a user -----
@@ -265,10 +292,10 @@ globalThis.fetch = function (url, opts) {
     key: body && body.get ? body.get('idempotency_key') : null,
   };
   fetchCalls.push(call);
-  // Route by URL (PR #143 remediation): the badge refresh reads
-  // the authoritative balance. The badge starts at 3 credits and
-  // exactly one charge has committed in every scenario below, so
-  // the authoritative balance is always 2 here.
+  // Route by URL: the /auth/balance stub remains ONLY so the
+  // Phase C tests can prove the script never calls it anymore
+  // (the endpoint and the badge are retired); balanceCalls must
+  // stay empty in every scenario below.
   if (String(url) === '/auth/balance' || String(url).indexOf('/auth/balance') !== -1) {
     balanceCalls.push(call);
     return Promise.resolve({
@@ -309,9 +336,11 @@ async function click(el) {
   });
   await flush();
 }
-async function submitAndConfirm() {
+async function submitExtend() {
+  // Release #7 F1: no confirm gate — the submit itself fires the
+  // retention fetch listener directly; flush settles the promise.
   dispatchSubmit(retForm);
-  await click(byId('ss-confirm-yes'));
+  await flush();
 }
 function snap() {
   return {
@@ -341,7 +370,7 @@ def _run_js(scenario):
     html = (_TEMPLATES / "reports.html").read_text()
     script = None
     for candidate in re.findall(r"<script>(.*?)</script>", html, re.S):
-        if "data-confirm" in candidate:
+        if "data-retention-form" in candidate:
             script = candidate
             break
     assert script is not None, "reports.html inline script not found"
@@ -357,29 +386,22 @@ def _run_js(scenario):
 
 
 @pytestmark_js
-def test_a_confirmed_extend_fetches_without_navigation_and_cancel_is_noop():
+def test_a_extend_fetches_directly_without_navigation_or_confirm_gate():
+    # RENAMED (Release #7 F1): was
+    # test_a_confirmed_extend_fetches_without_navigation_and_
+    # cancel_is_noop. The confirm gate (popup, exact wording,
+    # Cancel-is-noop step) is REMOVED — the submit fires the
+    # retention fetch directly, at the same strength: exactly one
+    # fetch carrying the form's own CSRF token + idempotency key,
+    # no native submit (no navigation to the raw JSON response),
+    # and the confirm modal never appears.
     out = _run_js("""
-      dispatchSubmit(retForm);
-      out.afterFirst = snap();
-      await click(byId('ss-confirm-no'));
-      out.afterCancel = snap();
-      await submitAndConfirm();
-      out.afterYes = snap();
+      await submitExtend();
+      out.afterSubmit = snap();
     """)
-    # Initial click: popup only, exact wording, nothing sent.
-    assert out["afterFirst"]["confirmDisplay"] == "flex", out
-    assert out["afterFirst"]["confirmText"] == (
-        "Extend this report's retention by 90 days for 1 credit?")
-    assert out["afterFirst"]["fetchCount"] == 0
-    assert out["afterFirst"]["nativeSubmits"] == 0
-    # Cancel: no fetch, no native submit, popup closed.
-    assert out["afterCancel"]["fetchCount"] == 0, out
-    assert out["afterCancel"]["nativeSubmits"] == 0, out
-    assert out["afterCancel"]["confirmDisplay"] == "none", out
-    # Yes: exactly one fetch to the retention endpoint carrying the
-    # form's own CSRF token + idempotency key, and NO native submit
-    # (no navigation to the raw JSON response).
-    after = out["afterYes"]
+    after = out["afterSubmit"]
+    assert after["confirmDisplay"] != "flex", after
+    assert after["confirmText"] == "", after
     assert after["fetchCount"] == 1, after
     assert after["nativeSubmits"] == 0, after
     call = after["calls"][0]
@@ -390,30 +412,40 @@ def test_a_confirmed_extend_fetches_without_navigation_and_cancel_is_noop():
 
 
 @pytestmark_js
-def test_b_success_updates_row_expiry_and_header_balance_in_place():
+def test_b_success_updates_row_expiry_in_place_without_balance_fetch():
+    # Was test_b_success_updates_row_expiry_and_header_balance_in_place.
+    # PREMISE CHANGED (#164 Phase C, C3): there is no header badge
+    # and no balance endpoint anymore — a success updates the row
+    # in place and must NOT fetch /auth/balance or touch a badge.
+    # The harness badge element is a canary: it starts at 3 credits
+    # and must remain exactly that, untouched.
     out = _run_js("""
-      await submitAndConfirm();
+      await submitExtend();
       out.after = snap();
     """)
     after = out["after"]
     assert after["nativeSubmits"] == 0, after
     assert after["dateText"] == "Expires 2027-02-09", after
     assert after["pillText"] == "Expires in 97 days", after
-    assert after["badgeText"] == "\U0001FA99 2 credits", after
     assert after["statusText"] == "Retention extended.", after
     assert after["statusDisplay"] == "", after
     assert after["extendDisplay"] != "flex", after  # no error modal
     assert after["btnDisabled"] is False, after
+    # Exactly one fetch — the retention POST itself. No balance
+    # fetch, and the (retired) badge is never modified.
+    assert after["fetchCount"] == 1, after
+    assert after["balanceCount"] == 0, after
+    assert after["badgeText"] == "\U0001FA99 3 credits", after
 
 
 @pytestmark_js
 def test_c_failure_shows_in_page_error_with_no_navigation_or_change():
     out = _run_js("""
       fetchMode = 'error';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterError = snap();
       fetchMode = 'network';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterNetwork = snap();
     """)
     for snap_out in (out["afterError"], out["afterNetwork"]):
@@ -429,46 +461,51 @@ def test_c_failure_shows_in_page_error_with_no_navigation_or_change():
 
 
 @pytestmark_js
-def test_d_retry_sends_same_idempotency_key_and_charges_once():
+def test_d_retry_sends_same_idempotency_key_and_replays_without_recharge():
+    # Was test_d_retry_sends_same_idempotency_key_and_charges_once.
+    # PREMISE CHANGED (#164 Phase C, C3/C5): the replayed response
+    # no longer refreshes a badge from /auth/balance (endpoint and
+    # badge retired) — "charges once" is now pinned by the absence
+    # of any balance interaction at all: same key re-sent, no
+    # balance fetch, badge canary untouched, row updated once to
+    # the recorded expiry.
     out = _run_js("""
       fetchMode = 'ok-replay-second';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterFirst = snap();
-      await submitAndConfirm();
+      await submitExtend();
       out.afterRetry = snap();
     """)
     retry = out["afterRetry"]
-    # Count RETENTION calls specifically (PR #143 remediation):
-    # the replayed second response now also fetches /auth/balance
-    # to refresh the badge, so the total fetch count is higher.
     assert retry["retentionCount"] == 2, retry
     assert retry["nativeSubmits"] == 0, retry
     keys = [c["key"] for c in retry["retentionCalls"]]
     assert keys == ["ret-key-123", "ret-key-123"], keys
-    # Exactly one credit was charged across both submits: the
-    # replayed response refreshes the badge from /auth/balance
-    # (balance: 2), it does not decrement a second time.
-    assert retry["badgeText"] == "\U0001FA99 2 credits", retry
+    assert retry["balanceCount"] == 0, retry
+    assert retry["badgeText"] == "\U0001FA99 3 credits", retry
     assert retry["dateText"] == "Expires 2027-02-09", retry
     assert retry["pillText"] == "Expires in 97 days", retry
 
 
 @pytestmark_js
-def test_e_lost_response_retry_replayed_refreshes_badge_from_balance():
-    # PR #143 remediation regression (verified Codex P2): the
+def test_e_lost_response_retry_replayed_updates_row_without_balance_refresh():
+    # Was test_e_lost_response_retry_replayed_refreshes_badge_from_balance
+    # (PR #143 remediation regression, verified Codex P2): the
     # server commits the extension on the first attempt but the
-    # response is lost (network error -> error modal, badge
-    # unchanged). The retry re-sends the SAME idempotency key and
-    # the server replays the recorded outcome
-    # ({status:'extended', replayed:true, cost:1, ...}): the row
-    # updates to success AND the badge must become the
-    # authoritative balance (2), not stay at 3 until reload.
+    # response is lost (network error -> error modal). The retry
+    # re-sends the SAME idempotency key and the server replays the
+    # recorded outcome ({status:'extended', replayed:true, ...}):
+    # the row updates to success.
+    # PREMISE CHANGED (#164 Phase C, C3): the PR #143 badge refresh
+    # is retired with the badge and /auth/balance — the replayed
+    # response must make NO balance fetch and leave the badge
+    # canary untouched; the row update is the whole contract.
     out = _run_js("""
       fetchMode = 'network';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterNetwork = snap();
       fetchMode = 'replayed';
-      await submitAndConfirm();
+      await submitExtend();
       out.afterRetry = snap();
     """)
     lost = out["afterNetwork"]
@@ -490,11 +527,8 @@ def test_e_lost_response_retry_replayed_refreshes_badge_from_balance():
     assert retry["dateText"] == "Expires 2027-02-09", retry
     assert retry["pillText"] == "Expires in 97 days", retry
     assert retry["statusText"] == "Retention extended.", retry
-    # Badge is refreshed from GET /auth/balance (same-origin),
-    # exactly once, to the authoritative balance.
-    assert retry["balanceCount"] == 1, retry
-    balance_call = retry["balanceCalls"][0]
-    assert balance_call["url"] == "/auth/balance", balance_call
-    assert balance_call["credentials"] == "same-origin", balance_call
-    assert retry["badgeText"] == "\U0001FA99 2 credits", retry
+    # No balance refresh exists anymore: zero /auth/balance calls
+    # across both attempts, and the badge canary is untouched.
+    assert retry["balanceCount"] == 0, retry
+    assert retry["badgeText"] == "\U0001FA99 3 credits", retry
     assert retry["btnDisabled"] is False, retry
