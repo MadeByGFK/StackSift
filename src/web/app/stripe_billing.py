@@ -518,6 +518,67 @@ def fetch_payment_intent_metadata(payment_intent_id: str) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def fetch_charge_created_at(payment_intent_id: str):
+    """Retrieve the ``created`` timestamp of a PaymentIntent's charge.
+
+    Release #7 P2-1: reconciliation keys Stripe charges by the
+    CHARGE's own ``created`` (``fetch_day_charges``), so settlement
+    must anchor a purchase to the charge — not to the Checkout
+    Session, whose ``created`` can fall on the previous UTC day
+    (sessions remain payable for up to 24h). Resolves the charge
+    through the PaymentIntent's ``latest_charge``. Returns the
+    charge's ``created`` (epoch seconds, int), or None when the
+    PaymentIntent carries no charge to resolve. Raises CheckoutError
+    on transport/API failure; the caller decides what an unavailable
+    charge means (the settlement webhook falls back — see main.py).
+    """
+    if not payment_intent_id:
+        raise CheckoutError("missing payment intent id for charge retrieval")
+    key = _secret_key()
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/payment_intents/{payment_intent_id}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe payment-intent request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe payment-intent request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe payment-intent returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe payment-intent request failed")
+    body = resp.json()
+    if not isinstance(body, dict):
+        return None
+    charge = body.get("latest_charge")
+    if isinstance(charge, dict):
+        created = charge.get("created")
+        return created if isinstance(created, int) else None
+    if not isinstance(charge, str) or not charge:
+        return None
+    try:
+        resp = httpx.get(
+            f"{STRIPE_API_BASE}/charges/{charge}",
+            auth=(key, ""),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.error("Stripe charge request failed (%s)", type(exc).__name__)
+        raise CheckoutError("Stripe charge request failed") from exc
+    if resp.status_code != 200:
+        detail = _stripe_error_detail(resp)
+        logger.error("Stripe charge returned HTTP %s (%s)",
+                     resp.status_code, detail)
+        raise CheckoutError("Stripe charge request failed")
+    body = resp.json()
+    if not isinstance(body, dict):
+        return None
+    created = body.get("created")
+    return created if isinstance(created, int) else None
+
+
 def fetch_checkout_session(session_id: str) -> dict:
     """Retrieve a Checkout Session object from the Stripe API.
 

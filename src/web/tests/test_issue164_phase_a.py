@@ -144,11 +144,20 @@ def _post_event(p164_env, event_dict):
 # controlled via _LINE_PRICE.
 _LINE_PRICE = {"id": PRICE_ID}
 
+# Release #7 P2-1: settlement resolves the CHARGE's `created` via the
+# PaymentIntent's latest_charge. Tests steer it through
+# _CHARGE_CREATED: ts=None means the PaymentIntent carries no charge
+# (the genuinely-unavailable shape — settlement falls back to the
+# session/event `created`); an epoch int makes the stubbed charge
+# resolve with that `created`.
+_CHARGE_CREATED = {"ts": None}
+
 
 @pytest.fixture(autouse=True)
 def _stub_line_item_retrieval(monkeypatch):
     import httpx
     _LINE_PRICE["id"] = PRICE_ID
+    _CHARGE_CREATED["ts"] = None
 
     class Resp:
         status_code = 200
@@ -158,9 +167,28 @@ def _stub_line_item_retrieval(monkeypatch):
                 return {"data": []}
             return {"data": [{"price": {"id": _LINE_PRICE["id"]}}]}
 
+    class _PiResp:
+        status_code = 200
+
+        def json(self):
+            if _CHARGE_CREATED["ts"] is None:
+                return {"id": "pi_test_1", "latest_charge": None}
+            return {"id": "pi_test_1", "latest_charge": "ch_stub_1"}
+
+    class _ChargeResp:
+        status_code = 200
+
+        def json(self):
+            return {"id": "ch_stub_1", "created": _CHARGE_CREATED["ts"]}
+
     def _get(url, params=None, auth=None, headers=None, timeout=None):
-        assert "/checkout/sessions/" in url and url.endswith("/line_items"), url
-        return Resp()
+        if "/checkout/sessions/" in url and url.endswith("/line_items"):
+            return Resp()
+        if "/payment_intents/" in url:
+            return _PiResp()
+        if "/charges/" in url:
+            return _ChargeResp()
+        raise AssertionError(url)
 
     monkeypatch.setattr(httpx, "get", _get)
 
@@ -2560,7 +2588,18 @@ def test_r4_cleanup_settlement_between_protection_reads_cannot_strand(p164_env):
 
 # Fix 6: cross-midnight reversal attribution -------------------------------------
 
-def test_r4_settlement_persists_charge_created_anchor_from_event(p164_env):
+def test_r4_settlement_anchor_falls_back_to_session_created_when_charge_unavailable(p164_env):
+    # PREMISE CHANGED by the Release #7 P2-1 fix (was
+    # test_r4_settlement_persists_charge_created_anchor_from_event):
+    # this test pinned the session/event `created` as THE anchor
+    # source. The anchor is now the CHARGE's own `created`, resolved
+    # via the PaymentIntent's latest_charge; the session `created`
+    # (then the event's) survives only as the fallback when the
+    # charge is genuinely unavailable — which is the shape here
+    # (the stubbed PaymentIntent carries no charge), so the stored
+    # value is still the session/event timestamp below. The primary
+    # path is pinned by
+    # test_settlement_anchor_uses_charge_created_not_session_created.
     _, user_id, _ = _make_user(p164_env)
     rid = _source(p164_env, user_id)
     purchase = _pending_with_session(p164_env, user_id, rid)
@@ -2980,3 +3019,287 @@ def test_r5_alembic_revision_ids_fit_postgres_version_num_column():
                 if len(revision) > 32:
                     offenders.append((path.name, revision))
     assert offenders == []
+
+
+# --- Release #7 remediation: Codex P2-2 + P2-1 on PR #188 --------------------
+# Both findings verified REAL against head 4612bede (see
+# release7-codex-p2-verification-2026-11-15.md). P2-2: after
+# redemption the F1 guard went blind (live_entitlement matches only
+# available|reserved), so a second $9 checkout settled and granted
+# an entitlement canonical replay made permanently unconsumable.
+# P2-1: stripe_charge_created_at stored the Checkout Session's
+# `created`, not the charge's, so a cross-midnight session/charge
+# pair produced false reconciliation mismatches on both days once
+# the purchase was refunded or lost a dispute. The P2-2 tests below
+# FAIL on the pre-fix tree and PASS on the fixed tree (verified by
+# stashing the fix); the P2-1 anchor-provenance test likewise. The
+# older-generator-version legs are GUARDS: they pin the binding
+# identity (the replay's own request hash) so the fix cannot block
+# the consumable re-purchase the report page offers for a stale
+# prior report.
+
+def test_checkout_blocked_when_product_report_already_completed(p164_env, monkeypatch):
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    artifact_id = _redeem(p164_env, user_id, rid, csrf)
+    from app import models
+    with p164_env.sessions() as db:
+        purchases_before = db.query(models.ProductPurchase).count()
+    captured = []
+    _fake_stripe(monkeypatch, captured)
+    r = _checkout(p164_env, rid, csrf)
+    assert r.status_code == 409
+    body = r.json()
+    assert body["already_owned"] is True
+    assert body["existing_report_id"] == artifact_id
+    assert body["report_url"] == f"/reports/{artifact_id}"
+    assert captured == []  # no Stripe session created, no charge
+    with p164_env.sessions() as db:
+        # No new purchase row either.
+        assert db.query(models.ProductPurchase).count() == purchases_before
+
+
+def test_second_checkout_after_redemption_creates_no_purchase_and_no_session(p164_env, monkeypatch):
+    # The exact verified P2-2 sequence: buy -> redeem -> check out
+    # again (second tab / bookmarked page). Pre-fix this settled a
+    # second $9 and granted a trapped entitlement.
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _redeem(p164_env, user_id, rid, csrf)
+    captured = []
+    _fake_stripe(monkeypatch, captured)
+    r = _checkout(p164_env, rid, csrf)
+    assert r.status_code == 409
+    assert captured == []
+    from app import models
+    with p164_env.sessions() as db:
+        assert db.query(models.ProductPurchase).count() == 1  # only the redeemed purchase
+        ents = db.query(models.Entitlement).all()
+        assert len(ents) == 1 and ents[0].status == "redeemed"
+
+
+def test_checkout_blocked_when_legacy_report_already_completed(p164_env, monkeypatch):
+    import json as _json
+    from app import credits as C
+    from app import deep_dive as dd
+    from app import models
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    with p164_env.sessions() as db:
+        source = db.get(models.Result, rid)
+        payload = C.result_payload(source, user_id=user_id,
+                                   operation_id=source.operation_id,
+                                   free_request_id=source.free_request_id)
+        req_hash = dd.analysis_request_hash(source, payload)
+        artifact_data = dd.build_deep_dive(payload, source_result_id=rid,
+                                           source_integrity_digest=source.integrity_digest)
+        raw = _json.dumps(artifact_data, default=str)
+        now = datetime.now(timezone.utc)
+        op = models.Operation(
+            user_id=user_id, type="deep_dive",
+            idempotency_key=f"analysis-{rid}-v1", request_hash=req_hash,
+            cost=3, pricing_version=1, status="completed",
+            worker_id="legacy", lease_generation=1,
+            lease_expires_at=now + timedelta(minutes=5), completed_at=now)
+        db.add(op)
+        db.flush()
+        artifact = models.Result(
+            user_id=user_id, operation_id=op.id, type="deep_dive",
+            storage_manifest=raw,
+            integrity_digest=C.hash_input(raw.encode()),
+            byte_count=len(raw.encode()), ready_at=now,
+            expires_at=now + timedelta(days=7))
+        db.add(artifact)
+        db.flush()
+        op.result_id = artifact.id
+        db.commit()
+        legacy_id = str(artifact.id)
+    captured = []
+    _fake_stripe(monkeypatch, captured)
+    r = _checkout(p164_env, rid, csrf)
+    assert r.status_code == 409
+    assert r.json()["already_owned"] is True
+    assert r.json()["existing_report_id"] == legacy_id
+    assert captured == []
+    with p164_env.sessions() as db:
+        assert db.query(models.ProductPurchase).count() == 0
+
+
+def test_canonical_replay_still_free_after_checkout_block(p164_env, monkeypatch):
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    artifact_id = _redeem(p164_env, user_id, rid, csrf)
+    _fake_stripe(monkeypatch, [])
+    assert _checkout(p164_env, rid, csrf).status_code == 409
+    again = _deep_dive(p164_env, rid, csrf)
+    assert again.status_code == 200
+    assert again.json()["replayed"] is True
+    assert again.json()["analysis_result_id"] == artifact_id
+    from app import models
+    with p164_env.sessions() as db:
+        ents = db.query(models.Entitlement).all()
+        assert len(ents) == 1 and ents[0].status == "redeemed"
+
+
+def test_checkout_allowed_for_renamed_reupload_different_binding(p164_env, monkeypatch):
+    # GUARD: a renamed re-upload is a NEW source row — a different
+    # binding under the replay's own identity — so a completed
+    # report for the old upload must NOT block its checkout.
+    _, user_id, csrf = _make_user(p164_env)
+    rid_old = _source(p164_env, user_id)
+    _redeem(p164_env, user_id, rid_old, csrf)
+    rid_new = _source(p164_env, user_id)
+    assert rid_new != rid_old
+    captured = []
+    _fake_stripe(monkeypatch, captured)
+    r = _checkout(p164_env, rid_new, csrf)
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["checkout_url"].startswith("https://checkout.stripe.com/pay/")
+    assert len(captured) == 1
+
+
+def test_checkout_allowed_when_prior_report_from_older_generator_version(p164_env, monkeypatch):
+    # GUARD: the analysis request hash binds GENERATOR_VERSION, so
+    # a prior report from an older version does NOT replay — a new
+    # purchase is consumable, and the report page explicitly offers
+    # it ("Generating a new Investigation Report is a new $9
+    # purchase"). The block must not fire.
+    from app import deep_dive as dd
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _redeem(p164_env, user_id, rid, csrf)
+    monkeypatch.setattr(dd, "GENERATOR_VERSION", "999-p2-guard")
+    captured = []
+    _fake_stripe(monkeypatch, captured)
+    r = _checkout(p164_env, rid, csrf)
+    assert r.status_code == 200, r.text[:300]
+    assert len(captured) == 1
+
+
+def test_settlement_routes_to_refund_eligible_when_report_already_completed(p164_env):
+    # Defence in depth: a second session opened BEFORE the first
+    # purchase was redeemed settles only after the report exists.
+    # The checkout route now refuses new checkouts, so this pending
+    # purchase is seeded directly — settlement must not grant an
+    # unconsumable `available` entitlement; the F5 refund-eligible
+    # path is the buyer's automatic remedy.
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _redeem(p164_env, user_id, rid, csrf)
+    purchase2 = _pending_with_session(p164_env, user_id, rid)
+    r = _post_event(p164_env, _product_completed_event("evt_p2_second_settle", purchase2))
+    assert r.json()["status"] == "processed"
+    from app import models
+    with p164_env.sessions() as db:
+        p2 = db.get(models.ProductPurchase, purchase2.id)
+        assert p2.status == "completed"
+        ents = db.query(models.Entitlement).filter(
+            models.Entitlement.product_purchase_id == purchase2.id).all()
+        assert len(ents) == 1 and ents[0].status == "refund_eligible"
+        assert db.query(models.Entitlement).filter(
+            models.Entitlement.status == "available").count() == 0
+    # The owned report still replays, free, consuming nothing.
+    again = _deep_dive(p164_env, rid, csrf)
+    assert again.status_code == 200 and again.json()["replayed"] is True
+
+
+def test_settlement_grants_available_when_prior_report_from_older_generator_version(p164_env, monkeypatch):
+    # GUARD (settlement leg of the binding identity): with the
+    # generator version moved on, the prior completion's hash no
+    # longer matches the current request hash — the new purchase
+    # IS consumable and must grant `available`, not refund_eligible.
+    from app import deep_dive as dd
+    _, user_id, csrf = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    _redeem(p164_env, user_id, rid, csrf)
+    monkeypatch.setattr(dd, "GENERATOR_VERSION", "999-p2-guard")
+    purchase2 = _pending_with_session(p164_env, user_id, rid)
+    r = _post_event(p164_env, _product_completed_event("evt_p2_stale_settle", purchase2))
+    assert r.json()["status"] == "processed"
+    from app import models
+    with p164_env.sessions() as db:
+        ents = db.query(models.Entitlement).filter(
+            models.Entitlement.product_purchase_id == purchase2.id).all()
+        assert len(ents) == 1 and ents[0].status == "available"
+
+
+def test_settlement_anchor_uses_charge_created_not_session_created(p164_env):
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    session_created = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+    charge_created = datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
+    _CHARGE_CREATED["ts"] = int(charge_created.timestamp())
+    ev = _product_completed_event("evt_p2_anchor", purchase)
+    ev["created"] = int(session_created.timestamp())
+    ev["data"]["object"]["created"] = int(session_created.timestamp())
+    r = _post_event(p164_env, ev)
+    assert r.json()["status"] == "processed"
+    from app import models
+    from app.credits import _as_aware
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert _as_aware(p.stripe_charge_created_at) == charge_created
+
+
+def test_reconciliation_cross_midnight_session_paid_next_day_with_refund_matches_both_days(p164_env):
+    # The verified P2-1 scenario end to end: session created Jan 1
+    # 23:30 UTC, charge created Jan 2 00:30 UTC, then a partial
+    # refund. Pre-fix the ledger anchored the purchase (and its
+    # refund) to Jan 1 while Stripe attributed the charge to Jan 2
+    # — false mismatches on BOTH days. Post-fix both days reconcile.
+    from app import payment_reconcile as PR
+    from app import models
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    session_created = datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc)
+    charge_created = datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
+    _CHARGE_CREATED["ts"] = int(charge_created.timestamp())
+    ev = _product_completed_event("evt_p2_xmid_settle", purchase)
+    ev["created"] = int(session_created.timestamp())
+    ev["data"]["object"]["created"] = int(session_created.timestamp())
+    assert _post_event(p164_env, ev).json()["status"] == "processed"
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        p.refunded_cents = 300
+        p.refunded_at = datetime.now(timezone.utc)
+        db.commit()
+        charge = {"id": "ch_p2_xmid", "amount": 900,
+                  "amount_refunded": 300, "payment_intent": "pi_test_1",
+                  "metadata": {}, "disputed": False}
+        r2 = PR.compute_reconciliation(
+            db, charge_created.date(), [_r3_product_session(purchase.id)], [charge])
+        fam2 = r2["per_family"]["product"]
+        assert fam2["ledger_gross_cents"] == 900
+        assert fam2["stripe_gross_cents"] == 900
+        assert fam2["ledger_refund_cents"] == 300
+        assert fam2["stripe_refund_cents"] == 300
+        assert fam2["stripe_net_cents"] == fam2["ledger_net_cents"] == 600
+        assert not any(d["kind"] == "family_total_mismatch"
+                       for d in r2["differences"])
+        r1 = PR.compute_reconciliation(db, session_created.date(), [], [])
+        fam1 = r1["per_family"]["product"]
+        assert fam1["ledger_gross_cents"] == 0
+        assert fam1["ledger_refund_cents"] == 0
+        assert not any(d["kind"] == "family_total_mismatch"
+                       for d in r1["differences"])
+
+
+def test_settlement_anchor_null_when_charge_unavailable_falls_back_to_completed_at(p164_env):
+    # No charge resolvable (stubbed PaymentIntent carries none) and
+    # no session/event `created` carried either: the anchor stays
+    # NULL and reconciliation's completed_at fallback applies —
+    # settlement itself is unaffected and still grants.
+    _, user_id, _ = _make_user(p164_env)
+    rid = _source(p164_env, user_id)
+    purchase = _pending_with_session(p164_env, user_id, rid)
+    r = _post_event(p164_env, _product_completed_event("evt_p2_no_anchor", purchase))
+    assert r.json()["status"] == "processed"
+    from app import models
+    with p164_env.sessions() as db:
+        p = db.get(models.ProductPurchase, purchase.id)
+        assert getattr(p, "stripe_charge_created_at", None) is None
+        assert p.completed_at is not None
+        ents = db.query(models.Entitlement).all()
+        assert len(ents) == 1 and ents[0].status == "available"

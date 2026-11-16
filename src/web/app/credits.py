@@ -953,6 +953,57 @@ def completed_analysis_result_id(db: Session, user_id, source_result_id):
     return result_id
 
 
+def current_replay_result_id(db: Session, user_id, source):
+    """The completed canonical Analysis Report that a Generate
+    request for ``source`` would replay TODAY, or None.
+
+    Mirrors report_deep_dive's canonical replay blocks exactly
+    (A2): a completion of either origin (legacy credit Operation,
+    product entitlement redemption) whose stored request_hash
+    equals the source's CURRENT analysis request hash. The hash
+    binds the source identity, its integrity digest, and the
+    grouping/evidence/generator/schema versions — so a report
+    produced by an older generator version has a different hash,
+    does NOT replay, and does not make a new purchase
+    unconsumable (the report page's re-purchase offer for a stale
+    prior report depends on this). A renamed re-upload is a new
+    source row with its own hash and is likewise unaffected.
+
+    Returns the replayed artifact's Result id (latest matching
+    completion wins, as in replay), or None when no hash-matching
+    completion exists — including when the source payload can no
+    longer be built (AdmissionError), in which case no replay
+    could be proven either. Artifact availability is NOT checked:
+    replay pre-empts consumption even when the artifact is gone
+    (it answers 410), so existence is what the purchase guards
+    need; callers that link the buyer to the report check the
+    artifact themselves.
+    """
+    from app import deep_dive as dd
+    try:
+        payload = result_payload(
+            source, user_id=user_id,
+            operation_id=source.operation_id,
+            free_request_id=source.free_request_id,
+            product_redemption_id=source.product_redemption_id,
+            allow_expired=True)
+    except AdmissionError:
+        return None
+    request_hash = dd.analysis_request_hash(source, payload)
+    candidates: list[tuple] = []  # (created_at, id_str, result_id)
+    for op in analysis_operations(db, user_id, source.id):
+        if op.status == "completed" and op.result_id \
+                and op.request_hash == request_hash:
+            candidates.append((op.created_at, str(op.result_id), op.result_id))
+    for red in product_analysis_completions(db, user_id, source.id):
+        if red.request_hash == request_hash:
+            candidates.append((red.created_at, str(red.result_id), red.result_id))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (c[0] or _utcnow(), c[1]))
+    return candidates[-1][2]
+
+
 def is_product_paid_result(db: Session, result) -> bool:
     """True when a Result's origin is a product redemption (#164).
 
