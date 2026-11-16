@@ -13,9 +13,14 @@ removed functionally):
                       [Phase C: replaced by 02 Purchases — see the
                       PREMISE CHANGED notes in the tests below]
   03 Report Access <- live Report Access (remake S03)
-The remake's S02 branding-profile form is EXCLUDED (Decision 10):
+The remake's S02 branding-profile form was EXCLUDED (Decision 10):
 per-report branding is #163, a saved profile is M3. Its "PNG or SVG"
-logo copy must never appear.
+logo copy must never appear. PREMISE CHANGED (Pricing/Report
+cleanup, founder direction 2026-11-16): branding is now account-level
+— the saved profile the design outlined — so the Branding profile
+group IS built at §02 (Purchases -> 03, Report Access -> 04). The
+"PNG or SVG" copy still never appears: the A1 contract accepts
+PNG/JPEG only, SVG rejected.
 
 Teeth discipline (A8): tests asserting the NEW numbered-group
 structure (data-s4-group wrappers, head order, regrouped order, the
@@ -88,12 +93,16 @@ def _group_segment(html, group):
 
 def test_s4_numbered_groups_in_order_with_live_mapping():
     html = _render()
-    nums = [html.index(f'data-s4-num="{n}"') for n in ("01", "02", "03")]
+    nums = [html.index(f'data-s4-num="{n}"') for n in
+            ("01", "02", "03", "04")]
     assert nums == sorted(nums), nums
     # PREMISE CHANGED (#164 Phase C, Decision 9): §02 Credits is
     # §02 Purchases — completed product purchases, no balance.
-    for num, label in (("01", "Account"), ("02", "Purchases"),
-                       ("03", "Report Access")):
+    # PREMISE CHANGED (Pricing/Report cleanup, 2026-11-16): the
+    # Branding profile group is inserted at §02 per the Lovable
+    # design order; Purchases -> §03, Report Access -> §04.
+    for num, label in (("01", "Account"), ("02", "Branding profile"),
+                       ("03", "Purchases"), ("04", "Report Access")):
         assert f'<span class="s4-section-num" aria-hidden="true">' \
                f'{num}</span>' in html
         assert f'<span class="s4-section-label">{label}</span>' in html
@@ -108,6 +117,12 @@ def test_s4_numbered_groups_in_order_with_live_mapping():
     assert 'action="/auth/link/github"' in account
     assert "revokeSession('sess-2')" in account
     assert "Log out all other devices" in account
+    branding = _group_segment(html, "branding")
+    assert 'id="branding-profile"' in branding
+    assert "Branding profile" in branding
+    assert "Included with every paid report" in branding
+    assert 'action="/settings/branding"' in branding
+    assert 'action="/settings/branding/clear"' in branding
     credits = _group_segment(html, "purchases")
     assert "Your current balance:" not in credits
     assert "Buy credits" not in credits
@@ -157,8 +172,12 @@ def test_s4_parity_all_base_forms_endpoints_and_hooks():
     # PREMISE CHANGED (fidelity S4-G2): §01 gains the design's
     # in-group Log out form, so /auth/logout appears twice (header
     # nav + field row); endpoints are otherwise unchanged.
+    # PREMISE CHANGED (Pricing/Report cleanup, 2026-11-16): §02
+    # Branding profile adds its set + clear forms.
     assert actions == ["/auth/logout", "/auth/logout",
-                       "/auth/link/google", "/auth/link/github"], actions
+                       "/auth/link/google", "/auth/link/github",
+                       "/settings/branding",
+                       "/settings/branding/clear"], actions
     # CSRF field present inside every form (logout + both link
     # forms; the shared auth_form_script include adds its own field
     # elsewhere on the page, exactly as on the base tree).
@@ -215,17 +234,15 @@ def test_s4_report_access_and_empty_states_verbatim():
 
 
 def test_s4_no_branding_profile_form_and_no_svg_logo_copy():
+    """PREMISE REVERSED (Pricing/Report cleanup, 2026-11-16): the
+    Branding profile form is now PRESENT (account-level branding is
+    the founder-directed surface). The SVG half of the original gate
+    stands: the design's "PNG or SVG" copy must never appear — A1
+    accepts PNG/JPEG only."""
     html = _render()
-    assert "Branding profile" not in html
-    assert "Drop a PNG" not in html
+    assert "Branding profile" in html
+    assert 'action="/settings/branding"' in html
     assert "SVG" not in html
-    assert 'type="file"' not in html
-    assert "Logo (" not in html
-    assert "business_name" not in html
-
-
-# --- Live route: structure (teeth) + no-charging (gate) ---------------------
-
 
 def _login_user(env, email="owner@example.com"):
     with env.sessions() as db:

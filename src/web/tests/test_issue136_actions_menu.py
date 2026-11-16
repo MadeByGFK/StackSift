@@ -110,11 +110,13 @@ def test_report_page_single_actions_menu_holds_all_actions(auth_env):
     assert ">Analysis</button>" not in cluster
     assert ">Export PDF" in cluster and ">Export CSV" in cluster
     assert ">Export JSON" in cluster
-    # Gold PDF control + Free tag. PREMISE CHANGED (#164 Phase C,
-    # Decision 4): exports are free for ALL reports — there is no
-    # locked state and no 2-credit tag.
+    # Gold PDF control. PREMISE CHANGED (#164 Phase C, Decision 4):
+    # exports are free for ALL reports — there is no locked state
+    # and no 2-credit tag. PREMISE CHANGED (Pricing/Report cleanup,
+    # 2026-11-16): the "Free" tag is removed from the buttons.
     assert 'class="s1-btn-gold" data-export="pdf"' in cluster
-    assert ">Free</span>" in cluster
+    assert ">Free</span>" not in cluster
+    assert "s1-free-tag" not in cluster
     assert "2 credits" not in cluster
     # PREMISE CHANGED (Release #7 F1, 2026-11-14): the #129 export
     # confirmation popup is REMOVED — exports are free and fire
@@ -163,9 +165,13 @@ def test_analysis_report_page_single_actions_menu(auth_env):
     assert 'id="actions-menu"' not in text
     assert 'data-s1-actions' in text
     # PREMISE CHANGED (Release #7 F1): the ss-confirm modal that
-    # used to bound this slice is removed; the branding panel is
-    # the next surface after the actions cluster on this page.
-    cluster = text[text.index('data-s1-actions'):text.index('class="branding-panel"')]
+    # used to bound this slice is removed. PREMISE CHANGED
+    # (Pricing/Report cleanup, 2026-11-16): the branding panel is
+    # removed from this page (branding moved to Settings) — the
+    # actions cluster is now bounded by the Brief section marker.
+    assert "branding-panel" not in text
+    _a = text.index('data-s1-actions')
+    cluster = text[_a:text.index('</section>', _a)]
     assert f'action="/reports/{analysis_id}/pdf"' in cluster
     assert f'action="/reports/{analysis_id}/exports/csv"' in cluster
     assert f'action="/reports/{analysis_id}/exports/json"' in cluster

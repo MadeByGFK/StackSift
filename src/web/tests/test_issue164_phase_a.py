@@ -744,8 +744,11 @@ def test_branding_on_dollar_paid_report(p164_env):
     _, user_id, csrf = _make_user(p164_env)
     rid = _source(p164_env, user_id)
     artifact_id = _redeem(p164_env, user_id, rid, csrf)
+    # PREMISE CHANGED (Pricing/Report cleanup, 2026-11-16): branding
+    # is set on the ACCOUNT surface (Settings), not per-report; the
+    # dollar-paid report still renders and generates with it.
     r = p164_env.client.post(
-        f"/reports/{artifact_id}/branding",
+        "/settings/branding",
         data={"csrf_token": csrf, "business_name": "Acme Consulting",
               "client_name": "", "report_title": "", "accent": ""})
     assert r.status_code in (200, 303), r.text[:300]

@@ -114,16 +114,16 @@
     <div class="report-actions s1-actions" data-s1-actions style="margin-top:1rem">
           <form method="post" action="/reports/{{ report_id }}/pdf" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF <span class="s1-free-tag">Free</span></button>
+            <button type="submit" class="s1-btn-gold" data-export="pdf">Export PDF</button>
           </form>
           {% if not report_kind %}
           <form method="post" action="/reports/{{ report_id }}/exports/csv" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-chip" data-export="csv">Export CSV <span class="s1-free-tag">Free</span></button>
+            <button type="submit" class="s1-chip" data-export="csv">Export CSV</button>
           </form>
           <form method="post" action="/reports/{{ report_id }}/exports/json" style="margin:0">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="s1-chip" data-export="json">Export JSON <span class="s1-free-tag">Free</span></button>
+            <button type="submit" class="s1-chip" data-export="json">Export JSON</button>
           </form>
           {% endif %}
           {# Issue #106 Stage 2, as amended by the 2026-11-10

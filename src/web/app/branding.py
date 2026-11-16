@@ -10,7 +10,10 @@ Owns the pieces the routes in main.py share:
 - text/accent field validation: plain text only, control characters
   rejected, exact ``#rrggbb`` accent or rejection (never reinterpreted).
 - branding-dict assembly: the owned path builds it from the stored
-  ``report_branding`` row only (the logo is materialised to a
+  branding row only — since the 2026-11-16 Pricing/Report cleanup,
+  the owner's ``account_branding`` row (the helpers below are
+  row-shape-agnostic; the legacy ``report_branding`` row had the
+  identical fields). The logo is materialised to a
   server-owned temp file with ``delete=False`` and unlinked in a
   ``finally`` — Amendment A8(f)); the sample path (Amendment A5) builds
   it from a server-side constant profile whose logo is the shipped
@@ -256,8 +259,14 @@ def branding_dict_with_temp_logo(row):
         Path(handle.name).unlink(missing_ok=True)
 
 
-def web_branding_from_row(row, result_id):
-    """Template context for the owned report's branded header band."""
+def web_branding_from_account_row(row):
+    """Template context for the owned report's branded header band.
+
+    Pricing/Report cleanup (2026-11-16): branding is account-level —
+    the band on any of the owner's reports renders from the owner's
+    single ``account_branding`` row, and the logo is served from the
+    Settings surface's logo route.
+    """
     if row is None:
         return None
     return {
@@ -265,7 +274,7 @@ def web_branding_from_row(row, result_id):
         "client_name": row.client_name,
         "report_title": row.report_title,
         "accent": row.accent,
-        "logo_url": (f"/reports/{result_id}/branding/logo"
+        "logo_url": ("/settings/branding/logo"
                      if row.logo_bytes else None),
     }
 

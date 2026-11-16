@@ -117,9 +117,37 @@
       </div>
     </div>
     </section>
-    <section class="s4-group" data-s4-group="purchases" data-s4-num="02">
+    <section class="s4-group" data-s4-group="branding" data-s4-num="02">
       <div class="s4-section-head">
         <span class="s4-section-num" aria-hidden="true">02</span>
+        <span class="s4-section-label">Branding profile</span>
+        <span class="s4-section-aside">Included with every paid report</span>
+      </div>
+    <div class="settings-card" id="branding-profile">
+      <h2>Branding profile</h2>
+      <p>Add your business branding to your reports. Branding applies to every PDF generated after it is set.</p>
+      <form method="post" enctype="multipart/form-data" action="/settings/branding" data-auth-form data-success-url="/settings" style="margin:0 0 8px">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" style="margin:0 0 6px"></p>
+        <label style="display:block;margin:0 0 8px">Business name <input type="text" name="business_name" maxlength="80" value="{{ branding_values.business_name if branding_values else '' }}"></label>
+        <label style="display:block;margin:0 0 8px">Report title <input type="text" name="report_title" maxlength="120" value="{{ branding_values.report_title if branding_values else '' }}"></label>
+        <label style="display:block;margin:0 0 8px">Client name <span style="color:#a0aec0">Optional</span> <input type="text" name="client_name" maxlength="80" value="{{ branding_values.client_name if branding_values else '' }}"></label>
+        <label style="display:block;margin:0 0 8px">Accent color <input type="text" name="accent" placeholder="#1a2b3c" value="{{ branding_values.accent if branding_values else '' }}"></label>
+        <label style="display:block;margin:0 0 8px">Logo (PNG or JPEG, at most 512 KB) <input type="file" name="logo" accept="image/png,image/jpeg"></label>
+        {% if branding_values and branding_values.has_logo %}<label style="display:block;margin:0 0 8px"><input type="checkbox" name="remove_logo" value="1"> Remove logo</label>{% endif %}
+        <button type="submit" class="btn-small">Save branding</button>
+      </form>
+      <form method="post" action="/settings/branding/clear" data-auth-form data-success-url="/settings" style="margin:0">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <p role="status" style="margin:0 0 6px"></p>
+        <button type="submit" class="btn-small">Clear branding</button>
+      </form>
+      <p style="margin-top:14px">The “Prepared with stacksift.” attribution always remains on paid reports.</p>
+    </div>
+    </section>
+    <section class="s4-group" data-s4-group="purchases" data-s4-num="03">
+      <div class="s4-section-head">
+        <span class="s4-section-num" aria-hidden="true">03</span>
         <span class="s4-section-label">Purchases</span>
       </div>
     <div class="settings-card" id="purchase-history">
@@ -139,9 +167,9 @@
       {% endif %}
     </div>
     </section>
-    <section class="s4-group" data-s4-group="report-access" data-s4-num="03">
+    <section class="s4-group" data-s4-group="report-access" data-s4-num="04">
       <div class="s4-section-head">
-        <span class="s4-section-num" aria-hidden="true">03</span>
+        <span class="s4-section-num" aria-hidden="true">04</span>
         <span class="s4-section-label">Report Access</span>
       </div>
     <div class="settings-card" id="report-access">
