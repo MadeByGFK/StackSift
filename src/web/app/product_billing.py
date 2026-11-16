@@ -775,13 +775,16 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
     locked.stripe_event_id = stripe_event_id
     locked.completed_at = _utcnow()
     # Remediation4 (fix 6): persist the Stripe charge creation anchor
-    # carried on the completed session object (its ``created``), so
-    # reconciliation can bucket this purchase by charge creation
-    # time — the day the Stripe charge fetch keys on — instead of
-    # the local settlement-processing time (completed_at), which a
-    # delayed webhook delivery can push across midnight. When no
-    # usable timestamp is carried, the column stays NULL and
-    # reconciliation falls back to completed_at (the pre-0020
+    # the caller resolved, so reconciliation can bucket this
+    # purchase by charge creation time — the day the Stripe charge
+    # fetch keys on — instead of the local settlement-processing
+    # time (completed_at), which a delayed webhook delivery can
+    # push across midnight. Release #7 P2-1: the caller now
+    # resolves the CHARGE's own ``created`` (via the PaymentIntent's
+    # latest_charge); the session's ``created`` survives only as
+    # the documented fallback when no charge could be resolved.
+    # When no usable timestamp is carried, the column stays NULL
+    # and reconciliation falls back to completed_at (the pre-0020
     # behaviour, preserved for rows settled without the anchor).
     _anchor = _coerce_stripe_timestamp(stripe_charge_created_at)
     if _anchor is not None:
@@ -801,14 +804,39 @@ def settle_product_purchase(db: Session, purchase, *, stripe_event_id: str,
             deadline = _as_aware(source.expires_at) + timedelta(days=REDEMPTION_WINDOW_DAYS)
         else:
             deadline = _utcnow() + timedelta(days=REDEMPTION_WINDOW_DAYS + 7)
+    # Release #7 P2-2 (defence in depth at settlement): if a
+    # completed canonical report already exists for this binding —
+    # the concurrent shape: two sessions opened before either was
+    # redeemed, the second settling after the first completed —
+    # canonical replay would pre-empt consumption forever, so an
+    # `available` entitlement could never be used. Route the
+    # purchase to the F5 refund-eligible path instead: the buyer's
+    # remedy is automatic, not a support ticket. The predicate is
+    # the replay's own (the CURRENT analysis request hash, via
+    # credits.current_replay_result_id), so a prior report from an
+    # older generator version — consumable on re-purchase — still
+    # grants `available` normally, as do all digest-bound SKUs.
+    entitlement_status = "available"
+    if locked.sku == "investigation_report" \
+            and locked.source_result_id is not None:
+        _src = db.get(models.Result, locked.source_result_id)
+        if _src is not None and credits_helpers.current_replay_result_id(
+                db, locked.user_id, _src) is not None:
+            entitlement_status = "refund_eligible"
     entitlement = models.Entitlement(
         user_id=locked.user_id, product_purchase_id=locked.id, sku=locked.sku,
         source_result_id=locked.source_result_id,
-        content_digest=locked.content_digest, status="available",
+        content_digest=locked.content_digest, status=entitlement_status,
         redemption_deadline=deadline,
     )
     db.add(entitlement)
     db.flush()
+    if entitlement_status == "refund_eligible":
+        logger.warning(
+            "product webhook %s: purchase %s completed but a canonical "
+            "report already exists for its source; entitlement %s "
+            "granted refund_eligible instead of available (P2-2)",
+            stripe_event_id, purchase.id, entitlement.id)
     logger.info("product webhook %s: purchase %s completed; entitlement %s",
                 stripe_event_id, purchase.id, entitlement.id)
     return "processed"

@@ -600,6 +600,38 @@ async def investigation_checkout(
             "redemption_deadline": existing_ent.redemption_deadline.isoformat() if existing_ent.redemption_deadline else None,
         }, status_code=409)
 
+    # Release #7 P2-2: a completed canonical report for this source
+    # blocks a new checkout. Canonical replay in report_deep_dive
+    # returns the already-owned report BEFORE any entitlement is
+    # consumed, so a second $9 purchase would grant an entitlement
+    # that can never be used (F1 goes blind once the first
+    # entitlement is redeemed). The binding is the replay's own —
+    # credits.current_replay_result_id matches completions by the
+    # CURRENT analysis request hash: a renamed re-upload is a new
+    # source (not blocked), and a prior report from an older
+    # generator version has a different hash (not blocked — the
+    # re-purchase the report page offers there is consumable).
+    owned_report_id = credits_helpers.current_replay_result_id(db, _user.id, source)
+    if owned_report_id is not None:
+        artifact = db.get(models.Result, owned_report_id)
+        artifact_live = (
+            artifact is not None and artifact.deleted_at is None
+            and artifact.expires_at is not None
+            and credits_helpers._as_aware(artifact.expires_at) > datetime.now(timezone.utc))
+        db.rollback()
+        if artifact_live:
+            return JSONResponse({
+                "error": "You already own the Investigation Report for this report.",
+                "already_owned": True,
+                "existing_report_id": str(owned_report_id),
+                "report_url": f"/reports/{owned_report_id}",
+            }, status_code=409)
+        return JSONResponse({
+            "error": "An Investigation Report was already generated for this report and is no longer available, so a new purchase could not be used.",
+            "already_owned": True,
+            "existing_report_id": str(owned_report_id),
+        }, status_code=409)
+
     origin = str(request.base_url).rstrip("/")
     success_url = _os.environ.get("STRIPE_SUCCESS_URL") or f"{origin}/reports/{rid}?checkout=success"
     cancel_url = _os.environ.get("STRIPE_CANCEL_URL") or f"{origin}/reports/{rid}?checkout=cancelled"
@@ -1444,6 +1476,24 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
         except stripe_billing.CheckoutError:
             db.rollback()
             raise HTTPException(500, "transient settlement failure")
+        # Release #7 P2-1: the reconciliation anchor must be the
+        # CHARGE's own ``created`` — fetch_day_charges keys charges
+        # by it, while the session's ``created`` can fall on the
+        # previous UTC day (a session stays payable for up to 24h),
+        # which produced false mismatch days on both days once the
+        # purchase was refunded or lost a dispute. Resolve the
+        # charge through the PaymentIntent's latest_charge. When
+        # the charge is genuinely unavailable for this event shape
+        # (no PaymentIntent, no charge resolved, retrieval failure),
+        # keep the pre-fix fallback order — the session's
+        # ``created``, then the event's own ``created`` — rather
+        # than blocking settlement on an anchor lookup.
+        _charge_created_at = None
+        try:
+            _charge_created_at = stripe_billing.fetch_charge_created_at(
+                stripe_obj.get("payment_intent") or "")
+        except stripe_billing.CheckoutError:
+            _charge_created_at = None
         try:
             outcome = _pb.settle_product_purchase(
                 db, purchase,
@@ -1458,13 +1508,15 @@ async def credits_webhook(request: Request, db=Depends(get_db)):
                 mode=stripe_obj.get("mode"),
                 session_price_id=session_price_id,
                 livemode=event.get("livemode"),
-                # Remediation4 (fix 6): the completed session
-                # object's ``created`` is the Stripe charge/session
-                # creation anchor reconciliation keys on (the event
-                # object's own ``created`` is the fallback — both
-                # are carried on data already in hand here, no extra
-                # Stripe retrieval).
-                stripe_charge_created_at=stripe_obj.get("created") or event.get("created"),
+                # Remediation4 (fix 6) + Release #7 P2-1: the
+                # anchor is the CHARGE's own ``created``, resolved
+                # above via the PaymentIntent's latest_charge; the
+                # session's ``created`` (then the event's) remains
+                # only as the fallback when no charge could be
+                # resolved.
+                stripe_charge_created_at=(
+                    _charge_created_at
+                    or stripe_obj.get("created") or event.get("created")),
             )
         except _pb.SettlementError as exc:
             webhook_event.outcome = "failed"
