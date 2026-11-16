@@ -4125,6 +4125,60 @@ def _account_branding_row_for(db, user_id):
         _models.AccountBranding.user_id == user_id).first()
 
 
+def _account_branding_row_for_write(db, user_id):
+    """Read the account's branding row FOR A MUTATION, serialized.
+
+    PR #190 Codex P2: the set/clear routes create the row on first
+    use (read -> maybe INSERT). Two concurrent first writes for the
+    same account (two saves, or a save and a clear, on different
+    workers) could both observe no row and both INSERT, and the
+    loser died on ``uq_account_branding_user_id`` with an unhandled
+    IntegrityError (500). The per-report routes this surface
+    replaced serialized the same sequence by locking the parent
+    Result row (``_branding_target_under_lock``); the account-level
+    equivalent locks the parent USER row — it always exists for an
+    authenticated caller — FOR UPDATE before the read, so first
+    writes for one account serialize on PostgreSQL. On SQLite FOR
+    UPDATE is a no-op, so the routes ALSO catch the insert-race
+    IntegrityError and retry against the winner's row (see
+    ``_commit_branding_mutation``).
+    """
+    from app import models as _models
+    db.query(_models.User).filter(
+        _models.User.id == user_id
+    ).with_for_update().execution_options(populate_existing=True).first()
+    return _account_branding_row_for(db, user_id)
+
+
+def _commit_branding_mutation(db, user_id, apply):
+    """Apply ``apply(row)`` to the account's branding row and commit.
+
+    Creates the row when absent (under the user-row lock taken by
+    ``_account_branding_row_for_write``). If the INSERT still loses
+    a first-write race (the lock is a no-op on SQLite), roll back,
+    re-read the winner's row under the lock, and apply the same
+    mutation to it — the request then succeeds as an ordinary
+    update instead of surfacing an unhandled IntegrityError.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app import models as _models
+    row = _account_branding_row_for_write(db, user_id)
+    if row is None:
+        row = _models.AccountBranding(user_id=user_id)
+        db.add(row)
+    apply(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        row = _account_branding_row_for_write(db, user_id)
+        if row is None:
+            raise
+        apply(row)
+        db.commit()
+
+
 def _generate_deep_dive_pdf_branded(db, result, filename, user_id):
     """Generate a deep_dive PDF with the owner's account branding.
 
@@ -5476,30 +5530,30 @@ async def account_branding_set(request: Request,
     except branding_mod.BrandingError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    row = _account_branding_row_for(db, user.id)
-    if row is None:
-        row = models.AccountBranding(user_id=user.id)
-        db.add(row)
-    row.business_name = business_name
-    row.client_name = client_name
-    row.report_title = report_title
-    row.accent = accent
-    if remove_logo:
-        row.logo_bytes = None
-        row.logo_media_type = None
-        row.logo_sha256 = None
-        row.logo_width = None
-        row.logo_height = None
-    elif canonical_logo is not None:
-        stored, media_type, width, height = canonical_logo
-        row.logo_bytes = stored
-        row.logo_media_type = media_type
-        row.logo_sha256 = branding_mod.logo_sha256(stored)
-        row.logo_width = width
-        row.logo_height = height
-    # else: no/empty file part — keep the existing logo untouched.
-    row.updated_at = _utcnow_for_branding()
-    db.commit()
+    def _apply(row):
+        row.business_name = business_name
+        row.client_name = client_name
+        row.report_title = report_title
+        row.accent = accent
+        if remove_logo:
+            row.logo_bytes = None
+            row.logo_media_type = None
+            row.logo_sha256 = None
+            row.logo_width = None
+            row.logo_height = None
+        elif canonical_logo is not None:
+            stored, media_type, width, height = canonical_logo
+            row.logo_bytes = stored
+            row.logo_media_type = media_type
+            row.logo_sha256 = branding_mod.logo_sha256(stored)
+            row.logo_width = width
+            row.logo_height = height
+        # else: no/empty file part — keep the existing logo untouched.
+        row.updated_at = _utcnow_for_branding()
+
+    # Serialized first-write handling (user-row lock + IntegrityError
+    # retry): see _account_branding_row_for_write.
+    _commit_branding_mutation(db, user.id, _apply)
     return JSONResponse({"status": "branding_updated"})
 
 
@@ -5525,21 +5579,22 @@ async def account_branding_clear(request: Request,
     form, err = await _check_owner_csrf(request, session, db)
     if err is not None:
         return err
-    row = _account_branding_row_for(db, user.id)
-    if row is None:
-        row = models.AccountBranding(user_id=user.id)
-        db.add(row)
-    row.business_name = None
-    row.client_name = None
-    row.report_title = None
-    row.accent = None
-    row.logo_bytes = None
-    row.logo_media_type = None
-    row.logo_sha256 = None
-    row.logo_width = None
-    row.logo_height = None
-    row.updated_at = _utcnow_for_branding()
-    db.commit()
+    def _apply(row):
+        row.business_name = None
+        row.client_name = None
+        row.report_title = None
+        row.accent = None
+        row.logo_bytes = None
+        row.logo_media_type = None
+        row.logo_sha256 = None
+        row.logo_width = None
+        row.logo_height = None
+        row.updated_at = _utcnow_for_branding()
+
+    # Same serialized first-write handling as the set route: a clear
+    # racing another first write must not die on the unique
+    # constraint either (PR #190 Codex P2 named both routes).
+    _commit_branding_mutation(db, user.id, _apply)
     return JSONResponse({"status": "branding_cleared"})
 
 

@@ -200,6 +200,86 @@ def test_account_branding_does_not_leak_across_accounts(auth_env):
     assert "Account A Co" not in _pdf_text(pdf_b.content)
 
 
+def _inject_competing_first_write(auth_env, monkeypatch, user_id):
+    """Simulate a concurrent FIRST branding write winning the race.
+
+    Patches the module-level row read so that, on its first call,
+    a competing account_branding row is committed through a SEPARATE
+    session after the route has observed "no row" — the exact
+    interleaving Codex's PR #190 P2 describes (two workers, both
+    read None, both INSERT; the loser hits
+    uq_account_branding_user_id). Returns the list of rows the
+    caller can assert on afterwards via _branding_rows.
+    """
+    from app import main as main_mod
+    from app import models
+
+    original = main_mod._account_branding_row_for
+    state = {"injected": False}
+
+    def racing_read(db, uid):
+        result = original(db, uid)
+        if not state["injected"] and result is None:
+            state["injected"] = True
+            other = auth_env.sessions()
+            try:
+                other.add(models.AccountBranding(
+                    user_id=uuid.UUID(str(user_id)),
+                    business_name="Concurrent Winner"))
+                other.commit()
+            finally:
+                other.close()
+        return result
+
+    monkeypatch.setattr(main_mod, "_account_branding_row_for",
+                        racing_read)
+    return state
+
+
+def _branding_rows(auth_env, user_id):
+    from app import models
+    db = auth_env.sessions()
+    try:
+        return db.query(models.AccountBranding).filter(
+            models.AccountBranding.user_id
+            == uuid.UUID(str(user_id))).all()
+    finally:
+        db.close()
+
+
+def test_account_branding_set_survives_concurrent_first_write(
+        auth_env, monkeypatch):
+    """PR #190 Codex P2 (set route): a first save racing another
+    first write must apply as an update to the winner's row (200,
+    exactly one row, THIS request's values) — not a 500 from an
+    unhandled IntegrityError. Fails on the pre-remediation tree,
+    where the route inserts unprotected."""
+    _email, user_id, _rid, csrf = _setup(auth_env)
+    _inject_competing_first_write(auth_env, monkeypatch, user_id)
+    r = _post_branding(auth_env, csrf,
+                       data={"business_name": "Racing Save Co"})
+    assert r.status_code == 200, r.text[:300]
+    rows = _branding_rows(auth_env, user_id)
+    assert len(rows) == 1
+    assert rows[0].business_name == "Racing Save Co"
+
+
+def test_account_branding_clear_survives_concurrent_first_write(
+        auth_env, monkeypatch):
+    """PR #190 Codex P2 (clear route): the clear route creates the
+    cleared-state row on first use, so it has the same race — a
+    clear racing a first save must end with exactly one
+    cleared-state row (200), not a 500."""
+    _email, user_id, _rid, csrf = _setup(auth_env)
+    _inject_competing_first_write(auth_env, monkeypatch, user_id)
+    r = auth_env.client.post("/settings/branding/clear",
+                             data={"csrf_token": csrf})
+    assert r.status_code == 200, r.text[:300]
+    rows = _branding_rows(auth_env, user_id)
+    assert len(rows) == 1
+    assert rows[0].business_name is None
+
+
 def test_account_branding_survives_report_expiry(auth_env):
     """Account semantics: branding is the account's, not a report's —
     expiring the report the owner happened to be viewing does not
