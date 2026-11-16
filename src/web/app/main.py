@@ -345,8 +345,9 @@ _BRANDING_GUARD_BYTES = 1024 * 1024
 @app.middleware("http")
 async def oversize_body_guard(request: Request, call_next):
     if (request.method == "POST"
-            and request.url.path.startswith("/reports/")
             and request.url.path.endswith("/branding")
+            and (request.url.path.startswith("/reports/")
+                 or request.url.path == "/settings/branding")
             and request.headers.get("content-length")):
         try:
             declared_branding = int(request.headers["content-length"])
@@ -4113,26 +4114,30 @@ async def reports_list(request: Request, page: int = 1, db=Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Issue #163: per-report branding helpers (owned deep_dive reports only).
+# Issue #163 branding helpers, account-level since the 2026-11-16
+# Pricing/Report cleanup (owned deep_dive reports render/generate
+# from the owner's account branding row).
 # ---------------------------------------------------------------------------
 
-def _branding_row_for(db, result_id):
+def _account_branding_row_for(db, user_id):
     from app import models as _models
-    return db.query(_models.ReportBranding).filter(
-        _models.ReportBranding.result_id == result_id).first()
+    return db.query(_models.AccountBranding).filter(
+        _models.AccountBranding.user_id == user_id).first()
 
 
-def _generate_deep_dive_pdf_branded(db, result, filename):
-    """Generate a deep_dive PDF with the report's stored branding.
+def _generate_deep_dive_pdf_branded(db, result, filename, user_id):
+    """Generate a deep_dive PDF with the owner's account branding.
 
-    The branding dict is assembled server-side from the stored row
-    only; stored logo bytes are materialised to a server-owned temp
-    file for the render and unlinked afterwards (A8(f)). With no row,
-    generation is exactly the pre-#163 unbranded call.
+    Pricing/Report cleanup (2026-11-16): branding is account-level —
+    the dict is assembled server-side from the owner's
+    ``account_branding`` row only; stored logo bytes are materialised
+    to a server-owned temp file for the render and unlinked
+    afterwards (A8(f)). With no row, generation is exactly the
+    pre-#163 unbranded call.
     """
     from app import branding as _branding_mod
     from app.pdf_export import generate_deep_dive_pdf as _gen
-    row = _branding_row_for(db, result.id)
+    row = _account_branding_row_for(db, user_id)
     with _branding_mod.branding_dict_with_temp_logo(row) as _bdict:
         if _bdict:
             return _gen(result.storage_manifest, filename, branding=_bdict)
@@ -4246,22 +4251,14 @@ async def report_view(request: Request, result_id: str, db=Depends(get_db)):
             return JSONResponse({"error": "Report data corrupted"}, status_code=500)
         data["export_unlocked"] = credits_helpers.is_export_unlocked(
             db, _user.id, result.id) or credits_helpers.is_product_paid_result(db, result)
-        # Issue #163: branded header band + branding form state for
-        # THIS report only (per-report, never per-account).
+        # Issue #163, moved account-level by the 2026-11-16
+        # Pricing/Report cleanup: the branded header band renders from
+        # the OWNER's account branding row. The branding FORM no
+        # longer lives on this page — it is managed on Settings.
         from app import branding as _branding_view
-        _brow = _branding_row_for(db, result.id)
-        data["branding"] = _branding_view.web_branding_from_row(
-            _brow, result.id)
-        # Nullable row fields normalize to "" — a partial save or the
-        # retained cleared row must never render the literal string
-        # "None" into the form (Codex P2 on PR #169).
-        data["branding_values"] = {
-            "business_name": (_brow.business_name or "") if _brow else "",
-            "client_name": (_brow.client_name or "") if _brow else "",
-            "report_title": (_brow.report_title or "") if _brow else "",
-            "accent": (_brow.accent or "") if _brow else "",
-            "has_logo": bool(_brow and _brow.logo_bytes),
-        }
+        _brow = _account_branding_row_for(db, _user.id)
+        data["branding"] = _branding_view.web_branding_from_account_row(
+            _brow)
         # Issue #160: the designed header block shows when this report
         # was generated (the artifact Result's ready_at) — display only.
         if result.ready_at:
@@ -4469,14 +4466,16 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
     # into a second 2-credit charge. Every early return after this
     # point rolls back to release the lock.
     credits_helpers.lock_global_paid_scope(db)
-    # Issue #163 (Amendment A3): for a deep_dive Result, ANY
-    # report_branding row (set OR cleared-state) defeats the stored-PDF
-    # replay below — the route then falls through to the unlocked
-    # fresh-generation path (no charge, no new Operation). Reports
-    # that never had branding keep today's replay behaviour exactly.
+    # Issue #163 (Amendment A3), re-keyed account-level by the
+    # 2026-11-16 Pricing/Report cleanup: for a deep_dive Result, ANY
+    # account_branding row of the owner (set OR cleared-state) defeats
+    # the stored-PDF replay below — the route then falls through to
+    # the unlocked fresh-generation path (no charge, no new
+    # Operation). Owners who never set branding keep today's replay
+    # behaviour exactly.
     _has_branding_row = False
     if result.type == "deep_dive":
-        _has_branding_row = _branding_row_for(db, rid) is not None
+        _has_branding_row = _account_branding_row_for(db, user.id) is not None
     existing_op = db.query(models.Operation).filter(
         models.Operation.user_id == user.id,
         models.Operation.type == "pdf",
@@ -4597,7 +4596,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
             if result.type == "deep_dive":
                 # Issue #163: fresh generation carries stored branding.
                 _pdf_bytes = _generate_deep_dive_pdf_branded(
-                    db, result, _filename)
+                    db, result, _filename, user.id)
             elif _manifest_data.get("report_kind") == "batch":
                 _pdf_bytes = _gen_batch_pdf(result.storage_manifest, _filename)
             elif result.type == "comparison":
@@ -4648,7 +4647,7 @@ async def report_export_pdf(request: Request, result_id: str, db=Depends(get_db)
             # Issue #163: the admitted first-export generation also
             # carries stored branding (same cost as unbranded).
             pdf_bytes = _generate_deep_dive_pdf_branded(
-                db, result, filename)
+                db, result, filename, user.id)
         elif manifest_data.get("report_kind") == "batch":
             # Issue #103 (trim B5): ONE 2-credit export for the whole
             # combined artifact — the charge above is the standard
@@ -5378,66 +5377,25 @@ async def report_deep_dive(request: Request, result_id: str, db=Depends(get_db))
 
 
 # ---------------------------------------------------------------------------
-# Issue #163: branding routes — POST set, POST clear, GET logo.
+# Issue #163 branding, moved to the ACCOUNT level by the 2026-11-16
+# Pricing/Report cleanup: POST set, POST clear, GET logo — all on the
+# Settings surface (/settings/branding*), keyed to the caller's single
+# account_branding row. The per-report routes are removed.
 #
-# Included with the paid Analysis Report: these routes create NO
-# Operation, Consent or CreditLedger rows, never touch the deep-dive
-# canonical identity/digest, and never change the #129 unlock state.
-# Branding text/bytes are never logged.
+# Included with every paid report: these routes create NO Operation,
+# Consent or CreditLedger rows and never change the #129 unlock
+# state. Branding text/bytes are never logged. Validation discipline
+# is unchanged from #163: ALL validation (text + logo, A1 full decode
+# + canonical re-encode) completes before any write, so an invalid
+# replacement rejects the WHOLE update and the prior row stays
+# byte-for-byte untouched (A8(c)).
 # ---------------------------------------------------------------------------
 
-def _branding_target_under_lock(db, user, result_id: str):
-    """Lock (global:paid, the same scope cleanup uses — A2) and
-    re-read the branding target Result under the lock.
 
-    Returns (result, None) or (None, error_response). Semantics mirror
-    the deep-dive route, with the A2/A8(g) re-check under the lock:
-    unknown/non-owner -> 404; non-deep_dive -> 422; expired OR
-    soft-deleted -> 410 (an upload committing after cleanup selected
-    the report must not resurrect branding on it).
-    """
-    import uuid as _uuid
-    from fastapi.responses import JSONResponse
-    from sqlalchemy import select as _select
-    from app import credits as credits_helpers
-    from app import models
-    from datetime import datetime, timezone
-    try:
-        rid = _uuid.UUID(result_id)
-    except ValueError:
-        return None, JSONResponse(
-            {"error": "Invalid report ID"}, status_code=400)
-    credits_helpers.lock_global_paid_scope(db)
-    found = db.query(models.Result).filter(
-        models.Result.id == rid,
-        models.Result.user_id == user.id,
-    ).first()
-    if not found:
-        db.rollback()
-        return None, JSONResponse(
-            {"error": "Report not found"}, status_code=404)
-    result = db.execute(
-        _select(models.Result).where(models.Result.id == found.id)
-        .with_for_update().execution_options(populate_existing=True)
-    ).scalar_one()
-    if result.deleted_at is not None or \
-            credits_helpers._as_aware(result.expires_at) <= \
-            datetime.now(timezone.utc):
-        db.rollback()
-        return None, JSONResponse(
-            {"error": "Report has expired"}, status_code=410)
-    if result.type != "deep_dive":
-        db.rollback()
-        return None, JSONResponse(
-            {"error": "Branding is only available for Analysis Reports"},
-            status_code=422)
-    return result, None
-
-
-@app.post("/reports/{result_id}/branding")
-async def report_branding_set(request: Request, result_id: str,
-                              db=Depends(get_db)):
-    """Set/replace the branding on an owned paid Analysis Report."""
+@app.post("/settings/branding")
+async def account_branding_set(request: Request,
+                               db=Depends(get_db)):
+    """Set/replace the account's branding (Settings surface)."""
     from fastapi.responses import JSONResponse
     from app import auth as auth_helpers
     from app import branding as branding_mod
@@ -5499,10 +5457,7 @@ async def report_branding_set(request: Request, result_id: str,
     remove_logo = str(form.get("remove_logo") or "").lower() in (
         "1", "true", "on", "yes")
 
-    # A8(c) ATOMICITY: ALL validation (text + logo, A1 full decode +
-    # canonical re-encode) completes before any write, and before the
-    # lock — an invalid replacement rejects the WHOLE update and the
-    # prior row stays byte-for-byte untouched.
+    # A8(c) ATOMICITY: validation completes before any write (above).
     try:
         business_name = branding_mod.clean_text_field(
             raw_fields["business_name"], label="Business name",
@@ -5521,14 +5476,9 @@ async def report_branding_set(request: Request, result_id: str,
     except branding_mod.BrandingError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    # A2/A8(g): serialize with cleanup on global:paid and re-read the
-    # Result under the lock immediately before commit.
-    result, err = _branding_target_under_lock(db, user, result_id)
-    if err is not None:
-        return err
-    row = _branding_row_for(db, result.id)
+    row = _account_branding_row_for(db, user.id)
     if row is None:
-        row = models.ReportBranding(result_id=result.id)
+        row = models.AccountBranding(user_id=user.id)
         db.add(row)
     row.business_name = business_name
     row.client_name = client_name
@@ -5550,8 +5500,7 @@ async def report_branding_set(request: Request, result_id: str,
     # else: no/empty file part — keep the existing logo untouched.
     row.updated_at = _utcnow_for_branding()
     db.commit()
-    return JSONResponse({
-        "status": "branding_updated", "result_id": str(result.id)})
+    return JSONResponse({"status": "branding_updated"})
 
 
 def _utcnow_for_branding():
@@ -5559,13 +5508,12 @@ def _utcnow_for_branding():
     return datetime.now(timezone.utc)
 
 
-@app.post("/reports/{result_id}/branding/clear")
-async def report_branding_clear(request: Request, result_id: str,
-                                db=Depends(get_db)):
-    """Clear branding (A8(e)): nulls all fields but RETAINS the row
-    with a bumped updated_at — the cleared-state row is what makes
-    A3's replay rule survive a clear. Only lifecycle cleanup (A2)
-    deletes the row."""
+@app.post("/settings/branding/clear")
+async def account_branding_clear(request: Request,
+                                 db=Depends(get_db)):
+    """Clear account branding (A8(e)): nulls all fields but RETAINS
+    the row with a bumped updated_at — the cleared-state row is what
+    makes the A3 replay rule survive a clear."""
     from fastapi.responses import JSONResponse
     from app import auth as auth_helpers
     from app import models
@@ -5577,12 +5525,9 @@ async def report_branding_clear(request: Request, result_id: str,
     form, err = await _check_owner_csrf(request, session, db)
     if err is not None:
         return err
-    result, err = _branding_target_under_lock(db, user, result_id)
-    if err is not None:
-        return err
-    row = _branding_row_for(db, result.id)
+    row = _account_branding_row_for(db, user.id)
     if row is None:
-        row = models.ReportBranding(result_id=result.id)
+        row = models.AccountBranding(user_id=user.id)
         db.add(row)
     row.business_name = None
     row.client_name = None
@@ -5595,50 +5540,26 @@ async def report_branding_clear(request: Request, result_id: str,
     row.logo_height = None
     row.updated_at = _utcnow_for_branding()
     db.commit()
-    return JSONResponse({
-        "status": "branding_cleared", "result_id": str(result.id)})
+    return JSONResponse({"status": "branding_cleared"})
 
 
-@app.get("/reports/{result_id}/branding/logo")
-async def report_branding_logo(request: Request, result_id: str,
-                               db=Depends(get_db)):
-    """Serve the stored logo for the OWNER only.
+@app.get("/settings/branding/logo")
+async def account_branding_logo(request: Request,
+                                db=Depends(get_db)):
+    """Serve the account's stored logo to its OWNER only.
 
     Content-Type comes from the stored validated type, with nosniff
-    and private no-store. Non-owner/unknown -> 404; anonymous -> 401.
-    Expiry/deleted state is re-checked at read time (A2). Nothing
-    about the bytes is logged.
+    and private no-store. Anonymous -> 401; no row / no logo -> 404.
+    Nothing about the bytes is logged.
     """
-    import uuid as _uuid
     from fastapi.responses import JSONResponse, Response
     from app import auth as auth_helpers
-    from app import credits as credits_helpers
-    from datetime import datetime, timezone
 
     session = auth_helpers.get_session_from_cookie(db, request)
     if not session:
         return JSONResponse({"error": "Login required"}, status_code=401)
     user = session.user
-    try:
-        rid = _uuid.UUID(result_id)
-    except ValueError:
-        return JSONResponse({"error": "Report not found"}, status_code=404)
-    from app import models
-    result = db.query(models.Result).filter(
-        models.Result.id == rid,
-        models.Result.user_id == user.id,
-    ).first()
-    if not result:
-        return JSONResponse({"error": "Report not found"}, status_code=404)
-    # A8 lifecycle contract (Codex P2 on PR #169): an OWNED target that
-    # is expired OR soft-deleted answers 410 on logo-read too, matching
-    # set/clear — cleanup_results() setting deleted_at must not change
-    # the owner's answer from 410 to 404. Unknown/non-owner stays 404.
-    if result.deleted_at is not None or \
-            credits_helpers._as_aware(result.expires_at) <= \
-            datetime.now(timezone.utc):
-        return JSONResponse({"error": "Report has expired"}, status_code=410)
-    row = _branding_row_for(db, result.id)
+    row = _account_branding_row_for(db, user.id)
     if row is None or not row.logo_bytes:
         return JSONResponse({"error": "No logo stored"}, status_code=404)
     return Response(

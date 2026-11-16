@@ -221,11 +221,15 @@ def test_g1_direct_controls_replace_actions_menu():
     assert ">Analysis</button>" not in cluster
     assert 'id="share-btn"' in cluster
     # PREMISE CHANGED (#164 Phase C, Decision 4 / C2): exports are
-    # free for ALL reports — the Free tags render in BOTH states;
-    # there is no locked state and no "export-unlocked" marker
-    # anymore. PREMISE CHANGED (Release #7 F1): the free confirm
-    # copy is retired with the popup — no data-confirm at all.
-    assert ">Free</span>" in cluster
+    # free for ALL reports; there is no locked state and no
+    # "export-unlocked" marker anymore. PREMISE CHANGED (Release #7
+    # F1): the free confirm copy is retired with the popup — no
+    # data-confirm at all. PREMISE CHANGED (Pricing/Report cleanup,
+    # founder direction 2026-11-16): the "Free" tag is REMOVED from
+    # the export buttons entirely — exports stay free, the buttons
+    # no longer say so.
+    assert ">Free</span>" not in cluster
+    assert "s1-free-tag" not in cluster
     assert cluster.count('data-confirm="Exports are free for this '
                          'report."') == 0
     assert "export-unlocked" not in cluster
@@ -233,7 +237,7 @@ def test_g1_direct_controls_replace_actions_menu():
     unlocked = _owned(export_unlocked=True)
     ucluster = unlocked[unlocked.index('data-s1-actions'):
                         unlocked.index('id="analysis-modal"')]
-    assert ">Free</span>" in ucluster
+    assert ">Free</span>" not in ucluster
     assert ucluster.count("data-confirm") == 0
     assert ucluster.count('data-confirm="Exports are free for this '
                           'report."') == 0

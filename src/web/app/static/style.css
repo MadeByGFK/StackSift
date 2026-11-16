@@ -463,5 +463,6 @@ section.s2-panel { background: var(--panel); border: 1px solid var(--border); bo
 .s4-group:first-child .s4-section-head { margin-top: 0; }
 .s4-section-num { font-family: var(--font-code); color: var(--accent); font-size: 13px; font-weight: 700; letter-spacing: .5px; }
 .s4-section-label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+.s4-section-aside { margin-left: auto; color: var(--muted); font-size: 12px; }
 .s4-group .btn-small:hover { border-color: var(--accent); }
 

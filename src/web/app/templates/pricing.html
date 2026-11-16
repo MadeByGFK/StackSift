@@ -110,9 +110,7 @@
       {% else %}
       <p>Analyze one oversize log file, up to 100 MB / 500,000 lines.</p>
       {% endif %}
-      {% if product.ready %}
-      <p class="pack-note">Paid by card from the {% if product.sku == "investigation_report" %}report page{% else %}quote step{% endif %}.</p>
-      {% else %}
+      {% if not product.ready %}
       <span class="pack-soon">Coming soon</span>
       {% endif %}
     </div>
@@ -157,8 +155,6 @@
     <p>$5 flat. <a href="/batch">Batch analysis</a> combines 2–5 files into one report for a single $5 price — not per file. Exporting the combined report as a PDF is free.</p>
     <h3>How much does a comparison cost?</h3>
     <p>$5 flat, paid at the quote step — even if the two logs are identical or show no material differences. Exporting the comparison report as a PDF is free.</p>
-    <h3>What happened to credits?</h3>
-    <p>Credits are retired. StackSift no longer sells credit packs, new accounts no longer receive signup credits, and nothing is priced in credits any more. Paid features are bought per report in dollars, as listed above.</p>
     <h3>What happens if my analysis fails?</h3>
     <p>You are never charged for a failed generation. You pay by card at checkout. If we can't generate your report, your purchase isn't used up — you can try again. If a purchase can never be used, we'll refund it — email disputes@goodfolkdigital.com.</p>
     <h3>How long are my results available?</h3>
