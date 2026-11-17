@@ -941,7 +941,7 @@ def test_sample_asset_provenance_and_png_conversion():
     static = Path(__file__).resolve().parents[1] / "app" / "static"
     svg = static / "wellinstance-icon.svg"
     assert hashlib.sha256(svg.read_bytes()).hexdigest() == \
-        "2c7bdae0671096001a172d738991299e36fb4e1a91b3191a3dad46d6216fd463"
+        "72aa1aa9ae74193765ecbae44f386b0ba8ab84864bb9f283a6b07977b5a0d3ff"
     png = static / "wellinstance-icon.png"
     with Image.open(png) as im:
         assert im.format == "PNG" and im.size == (256, 256)
@@ -951,7 +951,7 @@ def test_sample_asset_provenance_and_png_conversion():
         colors = px.getcolors(256 * 256)
         color_set = {c for _n, c in colors}
         assert (255, 255, 255) in color_set
-        assert (212, 175, 55) in color_set
+        assert (227, 167, 47) in color_set
 
 
 def test_sample_route_accepts_no_branding_input(sample_client):

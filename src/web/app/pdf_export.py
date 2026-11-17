@@ -59,7 +59,7 @@ HEALTH_LABEL_COLORS = {
 # redaction colors are NEVER brand-overridable.
 BRAND = {
     "navy": (30, 42, 74),            # web --navy: #1e2a4a
-    "gold": (212, 175, 55),          # web --accent: #d4af37
+    "gold": (227, 167, 47),          # web --accent: #e3a72f
     "ink": (26, 32, 44),
     "muted": (100, 100, 100),
     "panel": (238, 241, 246),
