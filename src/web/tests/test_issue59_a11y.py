@@ -159,21 +159,23 @@ def _ratio(fg, bg):
 
 
 # Measured 2026-10-21 from :root palette + inline privacy-notice colors.
+# Gold pairs re-measured 2026-11-16 for the Gold-B ruling (founder, chat):
+# brand accent #d4af37 -> #e3a72f; badge yellow (--yellow) #e3a72f -> #d29922.
 # Contrast is resolution/zoom independent; layout at 200% zoom reflows via
 # max-width + viewport meta (no fixed-width containers on this page).
 CONTRAST_PAIRS = [
     ("body text #ffffff on #0a1830", "#ffffff", "#0a1830", 4.5),
     ("muted #9db1cc on bg #0a1830", "#9db1cc", "#0a1830", 4.5),
     ("muted #9db1cc on panel #10254a", "#9db1cc", "#10254a", 4.5),
-    ("accent #d4af37 on bg #0a1830", "#d4af37", "#0a1830", 4.5),
-    ("accent #d4af37 on panel #10254a", "#d4af37", "#10254a", 4.5),
-    ("signup text #1a1a2e on accent", "#1a1a2e", "#d4af37", 4.5),
-    ("primary text #0a1830 on accent", "#0a1830", "#d4af37", 4.5),
+    ("accent #e3a72f on bg #0a1830", "#e3a72f", "#0a1830", 4.5),
+    ("accent #e3a72f on panel #10254a", "#e3a72f", "#10254a", 4.5),
+    ("signup text #1a1a2e on accent", "#1a1a2e", "#e3a72f", 4.5),
+    ("primary text #0a1830 on accent", "#0a1830", "#e3a72f", 4.5),
     ("error #ffb4ab on #3a1a1e", "#ffb4ab", "#3a1a1e", 4.5),
     ("badge green #3fb950 on bg", "#3fb950", "#0a1830", 4.5),
-    ("badge yellow #e3a72f on bg", "#e3a72f", "#0a1830", 4.5),
+    ("badge yellow #d29922 on bg", "#d29922", "#0a1830", 4.5),
     ("badge red #f85149 on bg", "#f85149", "#0a1830", 4.5),
-    ("hero accent span (large text)", "#d4af37", "#0a1830", 3.0),
+    ("hero accent span (large text)", "#e3a72f", "#0a1830", 3.0),
     ("privacy notice #a0aec0 on #1e2a4a", "#a0aec0", "#1e2a4a", 4.5),
 ]
 

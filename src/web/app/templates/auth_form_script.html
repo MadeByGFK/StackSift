@@ -81,7 +81,7 @@ function showSuccessModal(message, url) {
   const ok = document.createElement('button');
   ok.type = 'button';
   ok.textContent = 'OK';
-  ok.style.cssText = 'display:block;width:100%;padding:0.7rem;background:#ecc94b;color:#1a1a2e;font-weight:700;border-radius:8px;border:none;cursor:pointer;font:inherit;';
+  ok.style.cssText = 'display:block;width:100%;padding:0.7rem;background:var(--accent);color:#1a1a2e;font-weight:700;border-radius:8px;border:none;cursor:pointer;font:inherit;';
   card.appendChild(ok);
   overlay.appendChild(card);
   document.body.appendChild(overlay);

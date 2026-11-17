@@ -297,7 +297,7 @@ def logo_sha256(stored_bytes: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 SAMPLE_BUSINESS_NAME = "WellInstance"
-SAMPLE_ACCENT = "#d4af37"
+SAMPLE_ACCENT = "#e3a72f"
 SAMPLE_REPORT_TITLE = "SAMPLE \u2014 StackSift Analysis Report"
 SAMPLE_LOGO_PNG_PATH = _STATIC_DIR / "wellinstance-icon.png"
 SAMPLE_LOGO_SVG_URL = "/static/wellinstance-icon.svg"
