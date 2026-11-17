@@ -4,6 +4,22 @@ Teeth discipline: new-feature assertions FAIL on the pre-build tree
 (1a2f84c6 — no report_branding table, no branding routes, header_block
 places logos at h=10 with NO width bound, sample branding is
 title-only); regression gates are labelled in their docstrings.
+
+PREMISE CHANGED (Pricing/Report cleanup, 2026-11-16): branding moved
+from the per-report surface to the ACCOUNT level. The write/read
+routes are now POST /settings/branding, POST /settings/branding/clear
+and GET /settings/branding/logo, keyed to the caller's single
+account_branding row; the branding form lives on the Settings page;
+report pages render only the branded header band. Tests of the moved
+surface were rewritten in place with equivalent assertions. Retired
+as inherently per-report (account branding has no report lifecycle):
+test_branding_on_standard_report_422,
+test_branding_on_expired_report_410,
+test_a2_upload_after_cleanup_rejected_410_no_resurrection,
+test_remed_logo_read_410_for_owned_soft_deleted,
+test_remed_logo_read_410_after_cleanup_soft_delete. The A2 cleanup
+tests now seed the LEGACY report_branding row directly (cleanup of
+legacy rows is unchanged) instead of creating it via the old route.
 """
 
 import hashlib
@@ -95,7 +111,7 @@ def _make_deep_dive(auth_env):
     return email, user_id, rid, gen.json()["analysis_result_id"], csrf
 
 
-def _post_branding(auth_env, dd_id, csrf, data=None, logo=None,
+def _post_branding(auth_env, csrf, data=None, logo=None,
                    logo_name="logo.png", logo_type="image/png"):
     fields = {"csrf_token": csrf}
     fields.update(data or {})
@@ -103,10 +119,24 @@ def _post_branding(auth_env, dd_id, csrf, data=None, logo=None,
     if logo is not None:
         files = {"logo": (logo_name, logo, logo_type)}
     return auth_env.client.post(
-        f"/reports/{dd_id}/branding", data=fields, files=files)
+        "/settings/branding", data=fields, files=files)
 
 
-def _branding_row(auth_env, dd_id):
+def _branding_row(auth_env, user_id):
+    """The caller's ACCOUNT branding row (post-cleanup surface)."""
+    from app import models
+    db = auth_env.sessions()
+    try:
+        return db.query(models.AccountBranding).filter(
+            models.AccountBranding.user_id == uuid.UUID(str(user_id))
+        ).first()
+    finally:
+        db.close()
+
+
+def _legacy_report_branding_row(auth_env, dd_id):
+    """A LEGACY per-report row (#163 table) — only the A2 cleanup
+    tests still read this table; no route writes it any more."""
     from app import models
     db = auth_env.sessions()
     try:
@@ -117,8 +147,8 @@ def _branding_row(auth_env, dd_id):
         db.close()
 
 
-def _row_snapshot(auth_env, dd_id):
-    row = _branding_row(auth_env, dd_id)
+def _row_snapshot(auth_env, user_id):
+    row = _branding_row(auth_env, user_id)
     if row is None:
         return None
     return (row.business_name, row.client_name, row.report_title,
@@ -245,14 +275,14 @@ def test_a1_corrupt_idat_png_rejected():
 
 def test_branding_post_owner_sets_row_and_web_view(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    r = _post_branding(auth_env, dd_id, csrf, data={
+    r = _post_branding(auth_env, csrf, data={
         "business_name": "Acme Consulting",
         "client_name": "Globex",
         "report_title": "Q3 Incident Review",
         "accent": "#123456",
     }, logo=_png())
     assert r.status_code == 200, r.text[:300]
-    snap = _row_snapshot(auth_env, dd_id)
+    snap = _row_snapshot(auth_env, _uid)
     assert snap[0:4] == ("Acme Consulting", "Globex",
                          "Q3 Incident Review", "#123456")
     assert snap[5] == "image/png" and snap[4]
@@ -264,15 +294,21 @@ def test_branding_post_owner_sets_row_and_web_view(auth_env):
     assert "Prepared for: Globex" in page.text
     assert "Q3 Incident Review" in page.text
     assert "--accent: #123456" in page.text
-    assert f"/reports/{dd_id}/branding/logo" in page.text
-    # Panel copy (A3): applies to every PDF generated after it is set.
+    assert "/settings/branding/logo" in page.text
+    # The report page carries NO branding form any more (cleanup).
+    assert "branding-panel" not in page.text
+    assert 'action="/settings/branding"' not in page.text
+    # Explainer copy (A3) now lives with the form, on Settings:
+    # applies to every PDF generated after it is set.
+    settings = auth_env.client.get("/settings")
+    assert settings.status_code == 200
     assert "Branding applies to every PDF generated after it is set" \
-        in page.text
+        in settings.text
 
 
 def test_branding_pdf_admitted_and_unlocked_paths_and_footer(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf, data={
+    _post_branding(auth_env, csrf, data={
         "business_name": "Acme Consulting", "client_name": "Globex",
         "report_title": "Q3 Incident Review", "accent": "#123456"})
     # Admitted path (first export charges the unlock).
@@ -299,7 +335,7 @@ def test_branding_integrity_normalized_body_identical(auth_env):
     plain = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                  data={"csrf_token": csrf})
     assert plain.status_code == 200
-    _post_branding(auth_env, dd_id, csrf, data={
+    _post_branding(auth_env, csrf, data={
         "business_name": "Acme Consulting", "client_name": "Globex",
         "report_title": "Q3 Incident Review", "accent": "#123456"},
         logo=_png())
@@ -341,11 +377,11 @@ def test_branding_smuggled_fixed_tokens_ignored(auth_env):
     assert tok.navy == BRAND["navy"]
     # Route level: extra form fields are not read into the row at all.
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    r = _post_branding(auth_env, dd_id, csrf, data={
+    r = _post_branding(auth_env, csrf, data={
         "business_name": "Acme", "severity": "#000000",
         "redaction": "#000000"})
     assert r.status_code == 200
-    assert _row_snapshot(auth_env, dd_id)[0] == "Acme"
+    assert _row_snapshot(auth_env, _uid)[0] == "Acme"
 
 
 # --- routes: logo validation matrix -------------------------------------------
@@ -363,65 +399,65 @@ def test_branding_smuggled_fixed_tokens_ignored(auth_env):
 def test_branding_logo_matrix_rejected_nothing_stored(
         auth_env, logo, name, ctype):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    r = _post_branding(auth_env, dd_id, csrf,
+    r = _post_branding(auth_env, csrf,
                        data={"business_name": "Acme"},
                        logo=logo, logo_name=name, logo_type=ctype)
     assert r.status_code == 400, r.text[:200]
-    assert _branding_row(auth_env, dd_id) is None
+    assert _branding_row(auth_env, _uid) is None
 
 
 def test_branding_spoofed_content_type_does_not_rescue(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    r = _post_branding(auth_env, dd_id, csrf, logo=b"definitely text",
+    r = _post_branding(auth_env, csrf, logo=b"definitely text",
                        logo_name="logo.png", logo_type="image/png")
     assert r.status_code == 400
     # ...and a real PNG mislabelled as text still validates by content.
-    r = _post_branding(auth_env, dd_id, csrf, logo=_png(),
+    r = _post_branding(auth_env, csrf, logo=_png(),
                        logo_name="logo.png", logo_type="text/plain")
     assert r.status_code == 200
 
 
 def test_branding_empty_file_part_keeps_existing_logo(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    assert _post_branding(auth_env, dd_id, csrf, logo=_png()
+    assert _post_branding(auth_env, csrf, logo=_png()
                           ).status_code == 200
-    before = _row_snapshot(auth_env, dd_id)
-    r = _post_branding(auth_env, dd_id, csrf,
+    before = _row_snapshot(auth_env, _uid)
+    r = _post_branding(auth_env, csrf,
                        data={"business_name": "Renamed"},
                        logo=b"", logo_name="", logo_type="")
     assert r.status_code == 200
-    after = _row_snapshot(auth_env, dd_id)
+    after = _row_snapshot(auth_env, _uid)
     assert after[0] == "Renamed"
     assert after[4] == before[4]  # logo kept byte-for-byte
 
 
 def test_branding_remove_logo_field_clears_only_logo(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Acme"}, logo=_png())
-    r = _post_branding(auth_env, dd_id, csrf,
+    r = _post_branding(auth_env, csrf,
                        data={"business_name": "Acme", "remove_logo": "1"})
     assert r.status_code == 200
-    snap = _row_snapshot(auth_env, dd_id)
+    snap = _row_snapshot(auth_env, _uid)
     assert snap[0] == "Acme" and snap[4] is None and snap[5] is None
 
 
 def test_branding_unexpected_file_part_400(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
     r = auth_env.client.post(
-        f"/reports/{dd_id}/branding",
+        "/settings/branding",
         data={"csrf_token": csrf, "business_name": "Acme"},
         files={"evil": ("e.png", _png(), "image/png")})
     assert r.status_code == 400
-    assert _branding_row(auth_env, dd_id) is None
+    assert _branding_row(auth_env, _uid) is None
 
 
 def test_branding_declared_oversize_413_middleware(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
     big = _png() + b"A" * (1100 * 1024)  # declared length > 1 MiB
-    r = _post_branding(auth_env, dd_id, csrf, logo=big)
+    r = _post_branding(auth_env, csrf, logo=big)
     assert r.status_code == 413
-    assert _branding_row(auth_env, dd_id) is None
+    assert _branding_row(auth_env, _uid) is None
 
 
 def test_branding_text_rules(auth_env):
@@ -433,19 +469,19 @@ def test_branding_text_rules(auth_env):
                  {"accent": "red"}, {"accent": "#fff"},
                  {"accent": "#rrggbb;}</style><script>"},
                  {"accent": "#12345"}, {"accent": "#1234567"}):
-        r = _post_branding(auth_env, dd_id, csrf, data=data)
+        r = _post_branding(auth_env, csrf, data=data)
         assert r.status_code == 400, (data, r.status_code)
-    assert _branding_row(auth_env, dd_id) is None
-    r = _post_branding(auth_env, dd_id, csrf,
+    assert _branding_row(auth_env, _uid) is None
+    r = _post_branding(auth_env, csrf,
                        data={"business_name": "  Padded Name  "})
     assert r.status_code == 200
-    assert _row_snapshot(auth_env, dd_id)[0] == "Padded Name"
+    assert _row_snapshot(auth_env, _uid)[0] == "Padded Name"
 
 
 def test_branding_html_payloads_escaped_web_and_literal_pdf(auth_env):
     payload = '<script>alert("x")</script>'
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    r = _post_branding(auth_env, dd_id, csrf,
+    r = _post_branding(auth_env, csrf,
                        data={"business_name": payload})
     assert r.status_code == 200
     page = auth_env.client.get(f"/reports/{dd_id}")
@@ -461,23 +497,23 @@ def test_branding_html_payloads_escaped_web_and_literal_pdf(auth_env):
 
 def test_a8_invalid_replacement_leaves_prior_row_untouched(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Original Co",
                          "accent": "#112233"}, logo=_png())
-    before = _row_snapshot(auth_env, dd_id)
-    r = _post_branding(auth_env, dd_id, csrf,
+    before = _row_snapshot(auth_env, _uid)
+    r = _post_branding(auth_env, csrf,
                        data={"business_name": "Replacement Co"},
                        logo=_gif(), logo_name="x.gif",
                        logo_type="image/gif")
     assert r.status_code == 400
-    assert _row_snapshot(auth_env, dd_id) == before
+    assert _row_snapshot(auth_env, _uid) == before
 
 
 def test_a8_temp_files_unlinked_on_success_and_failure(auth_env,
                                                        monkeypatch):
     from app import pdf_export as pdf_mod
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Acme"}, logo=_png())
     # Unlock first (admitted path also renders with the temp logo).
     ok = auth_env.client.post(f"/reports/{dd_id}/pdf",
@@ -503,27 +539,31 @@ def test_a8_temp_files_unlinked_on_success_and_failure(auth_env,
 
 def test_branding_security_ownership_and_logo_route(auth_env):
     _email, user_id, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Acme"}, logo=_png())
     # CSRF missing -> 403.
-    r = auth_env.client.post(f"/reports/{dd_id}/branding",
+    r = auth_env.client.post("/settings/branding",
                              data={"business_name": "Nope"})
     assert r.status_code == 403
-    logo = auth_env.client.get(f"/reports/{dd_id}/branding/logo")
+    logo = auth_env.client.get("/settings/branding/logo")
     assert logo.status_code == 200
     assert logo.headers["content-type"].startswith("image/png")
     assert logo.headers["x-content-type-options"] == "nosniff"
     assert logo.headers["cache-control"] == "private, no-store"
-    assert logo.content == _row_snapshot(auth_env, dd_id)[4]
-    # Non-owner: POST -> 404, logo GET -> 404.
+    assert logo.content == _row_snapshot(auth_env, user_id)[4]
+    # Another account: the logo route serves only the CALLER's logo
+    # (this account has none -> 404), and its own branding writes land
+    # on its own row — the first account's row is untouched.
     email_b, _uid_b = _signup_and_verify(auth_env)
     _login(auth_env, email_b)
     csrf_b = _session_csrf(auth_env)
-    r = _post_branding(auth_env, dd_id, csrf_b,
-                       data={"business_name": "Hijack"})
-    assert r.status_code == 404
     assert auth_env.client.get(
-        f"/reports/{dd_id}/branding/logo").status_code == 404
+        "/settings/branding/logo").status_code == 404
+    r = _post_branding(auth_env, csrf_b,
+                       data={"business_name": "Other Co"})
+    assert r.status_code == 200
+    assert _row_snapshot(auth_env, _uid_b)[0] == "Other Co"
+    assert _row_snapshot(auth_env, user_id)[0] == "Acme"
 
 
 def test_branding_anonymous_401(auth_env):
@@ -532,20 +572,22 @@ def test_branding_anonymous_401(auth_env):
     _email, _uid, _rid, dd_id, _csrf = _make_deep_dive(auth_env)
     with TestClient(app, base_url="https://testserver",
                     raise_server_exceptions=False) as anon:
-        assert anon.post(f"/reports/{dd_id}/branding",
+        assert anon.post("/settings/branding",
                          data={"business_name": "X"}).status_code == 401
+        assert anon.post("/settings/branding/clear",
+                         data={}).status_code == 401
         assert anon.get(
-            f"/reports/{dd_id}/branding/logo").status_code == 401
+            "/settings/branding/logo").status_code == 401
 
 
 def test_branding_text_never_logged(auth_env, caplog):
     import logging
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
     with caplog.at_level(logging.DEBUG):
-        _post_branding(auth_env, dd_id, csrf,
+        _post_branding(auth_env, csrf,
                        data={"business_name": "LogProbeBizXYZ"},
                        logo=_png())
-        auth_env.client.get(f"/reports/{dd_id}/branding/logo")
+        auth_env.client.get("/settings/branding/logo")
     assert "LogProbeBizXYZ" not in caplog.text
 
 
@@ -554,13 +596,13 @@ def test_branding_text_never_logged(auth_env, caplog):
 def test_branding_no_charge_rows_and_replay_free(auth_env):
     _email, user_id, rid, dd_id, csrf = _make_deep_dive(auth_env)
     before = _counts(auth_env, user_id)
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Acme"}, logo=_png())
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Acme 2"})
-    auth_env.client.post(f"/reports/{dd_id}/branding/clear",
+    auth_env.client.post("/settings/branding/clear",
                          data={"csrf_token": csrf})
-    auth_env.client.get(f"/reports/{dd_id}/branding/logo")
+    auth_env.client.get("/settings/branding/logo")
     assert _counts(auth_env, user_id) == before
     # Deep-dive replay identity unchanged: re-requesting the Analysis
     # Report after branding still replays free (no new operation).
@@ -571,19 +613,6 @@ def test_branding_no_charge_rows_and_replay_free(auth_env):
 
 
 # --- lifecycle (A2) -----------------------------------------------------------------
-
-def test_branding_on_standard_report_422(auth_env):
-    _email, _uid, rid, csrf = _setup(auth_env)
-    r = _post_branding(auth_env, rid, csrf, data={"business_name": "A"})
-    assert r.status_code == 422
-
-
-def test_branding_on_expired_report_410(auth_env):
-    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _expire(auth_env, dd_id)
-    r = _post_branding(auth_env, dd_id, csrf, data={"business_name": "A"})
-    assert r.status_code == 410
-
 
 def _expire(auth_env, result_id, *, deleted=False):
     from app import models
@@ -598,26 +627,40 @@ def _expire(auth_env, result_id, *, deleted=False):
         db.close()
 
 
+def _seed_legacy_branding(auth_env, dd_id):
+    from app import models
+    db = auth_env.sessions()
+    try:
+        db.add(models.ReportBranding(
+            result_id=uuid.UUID(str(dd_id)), business_name="Acme",
+            logo_bytes=_png(), logo_media_type="image/png"))
+        db.commit()
+    finally:
+        db.close()
+
+
 def test_a2_cleanup_expiry_removes_row_and_bytes(auth_env):
+    """Legacy-table gate: cleanup still removes a per-report branding
+    row (and its bytes) when its result expires — unchanged by the
+    account-level move; the row is seeded directly because no route
+    writes the legacy table any more."""
     from app import credit_maintenance
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
-                   data={"business_name": "Acme"}, logo=_png())
-    assert _branding_row(auth_env, dd_id) is not None
+    _seed_legacy_branding(auth_env, dd_id)
+    assert _legacy_report_branding_row(auth_env, dd_id) is not None
     _expire(auth_env, dd_id)
     db = auth_env.sessions()
     try:
         credit_maintenance.cleanup_results(db)
     finally:
         db.close()
-    assert _branding_row(auth_env, dd_id) is None
+    assert _legacy_report_branding_row(auth_env, dd_id) is None
 
 
 def test_a2_cleanup_sweeps_already_soft_deleted(auth_env):
     from app import credit_maintenance
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
-                   data={"business_name": "Acme"}, logo=_png())
+    _seed_legacy_branding(auth_env, dd_id)
     # Soft-delete WITHOUT expiring (another path's delete): the sweep
     # on a later cleanup run removes the branding row.
     from app import models
@@ -629,7 +672,7 @@ def test_a2_cleanup_sweeps_already_soft_deleted(auth_env):
         credit_maintenance.cleanup_results(db)
     finally:
         db.close()
-    assert _branding_row(auth_env, dd_id) is None
+    assert _legacy_report_branding_row(auth_env, dd_id) is None
 
 
 def test_a2_physical_delete_cascades(auth_env):
@@ -657,34 +700,16 @@ def test_a2_physical_delete_cascades(auth_env):
         db.close()
 
 
-def test_a2_upload_after_cleanup_rejected_410_no_resurrection(auth_env):
-    from app import credit_maintenance
-    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
-                   data={"business_name": "Acme"}, logo=_png())
-    _expire(auth_env, dd_id)
-    db = auth_env.sessions()
-    try:
-        credit_maintenance.cleanup_results(db)
-    finally:
-        db.close()
-    assert _branding_row(auth_env, dd_id) is None
-    r = _post_branding(auth_env, dd_id, csrf,
-                       data={"business_name": "Zombie"}, logo=_png())
-    assert r.status_code == 410
-    assert _branding_row(auth_env, dd_id) is None
-
-
 def test_clear_retains_cleared_state_row_and_unbrands(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Acme"}, logo=_png())
-    row_before = _branding_row(auth_env, dd_id)
+    row_before = _branding_row(auth_env, _uid)
     created_at, row_id = row_before.created_at, row_before.id
-    r = auth_env.client.post(f"/reports/{dd_id}/branding/clear",
+    r = auth_env.client.post("/settings/branding/clear",
                              data={"csrf_token": csrf})
     assert r.status_code == 200
-    row = _branding_row(auth_env, dd_id)
+    row = _branding_row(auth_env, _uid)
     assert row is not None and row.id == row_id  # retained, not deleted
     assert row.business_name is None and row.logo_bytes is None
     assert row.accent is None and row.report_title is None
@@ -719,13 +744,13 @@ def test_a3_pdf_first_set_then_clear(auth_env):
         pdf_content_signature(first.content)
     assert "Acme Consulting" not in _pdf_text(replay.content)
     # Set branding -> next PDF is freshly generated WITH branding.
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Acme Consulting"})
     branded = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                    data={"csrf_token": csrf})
     assert "Acme Consulting" in _pdf_text(branded.content)
     # Clear -> next PDF is freshly generated unbranded.
-    auth_env.client.post(f"/reports/{dd_id}/branding/clear",
+    auth_env.client.post("/settings/branding/clear",
                          data={"csrf_token": csrf})
     cleared = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                    data={"csrf_token": csrf})
@@ -737,7 +762,7 @@ def test_a3_csv_first_unlock_then_branded_pdf(auth_env):
     csv = auth_env.client.post(f"/reports/{dd_id}/exports/csv",
                                data={"csrf_token": csrf})
     assert csv.status_code == 200, csv.text[:200]
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Csv First Co"})
     pdf = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                data={"csrf_token": csrf})
@@ -774,7 +799,7 @@ def test_a4_deep_dive_share_still_unsupported_branded_or_not(auth_env):
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
     for branded in (False, True):
         if branded:
-            _post_branding(auth_env, dd_id, csrf,
+            _post_branding(auth_env, csrf,
                            data={"business_name": "Acme"})
         r = auth_env.client.post(
             f"/reports/{dd_id}/share",
@@ -873,13 +898,19 @@ def test_a6_render_failure_never_fails_export(caplog):
 # --- stale UI -----------------------------------------------------------------------------
 
 def test_stale_ui_fresh_page_reflects_set_and_clear(auth_env):
+    """Cleanup surface: the Settings form reflects set/clear state and
+    the report page's band follows it (no form on the report page)."""
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
+    _post_branding(auth_env, csrf,
                    data={"business_name": "Fresh State Co"})
+    settings = auth_env.client.get("/settings")
+    assert 'value="Fresh State Co"' in settings.text
     page = auth_env.client.get(f"/reports/{dd_id}")
-    assert 'value="Fresh State Co"' in page.text
-    auth_env.client.post(f"/reports/{dd_id}/branding/clear",
+    assert "Fresh State Co" in page.text  # header band
+    auth_env.client.post("/settings/branding/clear",
                          data={"csrf_token": csrf})
+    settings = auth_env.client.get("/settings")
+    assert "Fresh State Co" not in settings.text
     page = auth_env.client.get(f"/reports/{dd_id}")
     assert "Fresh State Co" not in page.text
 
@@ -932,15 +963,16 @@ def test_sample_route_accepts_no_branding_input(sample_client):
 
 
 def test_unbranded_owned_page_and_pdf_unchanged(auth_env):
-    """Regression gate (A7): an owned report with NO branding renders
-    the report body unchanged and gains ONLY the branding form in the
-    Actions area (the named sanctioned premise change)."""
+    """Regression gate (A7), premise updated by the 2026-11-16
+    cleanup: an owned report with NO branding renders the report body
+    unchanged and carries NO branding form at all (the form moved to
+    Settings)."""
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
     page = auth_env.client.get(f"/reports/{dd_id}")
     assert page.status_code == 200
     assert "brand-header" not in page.text
-    assert "--accent:" not in page.text.split("branding-panel")[0]
-    assert f'action="/reports/{dd_id}/branding"' in page.text
+    assert "branding-panel" not in page.text
+    assert 'action="/settings/branding"' not in page.text
     pdf = auth_env.client.post(f"/reports/{dd_id}/pdf",
                                data={"csrf_token": csrf})
     assert "Prepared for:" not in _pdf_text(pdf.content)
@@ -1037,10 +1069,10 @@ def test_remed_partial_save_form_values_empty_not_none(auth_env):
     """Codex P2 (4503408267): after saving only a business name, the
     re-rendered form must show empty values, never the string None."""
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    r = _post_branding(auth_env, dd_id, csrf,
+    r = _post_branding(auth_env, csrf,
                        data={"business_name": "Acme"})
     assert r.status_code == 200, r.text[:300]
-    page = auth_env.client.get(f"/reports/{dd_id}")
+    page = auth_env.client.get("/settings")
     assert page.status_code == 200
     assert 'value="None"' not in page.text
     assert _form_value(page.text, "client_name") == ""
@@ -1052,62 +1084,35 @@ def test_remed_cleared_branding_form_values_empty_not_none(auth_env):
     """Codex P2 (4503408267): the retained cleared row (all NULLs) must
     also render empty form values."""
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf, data={
+    _post_branding(auth_env, csrf, data={
         "business_name": "Acme", "client_name": "Client",
         "report_title": "Title", "accent": "#1a2b3c"}, logo=_png())
-    r = auth_env.client.post(f"/reports/{dd_id}/branding/clear",
+    r = auth_env.client.post("/settings/branding/clear",
                              data={"csrf_token": csrf})
     assert r.status_code == 200, r.text[:300]
-    page = auth_env.client.get(f"/reports/{dd_id}")
+    page = auth_env.client.get("/settings")
     assert 'value="None"' not in page.text
     assert _form_value(page.text, "business_name") == ""
     assert _form_value(page.text, "accent") == ""
 
 
-def test_remed_logo_read_410_for_owned_soft_deleted(auth_env):
-    """Codex P2 (4503408270): owned soft-deleted (not expired) logo
-    read -> 410, matching the A8 lifecycle contract on set/clear."""
-    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
-                   data={"business_name": "Acme"}, logo=_png())
-    _expire(auth_env, dd_id, deleted=True)  # deleted AND expired
-    r = auth_env.client.get(f"/reports/{dd_id}/branding/logo")
-    assert r.status_code == 410
-
-
-def test_remed_logo_read_410_after_cleanup_soft_delete(auth_env):
-    """Codex P2 (4503408270): after cleanup_results() soft-deletes an
-    expired report, the owner's logo read is 410, not 404."""
-    from app import credit_maintenance
-    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    _post_branding(auth_env, dd_id, csrf,
-                   data={"business_name": "Acme"}, logo=_png())
-    _expire(auth_env, dd_id)
-    db = auth_env.sessions()
-    try:
-        credit_maintenance.cleanup_results(db)
-    finally:
-        db.close()
-    r = auth_env.client.get(f"/reports/{dd_id}/branding/logo")
-    assert r.status_code == 410
-
-
 def test_remed_branding_forms_use_inpage_auth_form_pattern(auth_env):
-    """Codex P2 (4503408273): both branding forms must be wired to the
-    site's in-page auth-form handler with a success URL back to this
-    report and a status element, so browser submissions never land on
-    a raw JSON page."""
-    _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
-    page = auth_env.client.get(f"/reports/{dd_id}")
+    """Codex P2 (4503408273), surface moved by the 2026-11-16 cleanup:
+    both branding forms (now on Settings) must be wired to the site's
+    in-page auth-form handler with a success URL back to Settings and
+    a status element, so browser submissions never land on a raw JSON
+    page."""
+    _make_deep_dive(auth_env)
+    page = auth_env.client.get("/settings")
     assert page.status_code == 200
-    panel = page.text.split("branding-panel")[1].split("</section>")[0]
+    panel = page.text.split('id="branding-profile"')[1].split(
+        'data-s4-group="purchases"')[0]
     set_form = re.search(
-        r'<form[^>]*action="/reports/%s/branding"[^>]*>' % dd_id, panel)
+        r'<form[^>]*action="/settings/branding"[^>]*>', panel)
     clear_form = re.search(
-        r'<form[^>]*action="/reports/%s/branding/clear"[^>]*>' % dd_id,
-        panel)
+        r'<form[^>]*action="/settings/branding/clear"[^>]*>', panel)
     assert set_form and "data-auth-form" in set_form.group(0)
     assert clear_form and "data-auth-form" in clear_form.group(0)
-    assert f'data-success-url="/reports/{dd_id}"' in set_form.group(0)
-    assert f'data-success-url="/reports/{dd_id}"' in clear_form.group(0)
+    assert 'data-success-url="/settings"' in set_form.group(0)
+    assert 'data-success-url="/settings"' in clear_form.group(0)
     assert 'role="status"' in panel

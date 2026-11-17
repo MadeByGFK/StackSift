@@ -87,8 +87,17 @@ def test_pricing_and_signup_copy_have_no_free_credit_claim():
         assert "10 free credits" not in page
         assert "3 free credits" not in page
         assert "free credits" not in page.lower()
-    # The retirement is stated honestly on the Pricing page (FAQ).
-    assert "new accounts no longer receive signup credits" in pricing
+    # PREMISE CHANGED (Pricing/Report cleanup, founder direction
+    # 2026-11-16): the "What happened to credits?" FAQ — the only
+    # place the honest-retirement sentence ("new accounts no longer
+    # receive signup credits") lived — is REMOVED from Pricing (the
+    # founder was the only credits user). The protective intent of
+    # this test is unchanged and is carried entirely by the absence
+    # assertions above: any free-credit claim reintroduced into
+    # pricing or signup copy fails them. The removed FAQ stays
+    # removed:
+    assert "What happened to credits?" not in pricing
+    assert "Credits are retired" not in pricing
 
 
 def test_pricing_exports_free_framing_not_credit_unlock():

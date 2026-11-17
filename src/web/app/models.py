@@ -881,6 +881,45 @@ class ReportBranding(Base):
     )
 
 
+class AccountBranding(Base):
+    """Pricing/Report cleanup (2026-11-16): ACCOUNT-level branding.
+
+    Supersedes the per-report ``ReportBranding`` surface: branding is
+    managed once on the Settings surface and applies to every paid
+    report PDF the account generates afterwards. Same field shape and
+    the same stored-bytes contract as #163 (``logo_bytes`` holds ONLY
+    the canonical re-encoded bytes from
+    ``app.branding.validate_and_canonicalize_logo``). A row with every
+    field NULL is the CLEARED state: clear retains the row, and the
+    row's existence is what defeats stale stored-PDF replay (the A3
+    rule, re-keyed from report to account). No data was migrated from
+    ``report_branding`` (founder direction 2026-11-16); legacy rows
+    remain governed by the A2 cleanup on their results.
+    """
+
+    __tablename__ = "account_branding"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False)
+    business_name = Column(Text, nullable=True)
+    client_name = Column(Text, nullable=True)
+    report_title = Column(Text, nullable=True)
+    accent = Column(String(7), nullable=True)
+    logo_bytes = Column(sa.LargeBinary, nullable=True)
+    logo_media_type = Column(String(20), nullable=True)
+    logo_sha256 = Column(String(64), nullable=True)
+    logo_width = Column(Integer, nullable=True)
+    logo_height = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_account_branding_user_id"),
+        Index("ix_account_branding_user_id", "user_id", unique=True),
+    )
+
+
 class ReportAction(Base):
     __tablename__ = "report_actions"
 

@@ -298,6 +298,24 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "url": f"{_origin}/s/{_row.raw_token}" if _row.raw_token else None,
             "link_recoverable": bool(_row.raw_token),
         })
+    # Pricing/Report cleanup (2026-11-16): account-level branding
+    # state for the Settings Branding profile group. Nullable row
+    # fields normalize to "" — a partial save or the retained cleared
+    # row must never render the literal string "None" into the form
+    # (the #163 Codex P2 rule, carried to the new surface).
+    from app import models as _bm
+    _brow = (
+        db.query(_bm.AccountBranding)
+        .filter(_bm.AccountBranding.user_id == user.id)
+        .first()
+    )
+    branding_values = {
+        "business_name": (_brow.business_name or "") if _brow else "",
+        "client_name": (_brow.client_name or "") if _brow else "",
+        "report_title": (_brow.report_title or "") if _brow else "",
+        "accent": (_brow.accent or "") if _brow else "",
+        "has_logo": bool(_brow and _brow.logo_bytes),
+    }
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -310,6 +328,7 @@ async def settings_page(request: Request, db: DBSession = Depends(get_db)):
             "linked_providers": linked_providers,
             "product_purchases": product_purchases,
             "share_links": share_links,
+            "branding_values": branding_values,
         },
     )
 
