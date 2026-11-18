@@ -76,6 +76,21 @@
   .modal-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:420px;width:90%}
   .modal-card p{margin:0 0 14px}
   .modal-card input[type=text]{width:100%;box-sizing:border-box;margin-bottom:8px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:inherit;font-size:13px}
+  /* Issue #142a remediation (PR #194, Codex P2): this page is
+     self-styled (it does not load style.css), but it includes
+     auth_form_script.html, whose success/error modals now use the
+     shared modal classes. Mirror the style.css definitions here —
+     same converged-exception pattern as .modal-card above — so a
+     PDF export failure renders as a fixed overlay on My Reports,
+     not as unpositioned in-flow content. Values identical to
+     style.css. */
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50}
+  .modal-overlay-top{background:rgba(0,0,0,.7);z-index:9999;padding:1rem}
+  .modal-title{font-size:1.1rem;font-weight:600;margin:0 0 .75rem}
+  .modal-btn-block{display:block;width:100%;padding:.65rem;border-radius:8px;border:1px solid transparent;font:inherit;font-weight:700;cursor:pointer}
+  .btn-primary.modal-btn-block{border-color:transparent}
+  .btn-ghost.modal-btn-block{border-color:var(--border)}
+  .modal-lead{font-size:1.05rem}
 
   /* Pagination */
   .pager{display:flex;align-items:center;justify-content:space-between;margin-top:28px}

@@ -49,6 +49,30 @@ def test_shared_modal_classes_defined_once_in_shared_stylesheet():
     assert ".modal-btn-block {" in CSS
 
 
+def test_shared_modal_block_sits_outside_every_170_scoped_slice():
+    """PR #194 remediation: the #170 scope tests slice style.css by
+    section markers (S3->S2, S2->S4, S4->EOF). The unscoped shared
+    modal block must sit BEFORE the first scoped block, or it lands
+    inside a neighbour's slice and fails its scope guard — exactly
+    the CI failure on 214935f (test_s2_css_block_is_analyze_scoped:
+    unscoped selector '.btn-small' in the S2 slice)."""
+    assert CSS.index("Issue #142a") < CSS.index("Issue #170 S1")
+
+
+def test_reports_page_defines_the_shared_modal_classes_it_uses():
+    """PR #194 remediation (Codex P2): reports.html is self-styled
+    (no style.css link) but includes auth_form_script.html, whose
+    success/error modals use the shared classes. The page's own
+    sheet must define every one of them, or a PDF export failure
+    renders in-flow instead of as a fixed overlay."""
+    for needle in (".modal-overlay{position:fixed;inset:0;",
+                   ".modal-overlay-top{",
+                   ".modal-title{",
+                   ".modal-btn-block{display:block;",
+                   ".modal-lead{"):
+        assert needle in REPORTS, needle
+
+
 def test_report_page_modals_use_shared_classes_not_inline_styles():
     assert 'id="analysis-modal" class="modal-overlay"' in REPORT
     assert 'id="share-modal" class="modal-overlay"' in REPORT

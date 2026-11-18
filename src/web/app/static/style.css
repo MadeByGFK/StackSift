@@ -250,6 +250,40 @@ table.issues tr:last-child td { border-bottom: none; }
    so the page needs no inline styles under its CSP. Dynamic chart
    dimensions are NOT here — they arrive in the page's nonced style
    block as generated ss-dyn-* rules. */
+/* ---- Issue #142a: shared modal system + .btn-small base ----
+   One modal treatment for every popup on the style.css pages.
+   .btn-small previously existed ONLY inside settings.html's own
+   <style> block, so on every other page (report, redemption-only,
+   compare/batch reports, signup) the class had no base rule and
+   modal buttons rendered as browser defaults — the founder's
+   2026-11-04 screenshot. The base rule below adopts the settings
+   definition verbatim. Modal values converge on the My Reports
+   .modal-card precedent (panel / border / 10px / 20px / 420px);
+   reports.html is self-styled by house pattern and carries the
+   same values in its own sheet. Overlay visibility stays with the
+   existing JS (inline display none/flex toggles), so .modal-overlay
+   deliberately sets no display property.
+   PLACEMENT (PR #194 remediation, 2026-11-18): this block sits BEFORE
+   the Issue #170 scoped blocks, never between them — the S3 test
+   slices S3->S2, the S2 test slices S2->S4, and the S4 test slices
+   S4->EOF, so an unscoped shared block between any two scoped
+   markers lands inside a neighbour's slice and fails its scope
+   guard (CI on 214935f: test_s2_css_block_is_analyze_scoped). */
+.btn-small { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: #fff; cursor: pointer; font-size: 0.85rem; font-family: inherit; }
+.btn-small.btn-primary { background: var(--accent); color: #0a1830; border-color: transparent; font-weight: 700; }
+.btn-small.btn-ghost { background: transparent; color: var(--text); }
+a.btn-small { display: inline-block; text-decoration: none; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); align-items: center; justify-content: center; z-index: 50; }
+.modal-overlay-top { background: rgba(0,0,0,.7); z-index: 9999; padding: 1rem; }
+.modal-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; max-width: 420px; width: 90%; }
+.modal-card p { margin: 0 0 14px; }
+.modal-card input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.modal-title { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.75rem; }
+.modal-btn-block { display: block; width: 100%; padding: 0.65rem; border-radius: 8px; border: 1px solid transparent; font: inherit; font-weight: 700; cursor: pointer; }
+.btn-primary.modal-btn-block { border-color: transparent; }
+.btn-ghost.modal-btn-block { border-color: var(--border); }
+.modal-lead { font-size: 1.05rem; }
+
 /* ---- Issue #170 S1 (Report surface design alignment) ----
    Every rule in this block is scoped to the Report surface via the
    .s1- prefix (A7): style.css is shared by 20 templates, and no S1
@@ -450,34 +484,6 @@ table.issues tr:last-child td { border-bottom: none; }
 .s2-entry-link { display: block; color: var(--accent); font-weight: 600; font-size: 14px; margin-top: 12px; }
 .s2-panel { border-top: 3px solid var(--accent); }
 section.s2-panel { background: var(--panel); border: 1px solid var(--border); border-top: 3px solid var(--accent); border-radius: var(--radius); padding: 24px; margin-top: 26px; }
-/* ---- Issue #142a: shared modal system + .btn-small base ----
-   One modal treatment for every popup on the style.css pages.
-   .btn-small previously existed ONLY inside settings.html's own
-   <style> block, so on every other page (report, redemption-only,
-   compare/batch reports, signup) the class had no base rule and
-   modal buttons rendered as browser defaults — the founder's
-   2026-11-04 screenshot. The base rule below adopts the settings
-   definition verbatim. Modal values converge on the My Reports
-   .modal-card precedent (panel / border / 10px / 20px / 420px);
-   reports.html is self-styled by house pattern and carries the
-   same values in its own sheet. Overlay visibility stays with the
-   existing JS (inline display none/flex toggles), so .modal-overlay
-   deliberately sets no display property. */
-.btn-small { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: #fff; cursor: pointer; font-size: 0.85rem; font-family: inherit; }
-.btn-small.btn-primary { background: var(--accent); color: #0a1830; border-color: transparent; font-weight: 700; }
-.btn-small.btn-ghost { background: transparent; color: var(--text); }
-a.btn-small { display: inline-block; text-decoration: none; }
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); align-items: center; justify-content: center; z-index: 50; }
-.modal-overlay-top { background: rgba(0,0,0,.7); z-index: 9999; padding: 1rem; }
-.modal-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; max-width: 420px; width: 90%; }
-.modal-card p { margin: 0 0 14px; }
-.modal-card input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
-.modal-title { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.75rem; }
-.modal-btn-block { display: block; width: 100%; padding: 0.65rem; border-radius: 8px; border: 1px solid transparent; font: inherit; font-weight: 700; cursor: pointer; }
-.btn-primary.modal-btn-block { border-color: transparent; }
-.btn-ghost.modal-btn-block { border-color: var(--border); }
-.modal-lead { font-size: 1.05rem; }
-
 /* ---- Issue #170 S4 (Settings surface design alignment) ----
    Every rule in this block is scoped to the Settings surface: all
    selectors carry the .s4- prefix, and .s4-group / .s4-settings exist
