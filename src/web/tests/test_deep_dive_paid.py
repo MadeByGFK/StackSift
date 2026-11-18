@@ -472,7 +472,10 @@ def test_reports_list_rows_have_no_extend_after_phase_c_removal(auth_env):
         # derived report). (Label premise changed 2026-11-10,
         # PR #177 S3-G1/rename: "View" -> "Open", "Analysis" ->
         # "Investigation Report".)
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
+        # PREMISE CHANGED (issue #142, 2026-11-18): the Open control is
+        # removed — the card itself opens the report and the report
+        # name carries the row's link, so rows key on the name link.
+        view_link = f'class="s3-name-link" href="/reports/{report_id}"'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]

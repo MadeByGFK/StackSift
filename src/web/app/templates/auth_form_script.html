@@ -69,19 +69,20 @@ function showSuccessModal(message, url) {
   if (old) old.remove();
   const overlay = document.createElement('div');
   overlay.id = 'success-modal';
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;';
+  overlay.className = 'modal-overlay modal-overlay-top';
+  overlay.style.display = 'flex';
   const card = document.createElement('div');
-  card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
+  card.className = 'modal-card';
   card.setAttribute('role', 'alertdialog');
   card.setAttribute('aria-label', message);
   const msg = document.createElement('p');
-  msg.style.cssText = 'margin:0 0 1rem 0;font-size:1.05rem;';
+  msg.className = 'modal-lead';
   msg.textContent = message;
   card.appendChild(msg);
   const ok = document.createElement('button');
   ok.type = 'button';
   ok.textContent = 'OK';
-  ok.style.cssText = 'display:block;width:100%;padding:0.7rem;background:var(--accent);color:#1a1a2e;font-weight:700;border-radius:8px;border:none;cursor:pointer;font:inherit;';
+  ok.className = 'btn-primary modal-btn-block';
   card.appendChild(ok);
   overlay.appendChild(card);
   document.body.appendChild(overlay);
@@ -137,9 +138,10 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           if (old) old.remove();
           const modal = document.createElement('div');
           modal.id = 'error-modal';
-          modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;';
+          modal.className = 'modal-overlay modal-overlay-top';
+          modal.style.display = 'flex';
           const card = document.createElement('div');
-          card.style.cssText = 'background:#1e2a4a;border:1px solid #2d3d6b;border-radius:12px;padding:2rem;max-width:400px;width:100%;color:#fff;';
+          card.className = 'modal-card';
           // Issue #164 Phase C: exports are free — the PDF error
           // modal has no insufficient-credits state and no
           // buy-credits handoff (the pack modal is retired). The
@@ -148,15 +150,16 @@ for (const form of document.querySelectorAll('form[data-auth-form]')) {
           // 409 generation fence or an expired artifact's 410 must
           // stay visible to the user.
           const title = document.createElement('div');
-          title.style.cssText = 'font-size:1.1rem;font-weight:600;margin:0 0 0.75rem 0;';
+          title.className = 'modal-title';
           title.textContent = 'Export Failed';
           card.appendChild(title);
           const msg = document.createElement('p');
-          msg.style.cssText = 'margin:0 0 1rem 0;color:#9db1cc;';
+          msg.style.color = 'var(--muted)';
           msg.textContent = error;
           card.appendChild(msg);
           const close = document.createElement('button');
-          close.style.cssText = 'width:100%;margin-top:1rem;padding:0.6rem;background:#2d3d6b;border:none;color:#fff;border-radius:8px;cursor:pointer;';
+          close.className = 'btn-ghost modal-btn-block';
+          close.style.marginTop = '1rem';
           close.textContent = 'Close';
           close.addEventListener('click', () => modal.remove());
           card.appendChild(close);

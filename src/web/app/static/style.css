@@ -174,7 +174,8 @@ footer a { color: var(--muted); }
 
 /* ---- report page ---- */
 .report-head { padding: 34px 0 6px; }
-.report-head h2 { margin: 0 0 4px; font-size: 26px; word-break: break-all; }
+.report-head h2 { margin: 0 0 4px; font-size: 26px; color: var(--text); overflow-wrap: anywhere; }
+@media (max-width: 640px) { .report-head h2 { font-size: 22px; } }
 .report-head .meta { color: var(--muted); font-size: 14px; }
 
 .badge {
@@ -449,6 +450,34 @@ table.issues tr:last-child td { border-bottom: none; }
 .s2-entry-link { display: block; color: var(--accent); font-weight: 600; font-size: 14px; margin-top: 12px; }
 .s2-panel { border-top: 3px solid var(--accent); }
 section.s2-panel { background: var(--panel); border: 1px solid var(--border); border-top: 3px solid var(--accent); border-radius: var(--radius); padding: 24px; margin-top: 26px; }
+/* ---- Issue #142a: shared modal system + .btn-small base ----
+   One modal treatment for every popup on the style.css pages.
+   .btn-small previously existed ONLY inside settings.html's own
+   <style> block, so on every other page (report, redemption-only,
+   compare/batch reports, signup) the class had no base rule and
+   modal buttons rendered as browser defaults — the founder's
+   2026-11-04 screenshot. The base rule below adopts the settings
+   definition verbatim. Modal values converge on the My Reports
+   .modal-card precedent (panel / border / 10px / 20px / 420px);
+   reports.html is self-styled by house pattern and carries the
+   same values in its own sheet. Overlay visibility stays with the
+   existing JS (inline display none/flex toggles), so .modal-overlay
+   deliberately sets no display property. */
+.btn-small { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: #fff; cursor: pointer; font-size: 0.85rem; font-family: inherit; }
+.btn-small.btn-primary { background: var(--accent); color: #0a1830; border-color: transparent; font-weight: 700; }
+.btn-small.btn-ghost { background: transparent; color: var(--text); }
+a.btn-small { display: inline-block; text-decoration: none; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); align-items: center; justify-content: center; z-index: 50; }
+.modal-overlay-top { background: rgba(0,0,0,.7); z-index: 9999; padding: 1rem; }
+.modal-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; max-width: 420px; width: 90%; }
+.modal-card p { margin: 0 0 14px; }
+.modal-card input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.modal-title { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.75rem; }
+.modal-btn-block { display: block; width: 100%; padding: 0.65rem; border-radius: 8px; border: 1px solid transparent; font: inherit; font-weight: 700; cursor: pointer; }
+.btn-primary.modal-btn-block { border-color: transparent; }
+.btn-ghost.modal-btn-block { border-color: var(--border); }
+.modal-lead { font-size: 1.05rem; }
+
 /* ---- Issue #170 S4 (Settings surface design alignment) ----
    Every rule in this block is scoped to the Settings surface: all
    selectors carry the .s4- prefix, and .s4-group / .s4-settings exist
@@ -465,4 +494,3 @@ section.s2-panel { background: var(--panel); border: 1px solid var(--border); bo
 .s4-section-label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
 .s4-section-aside { margin-left: auto; color: var(--muted); font-size: 12px; }
 .s4-group .btn-small:hover { border-color: var(--accent); }
-
