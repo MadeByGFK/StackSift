@@ -161,6 +161,29 @@ def test_link_serves_only_its_own_format(paid_env):
     assert resp.status_code == 404, resp.text[:200]
 
 
+def test_pdf_share_follows_branding_replay_policy(paid_env):
+    """Codex P2 on PR #197: a branding row defeats stored-PDF replay
+    on the owner's route — the share must follow the same policy, or
+    it keeps serving the pre-branding PDF forever."""
+    env = paid_env
+    _uid, csrf, _src, dd = _setup_deep_dive(env)
+    own = env.client.post(f"/reports/{dd}/pdf", data={"csrf_token": csrf})
+    assert own.status_code == 200 and own.content[:5] == b"%PDF-"
+    token = _token_from(_create(env, dd, csrf, "145-brand", "pdf"))
+    first = _serve(token)
+    assert first.status_code == 200, first.text[:200]
+    assert first.content == own.content  # stored replay (no branding row)
+    r = env.client.post("/settings/branding", data={
+        "csrf_token": csrf, "business_name": "Acme Consulting",
+        "report_title": "", "client_name": "", "accent": ""})
+    assert r.status_code in (200, 303), r.text[:300]
+    second = _serve(token)
+    assert second.status_code == 200, second.text[:200]
+    assert second.content != first.content
+    from test_issue162_brief import _pdf_text
+    assert "Acme Consulting" in _pdf_text(second.content)
+
+
 # --- the identical-unavailable family ------------------------------------------
 
 def test_revoked_and_unknown_and_foreign(paid_env):

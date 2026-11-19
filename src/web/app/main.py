@@ -6589,7 +6589,16 @@ def _share_file_response(db, token, sharing, result, payload, share_format):
                         media_type=_se.MEDIA_TYPES[share_format],
                         headers=headers)
     if share_format == "pdf":
-        pdf = _ra.find_shareable_pdf(db, result)
+        # Issue #145 (Codex P2 on PR #197): for a deep_dive result, the
+        # owner's branding replay policy applies to shares too — ANY
+        # account-branding row (set OR cleared-state) defeats stored
+        # replay, exactly as on the owner's /pdf route, so a share can
+        # never keep serving a PDF with an obsolete client name, logo,
+        # or report title after the owner's download has changed.
+        pdf = None
+        if not (result.type == "deep_dive"
+                and _account_branding_row_for(db, result.user_id) is not None):
+            pdf = _ra.find_shareable_pdf(db, result)
         if pdf is None and result.type == "deep_dive":
             # Issue #145: an Investigation Report's PDF is regenerable
             # on the owner's own terms (exports are free for the paid
