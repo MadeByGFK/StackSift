@@ -501,3 +501,27 @@ section.s2-panel { background: var(--panel); border: 1px solid var(--border); bo
 .s4-section-label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
 .s4-section-aside { margin-left: auto; color: var(--muted); font-size: 12px; }
 .s4-group .btn-small:hover { border-color: var(--accent); }
+
+/* #142b: Branding profile port (Settings group 02) — .s4b- scoped. */
+.s4b-head { margin: 0 0 4px; }
+.s4b-field-row { display: grid; grid-template-columns: 200px 1fr; gap: 16px; align-items: start; padding: 15px 0; border-bottom: 1px solid var(--border); border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
+#branding-form .s4b-field-row:last-of-type { border-bottom: none; }
+.s4b-field-label { font-size: 11px; font-weight: 600; color: var(--text); padding-top: 9px; }
+.s4b-sub { display: block; font-size: 9px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+.s4b-text-input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px; font-size: 12px; color: var(--text); width: 100%; max-width: 380px; box-sizing: border-box; }
+.s4b-text-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(227, 167, 47, .22); }
+.s4b-swatch-row { display: flex; align-items: center; gap: 10px; }
+.s4b-swatch { width: 32px; height: 32px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }
+.s4b-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.s4b-swatch::-webkit-color-swatch { border: none; border-radius: 4px; }
+.s4b-swatch::-moz-color-swatch { border: none; border-radius: 4px; }
+.s4b-hex { font-family: var(--font-code); max-width: 180px; }
+.s4b-field-error { color: #ff9d9d; font-size: 12px; margin: 6px 0 0; }
+.s4b-drop { display: block; border: 1.5px dashed var(--border); border-radius: 8px; padding: 18px; text-align: center; font-size: 10px; color: var(--muted); cursor: pointer; max-width: 380px; box-sizing: border-box; }
+.s4b-drop:hover, .s4b-drop-over { border-color: var(--accent); }
+.s4b-file { position: absolute; opacity: 0; width: 1px; height: 1px; overflow: hidden; }
+.s4b-file-name { font-size: 12px; color: var(--text); margin: 6px 0 0; }
+.s4b-remove { display: block; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.s4b-group-note { font-size: 10px; color: var(--muted); margin: 14px 0 0; }
+.s4b-save-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.s4b-save-row .btn-ghost { margin-left: auto; }
