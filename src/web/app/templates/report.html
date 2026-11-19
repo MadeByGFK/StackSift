@@ -139,8 +139,8 @@
           {% endif %}
           <button type="button" class="s1-chip" id="share-btn">Share</button>
 
-      <div id="analysis-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
-        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
+      <div id="analysis-modal" class="modal-overlay" style="display:none">
+        <div class="modal-card">
           {% if analysis_eligible %}
           {% if product_ready is defined and not product_ready and not (entitlement_available is defined and entitlement_available) %}
           {# Issue #164 (P2-3): fail-closed display state — no live
@@ -149,29 +149,29 @@
              purchases — a viewer holding an available entitlement
              falls through to the Generate/Confirm action below,
              because redemption needs no Price. #}
-          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report: <span class="pack-soon">Coming soon</span> — purchases are not available yet. Please check back later.</p>
+          <p id="analysis-msg">Investigation Report: <span class="pack-soon">Coming soon</span> — purchases are not available yet. Please check back later.</p>
           {% else %}
           {% if entitlement_available is defined and entitlement_available %}
-          <p id="analysis-msg" style="margin:0 0 12px">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
+          <p id="analysis-msg">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment. If generation fails, your purchase is never consumed — you can retry.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}</p>
           {% else %}
-          <p id="analysis-msg" style="margin:0 0 12px">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. You pay by card at checkout. If we can't generate your report, your purchase isn't used up — you can try again. If a purchase can never be used, we'll refund it — email disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Investigation Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
+          <p id="analysis-msg">Investigation Report costs $9, paid by card at checkout. Exports and branding are included, and the report is kept for 90 days. You pay by card at checkout. If we can't generate your report, your purchase isn't used up — you can try again. If a purchase can never be used, we'll refund it — email disputes@goodfolkdigital.com.{% if redemption_deadline is defined and redemption_deadline %} Redeem by {{ redemption_deadline }} (the source report's expiry plus 30 days).{% endif %}{% if analysis_prior_exists %} A previous Investigation Report exists for this report. Generating a new Investigation Report is a new $9 purchase.{% endif %}</p>
           {% endif %}
           <div id="analysis-link-row" style="display:none;margin-bottom:12px">
-            <a class="btn-small" id="analysis-view" href="#">View Investigation Report</a>
+            <a class="btn-small btn-ghost" id="analysis-view" href="#">View Investigation Report</a>
           </div>
-          <button type="button" class="btn-small" id="analysis-confirm">Generate Investigation Report</button>
+          <button type="button" class="btn-small btn-primary" id="analysis-confirm">Generate Investigation Report</button>
           {% endif %}
           {% else %}
-          <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
+          <p id="analysis-msg">{{ analysis_reason }}</p>
           {% endif %}
-          <button type="button" class="btn-small" id="analysis-close">Cancel</button>
+          <button type="button" class="btn-small btn-ghost" id="analysis-close">Cancel</button>
         </div>
       </div>
 
-      <div id="share-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50">
-        <div style="background:var(--panel,#10254a);border:1px solid var(--border,#274067);border-radius:10px;padding:20px;max-width:420px;width:90%">
+      <div id="share-modal" class="modal-overlay" style="display:none">
+        <div class="modal-card">
           {% set share_txt_active = share_formats is defined and share_formats and 'txt' in share_formats %}
-          <p id="share-msg" style="margin:0 0 12px">{% if share_txt_active %}Sharing is on for this report.{% endif %}</p>
+          <p id="share-msg">{% if share_txt_active %}Sharing is on for this report.{% endif %}</p>
           {# Issue #135: format choice — TXT is free; PDF/JSON/CSV are
              locked until the report's 2-credit export unlock (#129).
              Choosing a locked format is refused by the server (402)
@@ -185,17 +185,17 @@
           </fieldset>
           <div id="share-link-row" style="display:none;margin-bottom:12px">
             <input type="text" id="share-link" readonly style="width:100%;box-sizing:border-box;margin-bottom:8px">
-            <button type="button" class="btn-small" id="share-copy">Copy link</button>
-            <a class="btn-small" id="share-mailto" href="mailto:">Open in email</a>
+            <button type="button" class="btn-small btn-ghost" id="share-copy">Copy link</button>
+            <a class="btn-small btn-ghost" id="share-mailto" href="mailto:">Open in email</a>
           </div>
           {# PR #132 follow-up (P2): ALL share controls are always
              rendered; visibility follows the share state so a link
              created in this popup can be rotated/revoked (and a
              revoked one re-created) without a page reload. #}
-          <button type="button" class="btn-small" id="share-create"{% if share_txt_active %} style="display:none"{% endif %}>Create share link</button>
-          <button type="button" class="btn-small" id="share-rotate"{% if not share_txt_active %} style="display:none"{% endif %}>Rotate link</button>
-          <button type="button" class="btn-small" id="share-revoke"{% if not share_txt_active %} style="display:none"{% endif %}>Revoke link</button>
-          <button type="button" class="btn-small" id="share-close">Close</button>
+          <button type="button" class="btn-small btn-primary" id="share-create"{% if share_txt_active %} style="display:none"{% endif %}>Create share link</button>
+          <button type="button" class="btn-small btn-ghost" id="share-rotate"{% if not share_txt_active %} style="display:none"{% endif %}>Rotate link</button>
+          <button type="button" class="btn-small btn-ghost" id="share-revoke"{% if not share_txt_active %} style="display:none"{% endif %}>Revoke link</button>
+          <button type="button" class="btn-small btn-ghost" id="share-close">Close</button>
         </div>
       </div>
 

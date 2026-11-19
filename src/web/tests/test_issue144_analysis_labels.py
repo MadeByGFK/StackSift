@@ -67,7 +67,9 @@ def _cards(page_text):
     cards = {}
     for chunk in table.split('<tr class="card s3-row">')[1:]:
         card = chunk
-        m = re.search(r'href="/reports/([0-9a-f-]{36})" class="btn btn-ghost">Open', card)
+        # PREMISE CHANGED (issue #142, 2026-11-18): the Open control
+        # is removed; the id is read from the report name link.
+        m = re.search(r'class="s3-name-link" href="/reports/([0-9a-f-]{36})"', card)
         assert m, card[:200]
         cards[m.group(1)] = card
     return cards

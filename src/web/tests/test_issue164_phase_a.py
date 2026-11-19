@@ -2359,7 +2359,10 @@ def test_r4_expired_source_with_live_entitlement_gets_redemption_only_page(p164_
     assert page.status_code == 200, page.text[:300]
     assert 'data-redemption-only="1"' in page.text
     assert 'id="analysis-confirm"' in page.text
-    assert "Generate Analysis Report" in page.text
+    # PREMISE CHANGED (issue #142, 2026-11-18): the redemption-only
+    # page's button carries the ruled deliverable name (founder
+    # naming ruling 2026-11-09 retired "Analysis Report").
+    assert "Generate Investigation Report" in page.text
     # NO report payload / viewing on the redemption-only surface.
     assert "failed to connect to db" not in page.text
     assert "Total lines" not in page.text

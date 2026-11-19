@@ -76,6 +76,21 @@
   .modal-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:420px;width:90%}
   .modal-card p{margin:0 0 14px}
   .modal-card input[type=text]{width:100%;box-sizing:border-box;margin-bottom:8px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:inherit;font-size:13px}
+  /* Issue #142a remediation (PR #194, Codex P2): this page is
+     self-styled (it does not load style.css), but it includes
+     auth_form_script.html, whose success/error modals now use the
+     shared modal classes. Mirror the style.css definitions here —
+     same converged-exception pattern as .modal-card above — so a
+     PDF export failure renders as a fixed overlay on My Reports,
+     not as unpositioned in-flow content. Values identical to
+     style.css. */
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;z-index:50}
+  .modal-overlay-top{background:rgba(0,0,0,.7);z-index:9999;padding:1rem}
+  .modal-title{font-size:1.1rem;font-weight:600;margin:0 0 .75rem}
+  .modal-btn-block{display:block;width:100%;padding:.65rem;border-radius:8px;border:1px solid transparent;font:inherit;font-weight:700;cursor:pointer}
+  .btn-primary.modal-btn-block{border-color:transparent}
+  .btn-ghost.modal-btn-block{border-color:var(--border)}
+  .modal-lead{font-size:1.05rem}
 
   /* Pagination */
   .pager{display:flex;align-items:center;justify-content:space-between;margin-top:28px}
@@ -154,6 +169,14 @@
   .s3-table tbody tr.s3-actions-tr:last-child td{border-bottom:none}
   .s3-report-sub{color:var(--muted);font-size:13px;margin-top:2px;font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
   .s3-actions-cell .actions{flex-wrap:wrap}
+  .s3-name-link{color:inherit;text-decoration:none}
+  .s3-name-link:hover{color:var(--accent);text-decoration:underline}
+  .s3-table tbody tr.card{cursor:pointer}
+  @media (max-width:640px){
+    .s3-report-main .name{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+    .s3-actions-row{gap:6px}
+    .s3-actions-row .btn{height:32px;padding:0 10px;font-size:13px}
+  }
   .s3-empty{border-top:3px solid var(--accent)}
   .s3-entry-card{display:block;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:20px;text-decoration:none;color:var(--text);margin:28px 0 0}
   .s3-entry-card:hover{border-color:var(--accent)}
@@ -248,7 +271,7 @@
         {% if report.type == 'deep_dive' %}
         <div class="kind-title">Investigation Report</div>
         {% endif %}
-        <div class="name">{{ report.filename }}</div>
+        <div class="name"><a class="s3-name-link" href="/reports/{{ report.id }}">{{ report.filename }}</a></div>
         {# Fidelity S3-C1 (rides S1-C2): subline = SS-ID + honest
            format label, each only when the row carries it. #}
         {% if report.ss_id or report.format_label %}<div class="s3-report-sub" data-s3-report-sub>{{ report.ss_id or '' }}{% if report.ss_id and report.format_label %} · {% endif %}{{ report.format_label or '' }}</div>{% endif %}
@@ -290,8 +313,10 @@
            panel, not as direct row controls. Every row control is
            uniformly quiet (btn-ghost). No "Free" tag (S3-R2: staged
            until #164 Phase C). Row order: Open / Export /
-           Investigation Report / Share / Extend. #}
-        <a href="/reports/{{ report.id }}" class="btn btn-ghost">Open</a>
+           Investigation Report / Share / Extend. (Issue #142,
+           2026-11-18: the Open control is removed — the card
+           itself opens the report; order is now Export /
+           Investigation Report / Share / Extend.) #}
         {% if not report.redemption_only %}
         <div class="s3-export">
           <button type="button" class="btn btn-ghost s3-export-btn" aria-haspopup="true" aria-expanded="false" data-s3-export-btn>Export <span class="s3-caret" aria-hidden="true">▾</span></button>
@@ -984,5 +1009,21 @@
 
 {% include 'auth_form_script.html' %}
 {% include 'nav_script.html' %}
+<script>
+  // Issue #142 item 2: the card itself opens the report (the Open
+  // control is removed). Clicks on any interactive element inside
+  // the card row (the share-state Turn off button, links) keep their
+  // own behavior and never navigate.
+  (function () {
+    var table = document.querySelector('.s3-table');
+    if (!table) return;
+    table.addEventListener('click', function (e) {
+      if (e.target.closest('a, button, input, select, textarea, label')) return;
+      var row = e.target.closest('tr.card');
+      var link = row && row.querySelector('.s3-name-link');
+      if (link) window.location.href = link.getAttribute('href');
+    });
+  })();
+</script>
 </body>
 </html>

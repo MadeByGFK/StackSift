@@ -146,7 +146,10 @@ def _card_for(page_text, report_id):
     cards = page_text.split('<tr class="card s3-row">')
     # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1): the
     # row's own link is labelled "Open", not "View".
-    view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
+    # PREMISE CHANGED (issue #142, 2026-11-18): the Open control is
+    # removed — the card itself opens the report and the report
+    # name carries the row's link, so rows key on the name link.
+    view_link = f'class="s3-name-link" href="/reports/{report_id}"'
     matches = [c for c in cards if view_link in c]
     assert len(matches) == 1, report_id
     return matches[0]
