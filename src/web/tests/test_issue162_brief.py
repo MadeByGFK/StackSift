@@ -907,6 +907,10 @@ def test_route_failed_first_export_charges_zero_unlock_intact(
 
 
 def test_route_deep_dive_share_and_extend_stay_unsupported(auth_env):
+    # PREMISE CHANGED (#145, 2026-11-19): share is now SUPPORTED for
+    # deep_dive (share-only ruling — free, all formats included);
+    # retention extension stays unsupported (no extension product).
+    # Test name kept for history.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     analysis_id = gen.json()["analysis_result_id"]
@@ -914,21 +918,24 @@ def test_route_deep_dive_share_and_extend_stay_unsupported(auth_env):
     share = auth_env.client.post(
         f"/reports/{analysis_id}/share",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
-    assert share.status_code in (404, 422)
+    assert share.status_code == 200, share.text[:300]
     extend = auth_env.client.post(
         f"/reports/{analysis_id}/retention",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
     assert extend.status_code in (404, 422)
     assert _balance(auth_env, user_id) == before
-    # Sharing the STANDARD SOURCE does not share its Analysis Report.
+    # Sharing the STANDARD SOURCE does not share its Analysis Report:
+    # each report's link is its own (the deep-dive create above made
+    # exactly one row, for the deep-dive result only).
     src_share = auth_env.client.post(
         f"/reports/{rid}/share",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
     assert src_share.status_code == 200
-    share2 = auth_env.client.post(
-        f"/reports/{analysis_id}/share",
-        data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
-    assert share2.status_code in (404, 422)
+    from app import models as _M
+    with auth_env.sessions() as db:
+        rows = db.query(_M.ReportSharing).all()
+    assert sorted(str(r.result_id) for r in rows) == sorted(
+        [str(analysis_id), str(rid)])
     assert _balance(auth_env, user_id) == before
 
 

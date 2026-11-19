@@ -123,7 +123,10 @@ def test_s2_entry_cards_link_existing_routes_without_price_text():
 def test_s2_info_cards_restyled_as_panels():
     html = _render_index()
     assert '<div class="info-grid s2-panels">' in html
-    assert html.count('class="card s2-panel"') == 4
+    # PREMISE CHANGED (home-page slice, founder decision 2026-11-18):
+    # the "Private by design" card was consolidated into the Privacy
+    # notice, so the grid carries 3 cards, not 4.
+    assert html.count('class="card s2-panel"') == 3
     assert '<div class="privacy-notice s2-panel">' in html
 
 
@@ -242,10 +245,14 @@ def test_s2_live_copy_verbatim_and_rejected_framings_absent():
         "Uploads may be temporarily written to disk before redaction",
         "Redaction may miss sensitive data. Review your log before "
         "uploading.",
-        "Supported formats", "Private by design",
-        "Recognized secret patterns are <strong>redacted</strong> "
-        "before analysis; other sensitive data may appear in reports.",
+        "Supported formats",
+        # PREMISE CHANGED (home-page slice, founder decision 2026-11-18):
+        # the "Private by design" card was consolidated into the Privacy
+        # notice — its facts (7-day retention, no training use, session
+        # cookie) now live there; the duplicate card is gone by design.
         "Analysis reports are <strong>stored for 7 days</strong>",
+        "don't use uploads for training",
+        "<strong>session cookie</strong> to stay signed in",
         "What you get", "Built by someone on-call",
         "It's the first five minutes of an incident, automated.",
     ):

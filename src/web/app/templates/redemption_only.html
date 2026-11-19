@@ -40,9 +40,9 @@
       {% if analysis_eligible %}
       <p id="analysis-msg" style="margin:0 0 12px">You hold an unused entitlement for this report's Investigation Report. Generate it now — generation uses your entitlement and needs no further payment.</p>
       <div id="analysis-link-row" style="display:none;margin-bottom:12px">
-        <a class="btn-small" id="analysis-view" href="#">View Analysis Report</a>
+        <a class="btn-small btn-ghost" id="analysis-view" href="#">View Investigation Report</a>
       </div>
-      <button type="button" class="btn-small" id="analysis-confirm">Generate Analysis Report</button>
+      <button type="button" class="btn-small btn-primary" id="analysis-confirm">Generate Investigation Report</button>
       {% else %}
       <p id="analysis-msg" style="margin:0 0 12px">{{ analysis_reason }}</p>
       {% endif %}

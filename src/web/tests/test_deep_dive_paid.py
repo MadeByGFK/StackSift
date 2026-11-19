@@ -472,7 +472,10 @@ def test_reports_list_rows_have_no_extend_after_phase_c_removal(auth_env):
         # derived report). (Label premise changed 2026-11-10,
         # PR #177 S3-G1/rename: "View" -> "Open", "Analysis" ->
         # "Investigation Report".)
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
+        # PREMISE CHANGED (issue #142, 2026-11-18): the Open control is
+        # removed — the card itself opens the report and the report
+        # name carries the row's link, so rows key on the name link.
+        view_link = f'class="s3-name-link" href="/reports/{report_id}"'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]
@@ -533,14 +536,21 @@ def test_share_times_analysis_share_stays_free_and_separate(auth_env):
     # PREMISE CHANGED (#164): generation is the $9 entitlement —
     # the credit balance is untouched by it.
     assert _balance(auth_env, user_id) == before
-    # The Analysis Report itself is not shareable through the
-    # single-file share path (fails closed, still no charge).
+    # PREMISE CHANGED (#145, 2026-11-19): the Analysis Report IS
+    # shareable now (share-only ruling) — still free, and its link
+    # stays SEPARATE from the source report's link (one row each,
+    # keyed to its own result).
     analysis_id = gen.json()["analysis_result_id"]
     share2 = auth_env.client.post(
         f"/reports/{analysis_id}/share",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
-    assert share2.status_code in (404, 422)
+    assert share2.status_code == 200, share2.text[:300]
     assert _balance(auth_env, user_id) == before
+    from app import models as _M
+    with auth_env.sessions() as db:
+        rows = db.query(_M.ReportSharing).all()
+    assert sorted(str(r.result_id) for r in rows) == sorted(
+        [str(rid), str(analysis_id)])
 
 
 def test_retention_times_analysis_source_extension_leaves_artifact(auth_env):

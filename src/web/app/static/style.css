@@ -147,6 +147,7 @@ button {
 }
 
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 40px 0; }
+.info-grid > * { min-width: 0; }
 @media (max-width: 640px) { .info-grid { grid-template-columns: 1fr; } }
 .card {
   background: var(--panel); border: 1px solid var(--border);
@@ -163,7 +164,7 @@ code {
 pre.format {
   background: #081426; border: 1px solid var(--border); border-radius: 8px;
   padding: 14px; font-size: 13px; overflow-x: auto; color: var(--text);
-  font-family: var(--font-code);
+  font-family: var(--font-code); max-width: 100%;
 }
 
 footer {
@@ -174,7 +175,8 @@ footer a { color: var(--muted); }
 
 /* ---- report page ---- */
 .report-head { padding: 34px 0 6px; }
-.report-head h2 { margin: 0 0 4px; font-size: 26px; word-break: break-all; }
+.report-head h2 { margin: 0 0 4px; font-size: 26px; color: var(--text); overflow-wrap: anywhere; }
+@media (max-width: 640px) { .report-head h2 { font-size: 22px; } }
 .report-head .meta { color: var(--muted); font-size: 14px; }
 
 .badge {
@@ -249,6 +251,40 @@ table.issues tr:last-child td { border-bottom: none; }
    so the page needs no inline styles under its CSP. Dynamic chart
    dimensions are NOT here — they arrive in the page's nonced style
    block as generated ss-dyn-* rules. */
+/* ---- Issue #142a: shared modal system + .btn-small base ----
+   One modal treatment for every popup on the style.css pages.
+   .btn-small previously existed ONLY inside settings.html's own
+   <style> block, so on every other page (report, redemption-only,
+   compare/batch reports, signup) the class had no base rule and
+   modal buttons rendered as browser defaults — the founder's
+   2026-11-04 screenshot. The base rule below adopts the settings
+   definition verbatim. Modal values converge on the My Reports
+   .modal-card precedent (panel / border / 10px / 20px / 420px);
+   reports.html is self-styled by house pattern and carries the
+   same values in its own sheet. Overlay visibility stays with the
+   existing JS (inline display none/flex toggles), so .modal-overlay
+   deliberately sets no display property.
+   PLACEMENT (PR #194 remediation, 2026-11-18): this block sits BEFORE
+   the Issue #170 scoped blocks, never between them — the S3 test
+   slices S3->S2, the S2 test slices S2->S4, and the S4 test slices
+   S4->EOF, so an unscoped shared block between any two scoped
+   markers lands inside a neighbour's slice and fails its scope
+   guard (CI on 214935f: test_s2_css_block_is_analyze_scoped). */
+.btn-small { padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: #fff; cursor: pointer; font-size: 0.85rem; font-family: inherit; }
+.btn-small.btn-primary { background: var(--accent); color: #0a1830; border-color: transparent; font-weight: 700; }
+.btn-small.btn-ghost { background: transparent; color: var(--text); }
+a.btn-small { display: inline-block; text-decoration: none; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); align-items: center; justify-content: center; z-index: 50; }
+.modal-overlay-top { background: rgba(0,0,0,.7); z-index: 9999; padding: 1rem; }
+.modal-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; max-width: 420px; width: 90%; }
+.modal-card p { margin: 0 0 14px; }
+.modal-card input[type=text] { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.modal-title { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.75rem; }
+.modal-btn-block { display: block; width: 100%; padding: 0.65rem; border-radius: 8px; border: 1px solid transparent; font: inherit; font-weight: 700; cursor: pointer; }
+.btn-primary.modal-btn-block { border-color: transparent; }
+.btn-ghost.modal-btn-block { border-color: var(--border); }
+.modal-lead { font-size: 1.05rem; }
+
 /* ---- Issue #170 S1 (Report surface design alignment) ----
    Every rule in this block is scoped to the Report surface via the
    .s1- prefix (A7): style.css is shared by 20 templates, and no S1
@@ -466,3 +502,27 @@ section.s2-panel { background: var(--panel); border: 1px solid var(--border); bo
 .s4-section-aside { margin-left: auto; color: var(--muted); font-size: 12px; }
 .s4-group .btn-small:hover { border-color: var(--accent); }
 
+/* #142b: Branding profile port (Settings group 02) — .s4b- scoped. */
+.s4b-head { margin: 0 0 4px; }
+.s4b-field-row { display: grid; grid-template-columns: 200px 1fr; gap: 16px; align-items: start; padding: 15px 0; border-bottom: 1px solid var(--border); border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
+#branding-form .s4b-field-row:last-of-type { border-bottom: none; }
+.s4b-field-label { font-size: 11px; font-weight: 600; color: var(--text); padding-top: 9px; }
+.s4b-sub { display: block; font-size: 9px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+.s4b-text-input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px; font-size: 12px; color: var(--text); width: 100%; max-width: 380px; box-sizing: border-box; }
+.s4b-text-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(227, 167, 47, .22); }
+.s4b-swatch-row { display: flex; align-items: center; gap: 10px; }
+.s4b-swatch { width: 32px; height: 32px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }
+.s4b-swatch::-webkit-color-swatch-wrapper { padding: 2px; }
+.s4b-swatch::-webkit-color-swatch { border: none; border-radius: 4px; }
+.s4b-swatch::-moz-color-swatch { border: none; border-radius: 4px; }
+.s4b-hex { font-family: var(--font-code); max-width: 180px; }
+.s4b-field-error { color: #ff9d9d; font-size: 12px; margin: 6px 0 0; }
+.s4b-drop { display: block; border: 1.5px dashed var(--border); border-radius: 8px; padding: 18px; text-align: center; font-size: 10px; color: var(--muted); cursor: pointer; max-width: 380px; box-sizing: border-box; }
+.s4b-drop:hover, .s4b-drop-over { border-color: var(--accent); }
+.s4b-field-row:has(.s4b-file:focus-visible) .s4b-drop { outline: 3px solid var(--accent); outline-offset: 3px; border-color: var(--accent); }
+.s4b-file { position: absolute; opacity: 0; width: 1px; height: 1px; overflow: hidden; }
+.s4b-file-name { font-size: 12px; color: var(--text); margin: 6px 0 0; overflow-wrap: anywhere; }
+.s4b-remove { display: block; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.s4b-group-note { font-size: 10px; color: var(--muted); margin: 14px 0 0; }
+.s4b-save-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.s4b-save-row .btn-ghost { margin-left: auto; }

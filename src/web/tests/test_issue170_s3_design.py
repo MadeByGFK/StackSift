@@ -246,7 +246,10 @@ def _row_for(html, report_id):
     # <tr class="card s3-actions-tr"> that follows it — up to the
     # next report's main row (the same slicing the deep-dive row
     # helpers in other test files already used).
-    view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
+    # PREMISE CHANGED (issue #142, 2026-11-18): the Open control is
+    # removed — the card itself opens the report and the report
+    # name carries the row's link, so rows key on the name link.
+    view_link = f'class="s3-name-link" href="/reports/{report_id}"'
     rows = html.split('<tr class="card s3-row">')
     matches = [r for r in rows if view_link in r]
     assert len(matches) == 1, report_id
@@ -351,9 +354,12 @@ def test_s3_css_blocks_are_s3_scoped():
 def test_s3_normal_row_full_action_inventory():
     rid = "row-normal"
     row = _row_for(_render([_report(id=rid)]), rid)
-    # M1 (supersedes G1 on this surface): Open + ONE Export button
-    # whose dropdown panel holds the three export forms.
-    assert ">Open</a>" in row
+    # M1 (supersedes G1 on this surface): ONE Export button whose
+    # dropdown panel holds the three export forms. PREMISE CHANGED
+    # (issue #142, 2026-11-18): the Open control is removed — the
+    # report name link is the row's open path.
+    assert f'class="s3-name-link" href="/reports/{rid}"' in row
+    assert ">Open</a>" not in row
     assert ">View</a>" not in row
     assert f'action="/reports/{rid}/pdf"' in row
     assert f'action="/reports/{rid}/exports/csv"' in row
@@ -437,10 +443,12 @@ def test_s3_mobilefix_single_export_button_and_menu():
     outside += row[row.index('</div>\n        </div>'):] \
         if '</div>\n        </div>' in row else ""
     assert "Export PDF" not in outside and "s3-export-form" not in outside
-    # Uniform quiet styling everywhere on the row: Open + Export
-    # toggle + 3 export submits + Investigation Report + Share
-    # = 7 quiet controls (Phase C: no Extend submit), no btn-primary.
-    assert row.count("btn btn-ghost") == 7
+    # Uniform quiet styling everywhere on the row: Export toggle +
+    # 3 export submits + Investigation Report + Share = 6 quiet
+    # controls (Phase C: no Extend submit), no btn-primary.
+    # PREMISE CHANGED (issue #142, 2026-11-18): the Open control is
+    # removed (the card itself opens the report), 7 -> 6.
+    assert row.count("btn btn-ghost") == 6
     assert "btn-primary" not in row
     assert ">Extend</button>" not in row
     assert ">Free<" not in row and "Free</span>" not in row
@@ -539,8 +547,7 @@ def test_s3_rowunder_actions_row_structure():
     assert '<tr class="card s3-actions-tr" data-s3-line="3">' in row
     assert '<td class="s3-actions-cell" colspan="4">' in row
     actions = row[row.index('<tr class="card s3-actions-tr"'):]
-    order = [actions.index(">Open</a>"),
-             actions.index("data-s3-export-btn"),
+    order = [actions.index("data-s3-export-btn"),
              actions.index(">Investigation Report</button>"),
              actions.index(">Share</button>")]
     assert order == sorted(order), order
@@ -710,8 +717,11 @@ def test_s3_comparison_and_batch_rows_omit_csv_json():
 
 def test_s3_deep_dive_row_action_gates():
     """A4 absence gate: deep_dive rows keep Open + direct Exports
-    (all formats) but have NO Share and NO Extend (both routes 404
-    for them) and carry the 'Investigation Report' kind title.
+    (all formats) and NO Extend (the retention route still rejects
+    them), and carry the 'Investigation Report' kind title.
+    PREMISE CHANGED (#145, 2026-11-19): deep_dive rows DO have Share
+    now — the share-only ruling admits them on the #135 model; the
+    original no-Share gate is reversed below.
     G4: the date cell is the two-line date/time with no
     Analyzed/Created prefix (the #144 prefix is superseded by the
     founder fidelity ruling 2026-11-10; the kind title is what
@@ -728,7 +738,7 @@ def test_s3_deep_dive_row_action_gates():
     assert 'action="/reports/row-deep/pdf"' in row
     assert 'action="/reports/row-deep/exports/csv"' in row
     assert ">Export PDF</button>" in row
-    assert "share-open" not in row and ">Share</button>" not in row
+    assert "share-open" in row and ">Share</button>" in row  # #145
     assert "Extend" not in row and "/retention" not in row
     assert "analysis-open" not in row
 

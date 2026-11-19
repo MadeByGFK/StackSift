@@ -236,7 +236,10 @@ def test_my_reports_row_keeps_full_actions_and_deep_dive_suppression(auth_env):
     def _card_for(report_id):
         # PREMISE CHANGED (2026-11-10 fidelity ruling, S3-G1):
         # the row's first control is labelled "Open", not "View".
-        view_link = f'href="/reports/{report_id}" class="btn btn-ghost">Open'
+        # PREMISE CHANGED (issue #142, 2026-11-18): the Open control is
+        # removed — the card itself opens the report and the report
+        # name carries the row's link, so rows key on the name link.
+        view_link = f'class="s3-name-link" href="/reports/{report_id}"'
         matches = [c for c in cards if view_link in c]
         assert len(matches) == 1, report_id
         return matches[0]
@@ -265,10 +268,13 @@ def test_my_reports_row_keeps_full_actions_and_deep_dive_suppression(auth_env):
     assert "share-open" in normal and ">Share</button>" in normal
     assert f"/reports/{rid}/retention" not in normal
     assert ">Extend</button>" not in normal
-    # PR #139 remediation F2 + Extend guard: deep_dive rows keep
-    # neither Share nor Extend (both routes 404 for those rows).
+    # PR #139 remediation F2 + Extend guard — PREMISE CHANGED
+    # (#145, 2026-11-19): deep_dive rows now DO offer Share (the
+    # share-only ruling admits them server-side, so the button is
+    # live, not dead); Extend stays suppressed (no extension
+    # product; the retention route still rejects deep_dive).
     deep = _card_for(str(analysis_id))
-    assert "share-open" not in deep and ">Share</button>" not in deep
+    assert "share-open" in deep and ">Share</button>" in deep
     assert "Extend" not in deep
     assert f"/reports/{analysis_id}/retention" not in deep
 

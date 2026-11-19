@@ -298,12 +298,17 @@ def test_branding_post_owner_sets_row_and_web_view(auth_env):
     # The report page carries NO branding form any more (cleanup).
     assert "branding-panel" not in page.text
     assert 'action="/settings/branding"' not in page.text
-    # Explainer copy (A3) now lives with the form, on Settings:
-    # applies to every PDF generated after it is set.
+    # Explainer copy (A3) lived with the form on Settings.
+    # PREMISE CHANGED (#142b, 2026-11-18): the design port removes the
+    # intro paragraph (the prototype has none) — the branding form
+    # itself, with the in-panel numbered heading, is the Settings
+    # surface now.
     settings = auth_env.client.get("/settings")
     assert settings.status_code == 200
     assert "Branding applies to every PDF generated after it is set" \
-        in settings.text
+        not in settings.text
+    assert 'id="branding-profile"' in settings.text
+    assert 'action="/settings/branding"' in settings.text
 
 
 def test_branding_pdf_admitted_and_unlocked_paths_and_footer(auth_env):
@@ -793,9 +798,15 @@ def test_a3_no_branding_ever_keeps_stored_replay(auth_env):
         _normalized_body(first.content, [])
 
 
-# --- A4: deep-dive sharing stays unsupported -------------------------------------------
+# --- A4: deep-dive sharing (premise changed by #145) ----------------------------------
 
 def test_a4_deep_dive_share_still_unsupported_branded_or_not(auth_env):
+    # PREMISE CHANGED (#145, 2026-11-19): deep-dive sharing is now
+    # SUPPORTED on the #135 model, branded or not — creation succeeds
+    # in both branding states (the second create is the idempotent
+    # already_shared replay for the same format). The A4 spine —
+    # branding state must not change share behaviour — is retained.
+    # Test name kept for history.
     _email, _uid, _rid, dd_id, csrf = _make_deep_dive(auth_env)
     for branded in (False, True):
         if branded:
@@ -805,17 +816,13 @@ def test_a4_deep_dive_share_still_unsupported_branded_or_not(auth_env):
             f"/reports/{dd_id}/share",
             data={"csrf_token": csrf,
                   "idempotency_key": f"a4-{branded}", "format": "pdf"})
-        # Exactly the base-tree behaviour: the share owner gate only
-        # resolves analysis-type reports, so a deep_dive id is a 404
-        # here and shared serving stays unavailable (A4's negative
-        # case); no link row is created.
-        assert r.status_code == 404, r.text[:200]
+        assert r.status_code == 200, r.text[:200]
     from app import models
     db = auth_env.sessions()
     try:
         assert db.query(models.ReportSharing).filter(
             models.ReportSharing.result_id == uuid.UUID(str(dd_id))
-        ).count() == 0
+        ).count() == 1
     finally:
         db.close()
 
