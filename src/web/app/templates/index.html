@@ -151,6 +151,11 @@ document.addEventListener('DOMContentLoaded', function() {
     temporary file for analysis. Temporary files are cleaned up during normal
     request processing; abrupt process termination can interrupt cleanup.
     Redaction may miss sensitive data. Review your log before uploading.</p>
+    <p>Analysis reports are <strong>stored for 7 days</strong> and then expire.
+    We keep no upload archive and don't use uploads for training. File contents
+    are not logged or retained after processing; operational request logs are
+    recorded. No account is needed for analysis — optional accounts use a
+    <strong>session cookie</strong> to stay signed in.</p>
   </div>
   <div class="info-grid s2-panels">
     <div class="card s2-panel">
@@ -159,15 +164,6 @@ document.addEventListener('DOMContentLoaded', function() {
       <pre class="format">2026-10-10 09:15:22 ERROR Database connection failed</pre>
       <p style="margin-top:10px">…plus <strong>JSON-lines</strong>, auto-detected and converted:</p>
       <pre class="format">{"timestamp":"2026-10-10T09:15:22Z","level":"error","message":"..."}</pre>
-    </div>
-    <div class="card s2-panel">
-      <h3>Private by design</h3>
-      <ul>
-        <li>Uploads use <strong>temporary storage</strong> during processing.</li>
-        <li>Recognized secret patterns are <strong>redacted</strong> before analysis; other sensitive data may appear in reports.</li>
-        <li>Analysis reports are <strong>stored for 7 days</strong> and then expire. We keep no upload archive and don't use uploads for training. Operational request logs are recorded.</li>
-        <li>No account needed for analysis — optional accounts use a <strong>session cookie</strong> to stay signed in. File contents are not logged or retained after processing.</li>
-      </ul>
     </div>
     <div class="card s2-panel">
       <h3>What you get</h3>
