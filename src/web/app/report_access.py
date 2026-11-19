@@ -74,6 +74,20 @@ def is_single_file_payload(payload) -> bool:
     return kind is None or kind in ("single", "analysis")
 
 
+def is_deep_dive_payload(payload) -> bool:
+    return isinstance(payload, dict) and payload.get("report_kind") == "deep_dive"
+
+
+def is_shareable_payload(payload) -> bool:
+    """Issue #145: the share surface admits single-file payloads AND
+    deep_dive (Investigation Report) payloads — the same accepted set
+    structured_export.check_report_kind serves, since a share link
+    serves its format through those very generators (the deep-dive
+    public projection only). Compare/batch/unknown kinds fail closed.
+    """
+    return is_single_file_payload(payload) or is_deep_dive_payload(payload)
+
+
 def lookup_shared(db, raw_token: str):
     """Resolve a raw share token to (sharing, result, payload) or None.
 
@@ -95,7 +109,8 @@ def lookup_shared(db, raw_token: str):
     result = db.get(models.Result, sharing.result_id)
     if result is None:
         return None
-    if result.user_id != sharing.owner_user_id or result.type != "analysis":
+    if result.user_id != sharing.owner_user_id or result.type not in (
+            "analysis", "deep_dive"):
         return None
     if result.deleted_at is not None:
         return None
@@ -107,7 +122,7 @@ def lookup_shared(db, raw_token: str):
         )
     except credits.AdmissionError:
         return None
-    if not is_single_file_payload(payload):
+    if not is_shareable_payload(payload):
         return None
     return sharing, result, payload
 

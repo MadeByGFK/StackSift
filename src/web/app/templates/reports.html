@@ -298,7 +298,7 @@
           {% if report.redemption_only %}<span class="redemption-only-label">Redemption only — this report has expired; your Investigation Report entitlement can still be redeemed.</span> {% endif %}
           <span data-retention-expiry-date>Expires {{ report.expires_at.strftime('%Y-%m-%d') }}</span>
           <span class="expiry{% if report.days_left <= 1 %} soon{% endif %}" data-retention-expiry-pill>Expires in {{ report.days_left }} {% if report.days_left == 1 %}day{% else %}days{% endif %}</span>
-          {% if report.share_active and report.type != 'deep_dive' and not report.redemption_only %}
+          {% if report.share_active and not report.redemption_only %}
           <span class="s3-share-state">Link sharing on — anyone with the link can view <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Turn off</button></span>
           {% endif %}
       </td>
@@ -352,13 +352,14 @@
           <button type="button" class="btn btn-ghost analysis-open" data-report="{{ report.id }}" data-eligible="{{ '1' if report.analysis_eligible else '' }}" data-entitlement="{{ '1' if report.entitlement_available else '' }}" data-reason="{{ report.analysis_reason or '' }}" data-deadline="{{ report.redemption_deadline or '' }}">Investigation Report</button>
           {% endif %}
         {% endif %}
-        {# Issue #106 Stage 2 / PR #139 F2: no Share for Analysis
-           Report rows — sharing is defined for source reports only
-           and _share_owner_gate admits only analysis/comparison, so
-           a Share button on a deep_dive row always 404s (dead
-           button). Mirrors the Extend suppression below; the
-           server-side 404 rejection is retained. #}
-        {% if report.type != 'deep_dive' and not report.redemption_only %}
+        {# Issue #145 (founder ruling 2026-11-17, share-only):
+           Investigation Report rows DO offer Share — the server
+           admits deep_dive on the #135 model (links free, all
+           formats included with the purchase). This reverses the
+           PR #139 F2 suppression, which existed only because the
+           server rejected deep_dive share actions. The Extend
+           suppression below is unchanged (no extension product). #}
+        {% if not report.redemption_only %}
         <button type="button" class="btn btn-ghost share-open" data-report="{{ report.id }}" data-create-key="{{ report.share_create_key }}" data-rotate-key="{{ report.share_rotate_key }}" data-revoke-key="{{ report.share_revoke_key }}" data-active="{{ '1' if report.share_active else '' }}" data-formats="{{ report.share_formats|join(',') if report.share_formats else '' }}" data-unlocked="{{ '1' if report.export_unlocked else '' }}">Share</button>
         {% endif %}
         {# Issue #106 Stage 2: no Extend for Investigation Report rows —

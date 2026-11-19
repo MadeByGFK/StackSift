@@ -536,14 +536,21 @@ def test_share_times_analysis_share_stays_free_and_separate(auth_env):
     # PREMISE CHANGED (#164): generation is the $9 entitlement —
     # the credit balance is untouched by it.
     assert _balance(auth_env, user_id) == before
-    # The Analysis Report itself is not shareable through the
-    # single-file share path (fails closed, still no charge).
+    # PREMISE CHANGED (#145, 2026-11-19): the Analysis Report IS
+    # shareable now (share-only ruling) — still free, and its link
+    # stays SEPARATE from the source report's link (one row each,
+    # keyed to its own result).
     analysis_id = gen.json()["analysis_result_id"]
     share2 = auth_env.client.post(
         f"/reports/{analysis_id}/share",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
-    assert share2.status_code in (404, 422)
+    assert share2.status_code == 200, share2.text[:300]
     assert _balance(auth_env, user_id) == before
+    from app import models as _M
+    with auth_env.sessions() as db:
+        rows = db.query(_M.ReportSharing).all()
+    assert sorted(str(r.result_id) for r in rows) == sorted(
+        [str(rid), str(analysis_id)])
 
 
 def test_retention_times_analysis_source_extension_leaves_artifact(auth_env):

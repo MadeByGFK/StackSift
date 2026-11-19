@@ -717,8 +717,11 @@ def test_s3_comparison_and_batch_rows_omit_csv_json():
 
 def test_s3_deep_dive_row_action_gates():
     """A4 absence gate: deep_dive rows keep Open + direct Exports
-    (all formats) but have NO Share and NO Extend (both routes 404
-    for them) and carry the 'Investigation Report' kind title.
+    (all formats) and NO Extend (the retention route still rejects
+    them), and carry the 'Investigation Report' kind title.
+    PREMISE CHANGED (#145, 2026-11-19): deep_dive rows DO have Share
+    now — the share-only ruling admits them on the #135 model; the
+    original no-Share gate is reversed below.
     G4: the date cell is the two-line date/time with no
     Analyzed/Created prefix (the #144 prefix is superseded by the
     founder fidelity ruling 2026-11-10; the kind title is what
@@ -735,7 +738,7 @@ def test_s3_deep_dive_row_action_gates():
     assert 'action="/reports/row-deep/pdf"' in row
     assert 'action="/reports/row-deep/exports/csv"' in row
     assert ">Export PDF</button>" in row
-    assert "share-open" not in row and ">Share</button>" not in row
+    assert "share-open" in row and ">Share</button>" in row  # #145
     assert "Extend" not in row and "/retention" not in row
     assert "analysis-open" not in row
 
