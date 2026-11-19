@@ -27,6 +27,12 @@
 .s4-field-row:last-child { border-bottom: none; }
 .s4-field-label { width: 90px; flex: none; color: #a0aec0; font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
 .s4-field-value { color: #fff; font-size: 0.95rem; }
+/* #142b: branding rows stack on phones (kept page-local: the shared
+   S4 CSS tail is selector-guarded and cannot carry an @media block). */
+@media (max-width: 640px) {
+  .s4b-field-row { grid-template-columns: 1fr; gap: 8px; }
+  .s4b-field-label { padding-top: 0; }
+}
 </style>
 </head>
 <body>
@@ -118,31 +124,61 @@
     </div>
     </section>
     <section class="s4-group" data-s4-group="branding" data-s4-num="02">
-      <div class="s4-section-head">
+    <div class="settings-card" id="branding-profile">
+      {# #142b: heading inside the panel per the design; the duplicated
+         in-card <h2> and intro paragraph are gone. #}
+      <div class="s4-section-head s4b-head">
         <span class="s4-section-num" aria-hidden="true">02</span>
         <span class="s4-section-label">Branding profile</span>
         <span class="s4-section-aside">Included with every paid report</span>
       </div>
-    <div class="settings-card" id="branding-profile">
-      <h2>Branding profile</h2>
-      <p>Add your business branding to your reports. Branding applies to every PDF generated after it is set.</p>
-      <form method="post" enctype="multipart/form-data" action="/settings/branding" data-auth-form data-success-url="/settings" style="margin:0 0 8px">
+      <form id="branding-form" method="post" enctype="multipart/form-data" action="/settings/branding" data-auth-form data-success-url="/settings" style="margin:0">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <p role="status" style="margin:0 0 6px"></p>
-        <label style="display:block;margin:0 0 8px">Business name <input type="text" name="business_name" maxlength="80" value="{{ branding_values.business_name if branding_values else '' }}"></label>
-        <label style="display:block;margin:0 0 8px">Report title <input type="text" name="report_title" maxlength="120" value="{{ branding_values.report_title if branding_values else '' }}"></label>
-        <label style="display:block;margin:0 0 8px">Client name <span style="color:#a0aec0">Optional</span> <input type="text" name="client_name" maxlength="80" value="{{ branding_values.client_name if branding_values else '' }}"></label>
-        <label style="display:block;margin:0 0 8px">Accent color <input type="text" name="accent" placeholder="#1a2b3c" value="{{ branding_values.accent if branding_values else '' }}"></label>
-        <label style="display:block;margin:0 0 8px">Logo (PNG or JPEG, at most 512 KB) <input type="file" name="logo" accept="image/png,image/jpeg"></label>
-        {% if branding_values and branding_values.has_logo %}<label style="display:block;margin:0 0 8px"><input type="checkbox" name="remove_logo" value="1"> Remove logo</label>{% endif %}
-        <button type="submit" class="btn-small">Save branding</button>
+        <div class="s4b-field-row">
+          <label class="s4b-field-label" for="branding-business-name">Business name</label>
+          <input class="s4b-text-input" id="branding-business-name" type="text" name="business_name" maxlength="80" value="{{ branding_values.business_name if branding_values else '' }}">
+        </div>
+        <div class="s4b-field-row">
+          <label class="s4b-field-label" for="branding-report-title">Report title</label>
+          <input class="s4b-text-input" id="branding-report-title" type="text" name="report_title" maxlength="120" value="{{ branding_values.report_title if branding_values else '' }}">
+        </div>
+        <div class="s4b-field-row">
+          <label class="s4b-field-label" for="branding-client-name">Client name <span class="s4b-sub">Optional</span></label>
+          <input class="s4b-text-input" id="branding-client-name" type="text" name="client_name" maxlength="80" value="{{ branding_values.client_name if branding_values else '' }}">
+        </div>
+        <div class="s4b-field-row">
+          <label class="s4b-field-label" for="branding-accent-hex">Accent color</label>
+          <div>
+            <div class="s4b-swatch-row">
+              <input class="s4b-swatch" id="branding-accent-swatch" type="color" value="#e3a72f" aria-label="Pick accent color">
+              <input class="s4b-text-input s4b-hex" id="branding-accent-hex" type="text" name="accent" placeholder="#1a2b3c" autocomplete="off" spellcheck="false" value="{{ branding_values.accent if branding_values else '' }}">
+            </div>
+            <p class="s4b-field-error" id="branding-accent-error" role="alert" hidden>Accent color must be a hex color like #1a2b3c.</p>
+          </div>
+        </div>
+        <div class="s4b-field-row">
+          <span class="s4b-field-label" id="branding-logo-label">Logo</span>
+          <div>
+            <label class="s4b-drop" id="branding-drop" for="branding-logo-input">Drop a PNG or JPEG here, or browse — replaces the default mark on the report cover</label>
+            <input class="s4b-file" id="branding-logo-input" type="file" name="logo" accept="image/png,image/jpeg" aria-labelledby="branding-logo-label">
+            <p class="s4b-file-name" id="branding-file-name" hidden></p>
+            {% if branding_values and branding_values.has_logo %}<label class="s4b-remove"><input type="checkbox" name="remove_logo" value="1"> Remove logo</label>{% endif %}
+          </div>
+        </div>
+        <p class="s4b-group-note">The “Prepared with stacksift.” attribution always remains on paid reports.</p>
       </form>
-      <form method="post" action="/settings/branding/clear" data-auth-form data-success-url="/settings" style="margin:0">
+      <form id="branding-clear-form" method="post" action="/settings/branding/clear" data-auth-form data-success-url="/settings" style="margin:0">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <p role="status" style="margin:0 0 6px"></p>
-        <button type="submit" class="btn-small">Clear branding</button>
+        <p role="status" style="margin:0"></p>
       </form>
-      <p style="margin-top:14px">The “Prepared with stacksift.” attribution always remains on paid reports.</p>
+      {# Buttons associate by form= so Save and Clear share one row
+         while each submits its own form (the auth-form flow fetches
+         form.action, so a formaction override would misroute). #}
+      <div class="s4b-save-row">
+        <button type="submit" form="branding-form" class="btn-small btn-primary">Save branding</button>
+        <button type="submit" form="branding-clear-form" class="btn-small btn-ghost">Clear branding</button>
+      </div>
     </div>
     </section>
     <section class="s4-group" data-s4-group="purchases" data-s4-num="03">
@@ -235,6 +271,73 @@ document.querySelectorAll('.share-access-revoke').forEach(function (btn) {
     else alert("Failed to revoke share link.");
   });
 });
+/* #142b: Branding port interactions — accent swatch/hex sync with
+   submit-time validation (mirrors the server's exact #rrggbb-or-empty
+   contract), and the logo drop zone wired to the real file input. */
+(function () {
+  var form = document.getElementById('branding-form');
+  if (!form) return;
+  var hex = document.getElementById('branding-accent-hex');
+  var swatch = document.getElementById('branding-accent-swatch');
+  var error = document.getElementById('branding-accent-error');
+  var HEX_RE = /^#[0-9a-fA-F]{6}$/;
+  if (hex && swatch) {
+    if (HEX_RE.test(hex.value.trim())) swatch.value = hex.value.trim();
+    swatch.addEventListener('input', function () {
+      hex.value = swatch.value;
+      if (error) error.hidden = true;
+    });
+    hex.addEventListener('input', function () {
+      var v = hex.value.trim();
+      if (HEX_RE.test(v)) { swatch.value = v; if (error) error.hidden = true; }
+    });
+    /* Registered before the shared auth-form handler (this script
+       precedes its include), so an invalid accent stops the submit
+       before anything is sent. */
+    form.addEventListener('submit', function (ev) {
+      var v = hex.value.trim();
+      if (v && !HEX_RE.test(v)) {
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        if (error) error.hidden = false;
+        hex.focus();
+      }
+    });
+  }
+  var drop = document.getElementById('branding-drop');
+  var fileInput = document.getElementById('branding-logo-input');
+  var fileName = document.getElementById('branding-file-name');
+  function showFile() {
+    if (fileInput.files && fileInput.files.length) {
+      fileName.textContent = fileInput.files[0].name;
+      fileName.hidden = false;
+    }
+  }
+  if (drop && fileInput) {
+    fileInput.addEventListener('change', showFile);
+    ['dragover', 'dragenter'].forEach(function (name) {
+      drop.addEventListener(name, function (ev) {
+        ev.preventDefault();
+        drop.classList.add('s4b-drop-over');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (name) {
+      drop.addEventListener(name, function (ev) {
+        ev.preventDefault();
+        drop.classList.remove('s4b-drop-over');
+      });
+    });
+    drop.addEventListener('drop', function (ev) {
+      var files = ev.dataTransfer && ev.dataTransfer.files;
+      if (files && files.length) {
+        var dt = new DataTransfer();
+        dt.items.add(files[0]);
+        fileInput.files = dt.files;
+        showFile();
+      }
+    });
+  }
+})();
 async function revokeAll() {
   if (!confirm("Log out all other devices?")) return;
   let resp;
