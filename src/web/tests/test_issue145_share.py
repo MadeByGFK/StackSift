@@ -12,6 +12,7 @@ file against the pre-change tree.
 """
 
 import json
+import re
 from datetime import timedelta
 
 import pytest
@@ -161,6 +162,22 @@ def test_link_serves_only_its_own_format(paid_env):
     assert resp.status_code == 404, resp.text[:200]
 
 
+def _pdf_stable_bytes(content: bytes) -> bytes:
+    """fpdf2 stamps every generated PDF with the wall-clock second
+    (/CreationDate) and a time-derived trailer /ID, so two generations
+    of the SAME document differ in those bytes whenever a second
+    boundary falls between them. Normalize both fields out so PDF
+    comparisons assert document identity, not generation timing.
+    (Root cause of the intermittent CI failures on this test —
+    2026-11-19: 3 of 4 GitHub runs failed on a one-byte date-digit
+    diff while local runs passed inside the same second.)"""
+    content = re.sub(rb"/CreationDate \(D:\d{14}Z\)",
+                     b"/CreationDate (D:00000000000000Z)", content)
+    content = re.sub(rb"/ID \[<[0-9A-F]{32}><[0-9A-F]{32}>\]",
+                     b"/ID [<normalized>]", content)
+    return content
+
+
 def test_pdf_share_follows_branding_replay_policy(paid_env):
     """Codex P2 on PR #197: a branding row defeats stored-PDF replay
     on the owner's route — the share must follow the same policy, or
@@ -172,14 +189,18 @@ def test_pdf_share_follows_branding_replay_policy(paid_env):
     token = _token_from(_create(env, dd, csrf, "145-brand", "pdf"))
     first = _serve(token)
     assert first.status_code == 200, first.text[:200]
-    assert first.content == own.content  # stored replay (no branding row)
+    # Same document as the owner's PDF (stored replay, no branding
+    # row) — compared on stable bytes; see _pdf_stable_bytes.
+    assert _pdf_stable_bytes(first.content) == _pdf_stable_bytes(own.content)
     r = env.client.post("/settings/branding", data={
         "csrf_token": csrf, "business_name": "Acme Consulting",
         "report_title": "", "client_name": "", "accent": ""})
     assert r.status_code in (200, 303), r.text[:300]
     second = _serve(token)
     assert second.status_code == 200, second.text[:200]
-    assert second.content != first.content
+    # Stable-byte inequality: the branded document must differ in
+    # CONTENT, not merely in generation timestamp.
+    assert _pdf_stable_bytes(second.content) != _pdf_stable_bytes(first.content)
     from test_issue162_brief import _pdf_text
     assert "Acme Consulting" in _pdf_text(second.content)
 
