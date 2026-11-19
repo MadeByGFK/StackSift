@@ -156,6 +156,11 @@ def _card_for(page_text, report_id):
 
 
 def test_f2_deep_dive_row_has_no_share_button_but_normal_row_does(auth_env):
+    # PREMISE CHANGED (#145, 2026-11-19): the F2 suppression existed
+    # only because the server rejected deep_dive share actions (dead
+    # button). The founder's #145 share-only ruling admits deep_dive
+    # on the #135 model, so the row now offers a WORKING Share button
+    # and creation succeeds. Test name kept for history.
     _, user_id, rid, csrf = _setup(auth_env)
     gen = _generate(auth_env, rid, csrf)
     assert gen.status_code == 200, gen.text[:300]
@@ -165,14 +170,12 @@ def test_f2_deep_dive_row_has_no_share_button_but_normal_row_does(auth_env):
     normal_card = _card_for(page.text, str(rid))
     assert "share-open" in normal_card and "Share" in normal_card
     deep_dive_card = _card_for(page.text, analysis_id)
-    assert "share-open" not in deep_dive_card
-    assert "Share" not in deep_dive_card
-    # Retained server-side rejection: creating a share link for an
-    # Analysis Report still fails closed (404 via the owner gate).
+    assert "share-open" in deep_dive_card
+    assert "Share" in deep_dive_card
     share = auth_env.client.post(
         f"/reports/{analysis_id}/share",
         data={"csrf_token": csrf, "idempotency_key": uuid.uuid4().hex})
-    assert share.status_code == 404, share.text[:300]
+    assert share.status_code == 200, share.text[:300]
 
 
 def _completed_derived_id(auth_env, user_id, source_id):
