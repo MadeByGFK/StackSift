@@ -221,6 +221,57 @@ def test_142b_drop_zone_sets_file(auth_env, tmp_path, monkeypatch):
             browser.close()
 
 
+def test_142b_long_filename_wraps_and_drop_zone_shows_keyboard_focus(
+        auth_env, tmp_path, monkeypatch):
+    """Codex P2 regression (PR #196): a long spaceless logo filename
+    wraps inside the branding panel at 360px, and tabbing to the
+    hidden file input shows a visible outline on the drop zone."""
+    from playwright.sync_api import sync_playwright
+    long_name = "a" * 72 + ".png"
+    with _serve(auth_env, tmp_path, monkeypatch) as base:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            context = _context(browser, base, MOBILE)
+            page = context.new_page()
+            page.set_default_timeout(15000)
+            _login(page, base, auth_env, email="b142codex@example.com")
+            _open_settings(page, base)
+            page.set_input_files("#branding-logo-input", {
+                "name": long_name, "mimeType": "image/png",
+                "buffer": PNG_1PX})
+            assert page.locator("#branding-file-name").inner_text() == long_name
+            geo = page.evaluate(
+                """() => {
+                  const panel = document.querySelector('#branding-profile');
+                  const pr = panel.getBoundingClientRect();
+                  const wide = [];
+                  panel.querySelectorAll('*').forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.right > pr.right + 1) wide.push(
+                      el.tagName + '.' + el.className);
+                  });
+                  return { wide: wide.slice(0, 6) };
+                }""")
+            assert geo["wide"] == [], geo["wide"]
+            # Keyboard-tab until the hidden file input holds focus,
+            # then the drop zone must carry the visible outline.
+            focused = False
+            for _ in range(60):
+                page.keyboard.press("Tab")
+                page.wait_for_timeout(30)
+                if page.evaluate(
+                        "document.activeElement.id") == "branding-logo-input":
+                    focused = True
+                    break
+            assert focused, "file input never received keyboard focus"
+            outline = page.evaluate(
+                """() => { const s = getComputedStyle(
+                     document.querySelector('#branding-drop'));
+                   return s.outlineStyle + ' ' + s.outlineWidth; }""")
+            assert outline == "solid 3px", outline
+            browser.close()
+
+
 def test_142b_layout_desktop_and_mobile(auth_env, tmp_path, monkeypatch):
     from playwright.sync_api import sync_playwright
     with _serve(auth_env, tmp_path, monkeypatch) as base:

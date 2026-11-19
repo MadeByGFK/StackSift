@@ -89,6 +89,19 @@ def test_s4b_css_present_and_scoped():
     assert ".s4b-field-row { grid-template-columns: 1fr; gap: 8px; }" in SETTINGS
 
 
+def test_codex_r1_drop_zone_focus_and_filename_wrap():
+    # Codex P2 (PR #196, head e145bca): the visually-hidden file input
+    # must surface its keyboard focus on the visible drop zone (the
+    # .s6-dropzone pattern), and a long spaceless filename must be
+    # able to break so it cannot widen the field row.
+    focus = re.search(
+        r":has\(\.s4b-file:focus-visible\) \.s4b-drop \{([^}]*)\}", CSS)
+    assert focus, "no :focus-visible rule targets the drop zone"
+    assert "outline: 3px solid var(--accent)" in focus.group(1)
+    name = re.search(r"\.s4b-file-name \{([^}]*)\}", CSS)
+    assert name and "overflow-wrap: anywhere" in name.group(1)
+
+
 def test_branding_js_wired():
     for hook in ("branding-accent-swatch", "branding-accent-hex",
                  "branding-drop", "branding-logo-input",

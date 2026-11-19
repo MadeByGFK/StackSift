@@ -519,8 +519,9 @@ section.s2-panel { background: var(--panel); border: 1px solid var(--border); bo
 .s4b-field-error { color: #ff9d9d; font-size: 12px; margin: 6px 0 0; }
 .s4b-drop { display: block; border: 1.5px dashed var(--border); border-radius: 8px; padding: 18px; text-align: center; font-size: 10px; color: var(--muted); cursor: pointer; max-width: 380px; box-sizing: border-box; }
 .s4b-drop:hover, .s4b-drop-over { border-color: var(--accent); }
+.s4b-field-row:has(.s4b-file:focus-visible) .s4b-drop { outline: 3px solid var(--accent); outline-offset: 3px; border-color: var(--accent); }
 .s4b-file { position: absolute; opacity: 0; width: 1px; height: 1px; overflow: hidden; }
-.s4b-file-name { font-size: 12px; color: var(--text); margin: 6px 0 0; }
+.s4b-file-name { font-size: 12px; color: var(--text); margin: 6px 0 0; overflow-wrap: anywhere; }
 .s4b-remove { display: block; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .s4b-group-note { font-size: 10px; color: var(--muted); margin: 14px 0 0; }
 .s4b-save-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
